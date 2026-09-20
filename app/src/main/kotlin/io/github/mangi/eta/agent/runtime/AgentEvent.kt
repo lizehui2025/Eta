@@ -212,6 +212,26 @@ internal sealed interface AgentEvent {
             "run_finished round=$round, content_chars=$contentChars"
     }
 
+    data class SubagentsStarted(
+        val round: Int,
+        val toolCallId: String,
+        val count: Int,
+        val labels: List<String> = emptyList(),
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "subagents_started round=$round, count=$count"
+    }
+
+    data class SubagentsFinished(
+        val round: Int,
+        val toolCallId: String,
+        val total: Int,
+        val succeeded: Int,
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "subagents_finished round=$round, total=$total, succeeded=$succeeded"
+    }
+
     data class RunFailed(
         val reason: String
     ) : AgentEvent {

@@ -160,6 +160,27 @@ internal object AgentModelClient {
             )
         )
         var promptRootAvailable = initialCapabilities.rootAvailable
+        val subagentExecutor: AgentSubagentExecutor? = if (rewriteReply || compactOnly) {
+            null
+        } else {
+            runCatching {
+                val sysSnapshot = AgentPromptBuilder.buildSystemMessages(
+                    config, skillContext, memoryContext, initialCapabilities.rootAvailable, roleplayContext,
+                )
+                AgentSubagentExecutor(
+                    config = config,
+                    provider = provider,
+                    parentRunController = runController,
+                    parentOperationId = operationId,
+                    parentTools = JSONArray(tools.toString()),
+                    systemMessages = JSONArray(sysSnapshot.toString()),
+                    baseToolExecutor = toolExecutor,
+                    traceFormatter = traceFormatter,
+                    onEvent = onEvent,
+                    depth = 0,
+                )
+            }.getOrNull()
+        }
         val loop = AgentLoop(
             transcript = transcript,
             systemCount = systemCount,
@@ -178,6 +199,11 @@ internal object AgentModelClient {
             purpose = if (rewriteReply) ProviderRequestPurpose.REPLY_REWRITE else ProviderRequestPurpose.CHAT,
             roleplayContext = roleplayContext,
             initialSupplementIndex = initialSupplementIndex,
+            subagentHandler = subagentExecutor?.let { exec ->
+                { round: Int, call: ToolCall ->
+                    if (call.name == AgentSubagentPolicy.TOOL_NAME) exec.fanout(round, call) else null
+                }
+            },
             toolsForRound = {
                 val capabilities = capabilitiesProvider()
                 if (capabilities.rootAvailable != promptRootAvailable) {

@@ -36,7 +36,7 @@ internal object AgentToolRequirements {
             "get_current_location", "get_device_environment", "memory_get", "memory_write",
             "character_memory_get", "character_memory_write",
             "skills_list", "skills_read", "skills_read_resource", "skills_list_curated",
-            "skills_inspect_github", "skills_install_from_github",
+            "skills_inspect_github", "skills_install_from_github", "spawn_agents",
         )
         register(
             RootRequirement.PARTIAL,

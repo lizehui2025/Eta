@@ -53,7 +53,13 @@ android {
             isPseudoLocalesEnabled = true
         }
         release {
-            signingConfig = signingConfigs.findByName("release")
+            // 无发布证书时回退到 debug 签名，保证 release APK 可安装（仅用于分支验证；
+            // 正式发布仍由 CI Secrets 提供 ETA_RELEASE_* 使用正式证书）。
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

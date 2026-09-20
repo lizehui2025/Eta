@@ -34,6 +34,7 @@ internal class AgentLoop(
     private val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
     private val roleplayContext: RoleplayRunContext? = null,
     initialSupplementIndex: Int = 0,
+    private val subagentHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
 ) {
     data class Result(
         val content: String,
@@ -256,6 +257,25 @@ internal class AgentLoop(
         toolCall: AgentModelClient.ToolCall,
     ): ToolOutcome {
         runController.throwIfCancelled()
+        if (toolCall.name == AgentSubagentPolicy.TOOL_NAME && subagentHandler != null) {
+            onEvent(
+                AgentEvent.ToolStarted(
+                    round = round,
+                    toolCallId = toolCall.id,
+                    name = toolCall.name,
+                    argsPreview = traceFormatter.summarizeArguments(toolCall),
+                    command = traceFormatter.displayCommand(toolCall),
+                ),
+            )
+            val subResult = subagentHandler.invoke(round, toolCall)
+            if (subResult != null) {
+                if (subResult.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
+                    sensitiveToolCallIds += toolCall.id
+                }
+                emitToolFinished(round, toolCall, subResult)
+                return ToolOutcome(toolCall, subResult)
+            }
+        }
         toolCallValidator.validate(toolCall)?.let { validationError ->
             return rejectedToolOutcome(
                 round = round,

@@ -40,6 +40,7 @@ internal class AgentTraceFormatter {
             "wait_for_package" -> "等待应用就绪"
             "open_system_panel" -> "打开系统面板"
             "read_image" -> "查看图片"
+            "spawn_agents" -> "并行派生子代理"
             AgentConversationToolCatalog.READ_HISTORY -> "读取当前会话历史"
             "memory_get", "character_memory_get" -> summarizeMemoryGetArguments(toolCall.argumentsJson)
             "memory_write", "character_memory_write" -> summarizeMemoryWriteArguments(toolCall.argumentsJson)
@@ -239,6 +240,7 @@ internal class AgentTraceFormatter {
         if (!isSuccessResult(result)) return summarizeFailure(json)
         return when (toolName) {
             BROWSER_TOOL_NAME -> json?.let(::summarizeBrowserResult) ?: "浏览器操作完成"
+            "spawn_agents" -> json?.let(::summarizeSubagentsResult) ?: "子代理完成"
             AgentConversationToolCatalog.READ_HISTORY -> "已读取历史分页"
             "memory_get", "memory_write", "character_memory_get", "character_memory_write" ->
                 json?.let { summarizeMemoryResult(toolName, it) } ?: "完成"
@@ -246,6 +248,13 @@ internal class AgentTraceFormatter {
             "launch_app" -> json?.let(::summarizeLaunchAppResult) ?: "已打开"
             else -> json?.let { summarizeGenericResult(it, result) } ?: "完成"
         }
+    }
+
+    private fun summarizeSubagentsResult(json: JSONObject): String {
+        if (!json.optBoolean("ok", true)) return summarizeFailure(json)
+        val total = json.optInt("total", 0)
+        val okCount = json.optInt("succeeded", 0)
+        return "子代理完成 · $okCount/$total 成功"
     }
 
     private fun parseResultJson(result: AgentModelClient.ToolResult): JSONObject? =
