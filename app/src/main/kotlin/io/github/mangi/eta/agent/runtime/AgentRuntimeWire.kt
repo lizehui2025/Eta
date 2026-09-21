@@ -736,6 +736,22 @@ internal object AgentRuntimeWire {
                 putInt("image_bytes", event.imageBytes)
             }
 
+            is AgentEvent.SubagentsStarted -> {
+                putString(KEY_TYPE, "subagents_started")
+                putInt("round", event.round)
+                putString("tool_call_id", event.toolCallId)
+                putInt("count", event.count)
+                putStringArrayList("labels", ArrayList(event.labels))
+            }
+
+            is AgentEvent.SubagentsFinished -> {
+                putString(KEY_TYPE, "subagents_finished")
+                putInt("round", event.round)
+                putString("tool_call_id", event.toolCallId)
+                putInt("total", event.total)
+                putInt("succeeded", event.succeeded)
+            }
+
             is AgentEvent.RunFinished -> {
                 putString(KEY_TYPE, "run_finished")
                 putInt("round", event.round)
@@ -873,6 +889,20 @@ internal object AgentRuntimeWire {
             toolName = bundle.getString("tool_name").orEmpty(),
             imageCount = bundle.getInt("image_count"),
             imageBytes = bundle.getInt("image_bytes"),
+        )
+
+        "subagents_started" -> AgentEvent.SubagentsStarted(
+            round = bundle.getInt("round"),
+            toolCallId = bundle.getString("tool_call_id").orEmpty(),
+            count = bundle.getInt("count"),
+            labels = bundle.getStringArrayList("labels").orEmpty(),
+        )
+
+        "subagents_finished" -> AgentEvent.SubagentsFinished(
+            round = bundle.getInt("round"),
+            toolCallId = bundle.getString("tool_call_id").orEmpty(),
+            total = bundle.getInt("total"),
+            succeeded = bundle.getInt("succeeded"),
         )
 
         "run_finished" -> AgentEvent.RunFinished(

@@ -45,12 +45,50 @@ android {
                 keyPassword = releaseKeyPassword
             }
         }
+        // 分支验证用的独立签名：与 debug / 正式 release 都不同，避免与已安装版本签名冲突。
+        // 优先读 ETA_FEATURE_* 环境变量，本地默认用 app/feature.keystore（已 gitignore，不入库）。
+        // CI 上没有该文件时回退到 debug 签名，保证构建不挂。
+        val featureStoreFile = System.getenv("ETA_FEATURE_STORE_FILE")?.takeIf { it.isNotBlank() }
+            ?: "feature.keystore"
+        val featureStorePassword = System.getenv("ETA_FEATURE_STORE_PASSWORD")?.takeIf { it.isNotBlank() }
+            ?: "eta-feature-1234"
+        val featureKeyAlias = System.getenv("ETA_FEATURE_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+            ?: "feature"
+        val featureKeyPassword = System.getenv("ETA_FEATURE_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+            ?: "eta-feature-1234"
+        if (file(featureStoreFile).exists()) {
+            create("feature") {
+                storeFile = file(featureStoreFile)
+                storePassword = featureStorePassword
+                keyAlias = featureKeyAlias
+                keyPassword = featureKeyPassword
+            }
+        }
     }
 
     buildTypes {
         debug {
             isMinifyEnabled = false
             isPseudoLocalesEnabled = true
+        }
+        // feature：给分支验证用的 release 级别包：新包名 + 独立签名 + 混淆裁剪，
+        // 可与正式版共存，速度接近 release，比 debug 流畅。debug/release 原配置不动。
+        create("feature") {
+            applicationIdSuffix = ".subagents"
+            versionNameSuffix = "-subagents"
+            signingConfig = try {
+                signingConfigs.getByName("feature")
+            } catch (_: Exception) {
+                signingConfigs.getByName("debug")
+            }
+            isDebuggable = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            isPseudoLocalesEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
         release {
             // 无发布证书时回退到 debug 签名，保证 release APK 可安装（仅用于分支验证；

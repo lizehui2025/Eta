@@ -116,6 +116,19 @@ internal fun AgentOverlayState.applyEvent(event: AgentEvent): AgentOverlayState 
         status = AgentOverlayStatus.ToolCompleted(event.name),
     )
 
+    is AgentEvent.SubagentsStarted -> copy(
+        phase = AgentOverlayPhase.RUNNING,
+        round = event.round,
+        status = AgentOverlayStatus.RunningTool("spawn_agents"),
+        detailText = "并行子代理 ×${event.count}",
+    )
+
+    is AgentEvent.SubagentsFinished -> copy(
+        phase = AgentOverlayPhase.RUNNING,
+        round = event.round,
+        status = AgentOverlayStatus.ToolCompleted("spawn_agents"),
+    )
+
     is AgentEvent.HostedToolStarted -> copy(
         phase = AgentOverlayPhase.RUNNING,
         round = event.round,

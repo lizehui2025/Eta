@@ -31,6 +31,9 @@ internal object AccessibilityProtectionProtocol {
     const val DEFAULT_ENABLED = false
 
     const val HEALTH_AUTHORITY = "io.github.mangi.eta.accessibility.health"
+    fun permissionFor(pkg: String): String = pkg + ".permission.CONTROL_ACCESSIBILITY_PROTECTION"
+    fun healthAuthorityFor(pkg: String): String = pkg + ".accessibility.health"
+    fun healthUriFor(pkg: String): Uri = Uri.parse("content://" + healthAuthorityFor(pkg))
     const val HEALTH_METHOD = "accessibility_health"
     const val HEALTH_STATUS = "status"
     const val HEALTH_STATUS_CONNECTED = "connected"

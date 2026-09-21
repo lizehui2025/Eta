@@ -186,7 +186,7 @@ internal class AccessibilityServiceEnforcer(
         if (!packageReceiverRegistered) {
             val receiver = packageReceiver ?: object : BroadcastReceiver() {
                 override fun onReceive(receiverContext: Context, intent: Intent) {
-                    if (intent.data?.schemeSpecificPart == APP_PACKAGE) {
+                    if (intent.data?.schemeSpecificPart in APP_PACKAGES) {
                         schedule(receiverContext, "package_changed")
                     }
                 }
@@ -818,6 +818,8 @@ internal class AccessibilityServiceEnforcer(
 
     private companion object {
         const val APP_PACKAGE = "io.github.mangi.eta"
+        const val APP_PACKAGE_FEATURE = "io.github.mangi.eta.subagents"
+        val APP_PACKAGES = setOf(APP_PACKAGE, APP_PACKAGE_FEATURE)
         const val SERVICE_CLASS =
             "io.github.mangi.eta.agent.accessibility.AgentAccessibilityService"
         const val DISABLED = 0
@@ -826,6 +828,8 @@ internal class AccessibilityServiceEnforcer(
         const val SERVICE_REBIND_GRACE_MS = 4_000L
         val REGISTRATION_RETRY_DELAYS_MS = longArrayOf(1_000L, 5_000L, 30_000L)
         val SERVICE_COMPONENT = ComponentName(APP_PACKAGE, SERVICE_CLASS)
+        val SERVICE_COMPONENT_FEATURE = ComponentName(APP_PACKAGE_FEATURE, SERVICE_CLASS)
+        val SERVICE_COMPONENTS = listOf(SERVICE_COMPONENT, SERVICE_COMPONENT_FEATURE)
         val CONTROL_SETTING_URI =
             Settings.Global.getUriFor(AccessibilityProtectionProtocol.SETTING_NAME)
         val ACTIVE_SETTING_URIS = listOf(

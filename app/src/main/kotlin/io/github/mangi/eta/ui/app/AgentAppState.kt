@@ -2167,6 +2167,8 @@ internal class AgentAppState(
             is AgentEvent.ProviderResponseStarted,
             is AgentEvent.ToolImagesAttached,
             is AgentEvent.RoundStarted,
+            is AgentEvent.SubagentsStarted,
+            is AgentEvent.SubagentsFinished,
             -> Unit
         }
     }
