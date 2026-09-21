@@ -128,7 +128,7 @@ internal object AgentRuntimeConnection {
         val context = synchronized(lock) { appContext } ?: return failBinding()
         val succeeded = runCatching {
             context.bindService(
-                AgentRuntimeWire.serviceIntent(),
+                AgentRuntimeWire.serviceIntent(context.packageName),
                 serviceConnection,
                 Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT or Context.BIND_INCLUDE_CAPABILITIES,
             )

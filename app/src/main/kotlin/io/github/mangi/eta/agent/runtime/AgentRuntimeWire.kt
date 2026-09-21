@@ -230,8 +230,8 @@ internal object AgentRuntimeWire {
         val createdAt: Long
     )
 
-    fun serviceIntent(): Intent =
-        Intent(ACTION_BIND).setComponent(ComponentName(MODULE_PACKAGE, SERVICE_CLASS))
+    fun serviceIntent(packageName: String = MODULE_PACKAGE): Intent =
+        Intent(ACTION_BIND).setComponent(ComponentName(packageName, SERVICE_CLASS))
 
     private val json = Json {
         ignoreUnknownKeys = true
