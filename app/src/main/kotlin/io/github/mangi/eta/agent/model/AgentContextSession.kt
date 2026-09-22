@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
+import io.github.mangi.eta.core.AndroidAgentLogger
 import org.json.JSONArray
 
 /** 管理可替换的模型上下文；持久快照先提交，运行 transcript 始终追加。 */
@@ -55,7 +56,10 @@ internal class AgentContextSession(
     }
 
     fun compact(roundTools: JSONArray, force: Boolean = false, final: Boolean = false) {
-        val before = budget.estimate(messages, roundTools)
+        // 实时口径：有上轮服务商真实 input 即按“真实+增量”投影判压缩，
+        // 无真实值才回退校准估算；日志同时记录分类明细，便于对账窗口内容。
+        val before = budget.effectiveTokens(messages, roundTools)
+        if (!force) logWindowBreakdown("压缩检查", roundTools, before)
         if (!force && !budget.shouldCompact(before)) {
             try {
                 publishSnapshot()
@@ -78,7 +82,7 @@ internal class AgentContextSession(
                     candidate, systemCount, sensitiveIds(), force,
                 )
                 attempts++
-                val tokens = budget.estimate(candidate, roundTools)
+                val tokens = budget.effectiveTokens(candidate, roundTools)
                 if (!budget.shouldCompact(tokens)) break
                 if (attempts >= AgentContextBudget.MAX_OVERFLOW_ATTEMPTS) {
                     throw AgentContextCompactor.failure("CONTEXT_NO_REDUCTION", "摘要后上下文仍超过容量预算。")
@@ -95,8 +99,10 @@ internal class AgentContextSession(
             }
             while (messages.length() > 0) messages.remove(messages.length() - 1)
             for (index in 0 until candidate.length()) messages.put(candidate.getJSONObject(index))
+            val after = budget.effectiveTokens(messages, roundTools)
+            logWindowBreakdown("压缩完成", roundTools, after)
             onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_COMPLETED, before,
-                budget.estimate(messages, roundTools)))
+                after))
         } catch (failure: Exception) {
             runController.throwIfCancelled()
             onEvent(AgentEvent.ContextCompaction(operation, "failed", before,
@@ -109,8 +115,21 @@ internal class AgentContextSession(
         }
     }
 
-    private fun durableHistory(source: JSONArray): List<AgentModelClient.ConversationMessage> {
-        val durable = JSONArray()
+    /** 窗口分类日志：每次判压缩前后各一行，读文件抓了多少、思考链占多少直接可见。 */
+    private fun logWindowBreakdown(stage: String, roundTools: JSONArray, tokens: Int) {
+        runCatching {
+            val breakdown = AgentContextBreakdownCounter.breakdown(messages, roundTools)
+            val real = budget.lastRealInputTokens()
+            AndroidAgentLogger.info(
+                "Agent context $stage: effective=$tokens" +
+                    (real?.let { " (实时锚点=$it, 校准=${"%.2f".format(budget.calibrationFactor())})" }
+                        ?: " (无实时锚点, 校准=${"%.2f".format(budget.calibrationFactor())})") +
+                    " 分类[${breakdown.summaryLine()}]",
+            )
+        }
+    }
+
+    private fun durableHistory(source: JSONArray): List<AgentModelClient.ConversationMessage> {        val durable = JSONArray()
         for (index in systemCount until source.length()) {
             val message = source.getJSONObject(index)
             if (!message.optBoolean("_eta_observation")) durable.put(message)

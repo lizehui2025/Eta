@@ -36,6 +36,8 @@ internal class AgentSubagentExecutor(
     private val traceFormatter: AgentTraceFormatter,
     private val onEvent: (AgentEvent) -> Unit,
     private val depth: Int = 0,
+    private val parentMessagesProvider: () -> JSONArray = { JSONArray() },
+    private val parentSystemCount: Int = 0,
     private val sharedMountsProvider: () -> List<Pair<String, String>> = {
         runCatching { SharedFolderMounts.current().map { it.name to it.sourcePath } }.getOrDefault(emptyList())
     },
@@ -109,6 +111,14 @@ internal class AgentSubagentExecutor(
             SubagentMode.CODE
         } else {
             SubagentMode.RESEARCH
+        }
+        // 上下文模式：pure 纯净隔离（默认）；shared 非纯净共享主窗口快照但独立运行。
+        val contextModeRaw = args.optString("context_mode").trim()
+        val contextMode = if (contextModeRaw.isEmpty()) {
+            SubagentContextMode.PURE
+        } else {
+            SubagentContextMode.parse(contextModeRaw)
+                ?: return err("INVALID_ARGUMENT", "context_mode 仅支持 pure 或 shared")
         }
         // 默认护栏：max_rounds / timeout_ms 省略时按默认值执行，避免一个卡死拖住整批；
         // 显式提供时按调用方给定值执行，仅做有效性下限兜底（>= 1），不设上限（超大值等价于放开）。
@@ -204,6 +214,7 @@ internal class AgentSubagentExecutor(
                         subTools = subTools,
                         holders = subControllers,
                         mode = mode,
+                        contextMode = contextMode,
                         mounts = mounts,
                         declaredWritePaths = declaredByIndex.getOrElse(index) { emptyList() },
                         writeRegistry = writeRegistry,
@@ -234,9 +245,8 @@ internal class AgentSubagentExecutor(
                         }
                     }
                     val stillRunning = !pool.isTerminated
-                    // 超时汇总进入主上下文：改动列表只保留前 100（完整列表不受影响，仍在各子代理详情中）。
+                    // 超时汇总完整回填：changed_files 不截断，主窗口容量由 compact 统一裁决。
                     val changedAll = synchronized(changedFilesByIndex[i]) { changedFilesByIndex[i].toList() }
-                    val changed = changedAll.take(AgentSubagentPolicy.MAX_CHANGED_FILES_IN_CONTEXT)
                     val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - fanoutStartNano)
                     val timeoutSource = if (timeoutIsDefault) {
                         "默认 timeout_ms=${timeoutMs}"
@@ -256,10 +266,9 @@ internal class AgentSubagentExecutor(
                         .put("started_ms", fanoutStartWallMs)
                         .put("finished_ms", fanoutStartWallMs + elapsedMs)
                         .put("duration_ms", elapsedMs)
-                        .put("changed_files", JSONArray(changed))
+                        .put("changed_files", JSONArray(changedAll))
                         .apply {
                             if (stillRunning) put("still_running", true)
-                            if (changedAll.size > changed.size) put("changed_files_truncated", true)
                         }
                     val won = terminalClaimed[i].compareAndSet(false, true)
                     val committed = terminalResults[i]
@@ -291,25 +300,18 @@ internal class AgentSubagentExecutor(
                 } else {
                     val r = runCatching { f.get() }.getOrElse { t ->
                         val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - fanoutStartNano)
-                        // 异常信息进入主上下文前先截断：异常可能携带大文本，不截断会直接撑爆主上下文。
+                        // 异常完整回填，不截断：主窗口容量由 compact 统一裁决。
                         val rawMsg = t.message ?: t.javaClass.simpleName
-                        val (msg, errorTruncated) = truncateForMainContext(rawMsg, AgentSubagentPolicy.MAX_ERROR_CHARS_IN_CONTEXT)
                         JSONObject()
                             .put("label", label)
                             .put("ok", false)
                             .put("code", "SUBAGENT_ERROR")
-                            .put("content", msg)
+                            .put("content", rawMsg)
                             .put("thread", Thread.currentThread().name)
                             .put("started_ms", fanoutStartWallMs)
                             .put("finished_ms", fanoutStartWallMs + elapsedMs)
                             .put("duration_ms", elapsedMs)
                             .put("changed_files", JSONArray())
-                            .apply {
-                                if (errorTruncated) {
-                                    put("content_truncated", true)
-                                        .put("content_chars", rawMsg.length)
-                                }
-                            }
                     }
                     if (r.optBoolean("ok", false)) okCount++
                     results.put(r)
@@ -325,6 +327,7 @@ internal class AgentSubagentExecutor(
             val summary = JSONObject()
                 .put("ok", true)
                 .put("mode", mode.wireName)
+                .put("context_mode", contextMode.wireName)
                 .put("total", tasks.size)
                 .put("succeeded", okCount)
                 .put("timed_out", timeoutCount)
@@ -365,6 +368,7 @@ internal class AgentSubagentExecutor(
         subTools: JSONArray,
         holders: Array<AgentRunController?>,
         mode: SubagentMode,
+        contextMode: SubagentContextMode,
         mounts: List<Pair<String, String>>,
         declaredWritePaths: List<String>,
         writeRegistry: SubagentWriteRegistry,
@@ -431,25 +435,16 @@ internal class AgentSubagentExecutor(
         fun finishUi(ok: Boolean, content: String, code: String?): JSONObject {
             val elapsed = elapsedMs()
             val changedAll = synchronized(changedFiles) { changedFiles.toList() }
-            // 主上下文回填界：进入 fanout 汇总（即主循环 tool result）的副本按模式截断并打标记；
-            // SubagentFinished 事件仍携带完整 content 与完整改动列表，供子代理详情窗口展示。
-            val cap = AgentSubagentPolicy.maxMainContextChars(mode)
-            val (contextContent, contentTruncated) = truncateForMainContext(content, cap)
-            val contextChanged = changedAll.take(AgentSubagentPolicy.MAX_CHANGED_FILES_IN_CONTEXT)
+            // 完整回填：不截断 content 与 changed_files，主窗口容量由 compact 统一裁决。
             val resultJson = timed(
                 JSONObject()
                     .put("label", task.label)
                     .put("ok", ok)
-                    .put("content", contextContent)
-                    .put("changed_files", JSONArray(contextChanged))
+                    .put("content", content)
+                    .put("changed_files", JSONArray(changedAll))
                     .let {
                         var o = it
                         if (code != null) o = o.put("code", code)
-                        if (contentTruncated) {
-                            o = o.put("content_truncated", true)
-                                .put("content_chars", content.length)
-                        }
-                        if (changedAll.size > contextChanged.size) o = o.put("changed_files_truncated", true)
                         o
                     },
             )
@@ -479,13 +474,36 @@ internal class AgentSubagentExecutor(
             } else {
                 guarded
             }
-            val subMessages = JSONArray(systemMessages.toString())
+            val subMessages: JSONArray
+            val subSystemCount: Int
+            if (contextMode == SubagentContextMode.SHARED) {
+                // 非纯净：共享主窗口快照作为前缀（只读复制），独立 controller/loop/transcript 运行，
+                // 不回写主 messages，终态只经 fanout 汇总返回。
+                subMessages = runCatching { JSONArray(parentMessagesProvider().toString()) }.getOrElse { JSONArray() }
+                if (subMessages.length() == 0) {
+                    for (i in 0 until systemMessages.length()) subMessages.put(systemMessages.getJSONObject(i))
+                    subSystemCount = systemMessages.length()
+                } else {
+                    subSystemCount = parentSystemCount.coerceIn(0, subMessages.length())
+                }
+            } else {
+                subMessages = JSONArray(systemMessages.toString())
+                subSystemCount = systemMessages.length()
+            }
             val isolatedPrompt = buildString {
                 append("你是 Eta 主代理派生的")
                 append(if (mode == SubagentMode.CODE) "编码子代理" else "只读子代理")
                 append("（label=")
                 append(task.label)
+                append("，context_mode=")
+                append(contextMode.wireName)
                 append("）。\n")
+                if (contextMode == SubagentContextMode.SHARED) {
+                    append("你已获得主 Agent 窗口快照作为前缀上下文（只读，不可改写主会话）；")
+                    append("基于该背景独立执行本子任务，仍用独立轮次与工具调用完成，最后汇总返回。\n")
+                } else {
+                    append("你是纯净隔离执行：仅凭系统提示与下方子任务独立完成，不要假设可见主会话。\n")
+                }
                 if (mode == SubagentMode.CODE) {
                     if (task.writePaths.isEmpty()) {
                         append("未声明写入范围，禁止编辑任何文件；若任务需要修改文件，请如实返回缺失并说明需要主代理补充 write_paths。\n")
@@ -523,29 +541,29 @@ internal class AgentSubagentExecutor(
                 onEvent = subOnEvent,
                 sessionId = UUID.randomUUID().toString(),
                 transcript = JSONArray(),
-                systemCount = systemMessages.length(),
+                systemCount = subSystemCount,
                 operationId = "$parentOperationId-sub-$index",
                 maxRounds = maxRounds,
             )
             val r = loop.run()
             if (r.roundLimited) {
-                // max_rounds 触顶（省略时默认 12 轮）：把子循环携带的部分结果拼进终态内容，错误码保持不变。
+                // 轮数触顶不丢弃：完整部分结果直接可用（ok=true），主代理可继续使用而非整体重试。
                 val partial = r.content
                     .removePrefix(AgentLoop.ROUND_LIMIT_MARKER_PREFIX + maxRounds)
                     .trim()
-                val content = buildString {
-                    append("子代理超过最大轮数（").append(maxRounds).append("）已截断；")
-                    append("已达轮数上限，以下为截断前已完成的部分结果：")
-                    if (partial.isNotEmpty()) {
-                        append('\n').append(partial)
-                    } else {
-                        append('\n').append("（截断前没有可保留的助手文本）")
-                    }
+                val content = if (partial.isNotBlank()) {
+                    partial + "\n\n（说明：子代理达到 max_rounds=$maxRounds 上限停止，以上为已完成的部分结果，可直接使用；" +
+                        "如需继续请派发新的子任务。）"
+                } else {
+                    "（子代理在 max_rounds=$maxRounds 内未产生可保留文本）"
                 }
-                return finishUi(ok = false, content = content, code = "SUBAGENT_ROUND_LIMIT")
+                return finishUi(
+                    ok = partial.isNotBlank(),
+                    content = content,
+                    code = "SUBAGENT_ROUND_LIMIT",
+                )
             }
-            // 完整结果进 finishUi，由其按“主上下文回填界”截断进入主循环的副本；
-            // SubagentFinished 事件仍保留完整结果供详情窗口展示。
+            // 完整结果直接回填，不截断。
             val content = r.content.trim()
             return finishUi(
                 ok = content.isNotBlank(),
@@ -558,14 +576,8 @@ internal class AgentSubagentExecutor(
             } else {
                 t.message ?: t.javaClass.simpleName
             }
-            // 异常信息先按 2000 字符界截断（finishUi 的模式界更大，不会二次标记），
-            // 这里把原始长度标记补上，保证主代理可见截断事实。
-            val (msg, errorTruncated) = truncateForMainContext(raw, AgentSubagentPolicy.MAX_ERROR_CHARS_IN_CONTEXT)
-            val resultJson = finishUi(ok = false, content = msg, code = "SUBAGENT_ERROR")
-            if (errorTruncated && !resultJson.optBoolean("content_truncated", false)) {
-                resultJson.put("content_truncated", true)
-                resultJson.put("content_chars", raw.length)
-            }
+            // 异常完整回填，不截断。
+            val resultJson = finishUi(ok = false, content = raw, code = "SUBAGENT_ERROR")
             return resultJson
         } finally {
             runCatching { binding.close() }
@@ -641,16 +653,5 @@ internal class AgentSubagentExecutor(
     private companion object {
         /** 超时取消后等待执行池收尾的上限；等待总时长不随超时任务数叠加。 */
         const val STILL_RUNNING_WAIT_MS = 2_000L
-
-        /**
-         * 主上下文回填截断：超限只截断进入主循环的副本并附可执行的恢复指引，
-         * 调用方负责把完整原文保留在 UI 事件侧。返回截断后文本与是否截断。
-         */
-        fun truncateForMainContext(text: String, cap: Int): Pair<String, Boolean> {
-            if (text.length <= cap) return text to false
-            val marker = "\n\n（主上下文保护：该子代理输出过长，主循环仅保留前${cap}字符；" +
-                "如需其余部分，请派发新的子任务定向追问，完整结果见子代理详情。）"
-            return (text.take(cap) + marker) to true
-        }
     }
 }

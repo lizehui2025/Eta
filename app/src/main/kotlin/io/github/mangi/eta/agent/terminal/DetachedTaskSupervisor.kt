@@ -70,6 +70,9 @@ internal class DetachedTaskSupervisor(
         const val MAX_TASKS = 8
         const val MAX_RETAINED_RECORDS = 32
         const val MAX_LOG_READ_BYTES = 64 * 1024
+        /** 单任务日志上限与轮转保留：超限只留尾部，避免 >> 追加吃满存储。 */
+        const val MAX_LOG_FILE_BYTES = 2L * 1024L * 1024L
+        const val PRUNE_KEEP_TAIL_BYTES = 1L * 1024L * 1024L
 
         // 进程内允许 AI 侧与 UI 侧各持一个实例；记录文件的读-改-写必须经同一把锁串行。
         private val RECORDS_LOCK = Any()
@@ -193,6 +196,7 @@ internal class DetachedTaskSupervisor(
         }
         // 探测失败的任务保守视为仍在运行，不误报死亡；确认死亡的才允许被 prune 清掉。
         val statuses = tasks.map { task ->
+            runCatching { rotateLogIfOversized(task) }
             var running = aliveById[task.id] ?: true
             if (task.identity == "user" && aliveById[task.id] == true && !adoptUserTask(task)) running = false
             DetachedTaskStatus(task, running)
@@ -433,6 +437,31 @@ internal class DetachedTaskSupervisor(
         } else {
             wirePath
         }
+
+    /** 日志轮转：超限只留尾部 1MB，经宿主路径直接截断，不进 shell。 */
+    internal fun rotateLogIfOversized(task: DetachedTask) {
+        runCatching {
+            val file = java.io.File(hostDaemonPath(task, task.logPath))
+            if (!file.isFile || file.length() <= MAX_LOG_FILE_BYTES) return
+            val keep = PRUNE_KEEP_TAIL_BYTES.coerceAtLeast(256L * 1024L)
+            val raf = java.io.RandomAccessFile(file, "rw")
+            try {
+                val len = raf.length()
+                if (len <= keep) return
+                val tail = ByteArray(keep.toInt())
+                raf.seek(len - keep)
+                raf.readFully(tail)
+                // 从换行处起写，避免半行残留。
+                var start = 0
+                while (start < tail.size && tail[start] != '\n'.code.toByte()) start++
+                if (start < tail.size) start++
+                raf.setLength(0)
+                raf.write(tail, start, tail.size - start)
+            } finally {
+                runCatching { raf.close() }
+            }
+        }
+    }
 
     private fun rootfsPath(environment: TerminalEnvironment): String? =
         linuxRootfsPathProvider?.invoke(environment) ?: linuxRootfsPath

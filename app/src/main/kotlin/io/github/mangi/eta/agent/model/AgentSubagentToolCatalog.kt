@@ -48,13 +48,25 @@ internal object AgentSubagentToolCatalog {
                             ),
                     )
                     .put(
+                        "context_mode",
+                        JSONObject()
+                            .put("type", "string")
+                            .put("enum", JSONArray().put("pure").put("shared"))
+                            .put(
+                                "description",
+                                "可选；pure（默认）：纯净隔离，只带系统提示+子任务执行；" +
+                                    "shared：非纯净共享主 Agent 窗口快照作为前缀上下文，但依旧独立运行 " +
+                                    "（独立 controller/loop/transcript，不回写主消息，终态经汇总返回）。需要主对话背景时用 shared。",
+                            ),
+                    )
+                    .put(
                         "max_rounds",
                         JSONObject()
                             .put("type", "integer")
                             .put("minimum", 1)
                             .put(
                                 "description",
-                                "可选；每个子代理的最大模型轮数，省略时默认 12 轮；传超大值可放开，不设上限。",
+                                "可选；每个子代理的最大模型轮数，省略时默认 30 轮；传超大值可放开，不设上限。",
                             ),
                     )
                     .put(
@@ -64,7 +76,7 @@ internal object AgentSubagentToolCatalog {
                             .put("minimum", 1)
                             .put(
                                 "description",
-                                "可选；整体扇出超时（毫秒），省略时默认 180000（3 分钟）；传超大值可放开，不设上限。",
+                                "可选；整体扇出超时（毫秒），省略时默认 300000（5 分钟）；传超大值可放开，不设上限。",
                             ),
                     )
                     .put(
@@ -80,11 +92,12 @@ internal object AgentSubagentToolCatalog {
         tools.put(
             AgentToolSchema.function(
                 name = AgentSubagentPolicy.TOOL_NAME,
-                description = "并行派生子代理（任务数不限，同时最多跑 4 个，超出的排队；单任务默认最多 12 轮、整体默认 3 分钟超时）：" +
+                description = "并行派生子代理（任务数不限，同时最多跑 4 个，超出的排队；单任务默认最多 30 轮、整体默认 5 分钟超时）：" +
                     "research 模式（默认）只读并发搜集信息；" +
                     "code 模式允许子代理在各自声明的 write_paths 内用 read_file/write_file/edit_file 编辑文件" +
-                    "（禁终端与构建，构建与测试由主代理统一执行）。子代理禁 GUI/浏览器/前台操作、敏感写操作与再派生，" +
-                    "一次调用内部并行汇总返回。配置尽量自动化：通常只需提供 tasks，mode、限额与工具集均可省略。",
+                    "（禁终端与构建，构建与测试由主代理统一执行）。context_mode 可选 pure（默认纯净隔离）或 shared" +
+                    "（非纯净：共享主窗口快照但独立运行）。子代理禁 GUI/浏览器/前台操作、敏感写操作与再派生，" +
+                    "一次调用内部并行汇总返回，结果完整回填不截断。配置尽量自动化：通常只需提供 tasks，mode、限额与工具集均可省略。",
                 parameters = params,
             ),
         )

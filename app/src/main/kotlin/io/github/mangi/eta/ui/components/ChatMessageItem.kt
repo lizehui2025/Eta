@@ -186,16 +186,27 @@ import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
-internal fun rememberDataUrlBitmap(dataUrl: String) = remember(dataUrl) {
-    decodeDataUrlBitmap(dataUrl)
+internal fun rememberDataUrlBitmap(dataUrl: String): ImageBitmap? {
+    var bitmap by remember(dataUrl) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(dataUrl) {
+        bitmap = withContext(Dispatchers.IO) { decodeDataUrlBitmap(dataUrl) }
+    }
+    return bitmap
 }
 
-private fun decodeDataUrlBitmap(dataUrl: String): ImageBitmap? {
+internal fun decodeDataUrlBitmap(dataUrl: String, maxLongEdge: Int = 1024): ImageBitmap? {
     val base64 = dataUrl.substringAfter("base64,", "")
     if (base64.isBlank()) return null
     return runCatching {
         val bytes = Base64.decode(base64, Base64.NO_WRAP)
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+        // 先只读边界算采样率，长边压到 maxLongEdge 以内，避免全图进内存再缩。
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        val longEdge = maxOf(bounds.outWidth, bounds.outHeight)
+        while (longEdge / sample > maxLongEdge && sample < 8) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap()
     }.getOrNull()
 }
 
@@ -2616,8 +2627,10 @@ private fun BrowserPagePreview(
             Image(
                 bitmap = image,
                 contentDescription = stringResource(R.string.tool_browser_preview),
-                modifier = Modifier.fillMaxWidth(),
-                contentScale = ContentScale.FillWidth,
+                modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp).clip(
+                    androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+                ),
+                contentScale = ContentScale.Crop,
             )
         } else {
             Box(

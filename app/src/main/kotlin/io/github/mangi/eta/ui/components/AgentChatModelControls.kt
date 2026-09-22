@@ -45,6 +45,7 @@ import io.github.mangi.eta.ui.model.AgentContextUsageUi
 import io.github.mangi.eta.ui.model.AgentModelOptionUi
 import io.github.mangi.eta.ui.model.AgentModelPickerUiState
 import io.github.mangi.eta.ui.model.defaultExpandedModelProviderIds
+import io.github.mangi.eta.ui.model.formatContextBreakdown
 import io.github.mangi.eta.ui.model.formatContextUsage
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -284,6 +285,8 @@ internal fun AgentContextUsageButton(
         usage.contextTokens == null -> stringResource(R.string.context_usage_after_response)
         else -> stringResource(R.string.context_usage_previous_response, summary)
     }
+    val breakdownLine = usage.breakdown?.let { formatContextBreakdown(it, locale) }
+    val detailWithBreakdown = if (breakdownLine != null) "$detail\n$breakdownLine" else detail
     val usageDescription = stringResource(
         R.string.context_usage_description,
         summary.replace('\n', ' '),
@@ -321,7 +324,7 @@ internal fun AgentContextUsageButton(
                 colors = tooltipColors,
             ) {
                 Text(
-                    text = detail,
+                    text = detailWithBreakdown,
                     color = tooltipColors.contentColor,
                     style = MiuixTheme.textStyles.body2,
                 )

@@ -9,10 +9,13 @@ import io.github.mangi.eta.data.db.RuntimeResultEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 
-/** 终态先落盘，入口成功提交后 ACK；未确认结果不按年龄或数量淘汰。 */
+/** 终态先落盘，入口成功提交后 ACK；未确认结果按数量与年龄淘汰，避免 DB 无限膨胀。 */
 internal object AgentRuntimeResultStore {
     private const val MAX_AGE_MS = 12L * 60L * 60L * 1000L
     private const val MAX_RECENT_ACKNOWLEDGEMENTS = 32
+    /** 未确认结果保留上限与最大年龄：超限删最旧，避免外部唤起堆积。 */
+    private const val MAX_RETAINED_RESULTS = 50
+    private const val MAX_RESULT_AGE_MS = 7L * 24L * 60L * 60L * 1000L
 
     private val deliveryLock = Any()
     private val recentlyAcknowledgedRunIds = LinkedHashMap<String, Long>()
@@ -29,8 +32,23 @@ internal object AgentRuntimeResultStore {
             runBlocking(Dispatchers.IO) {
                 val dao = EtaDatabase.get(appContext).runtimeRunDao()
                 dao.upsertRuntimeResult(entity)
+                pruneOldResultsLocked(dao)
             }
             return true
+        }
+    }
+
+    private suspend fun pruneOldResultsLocked(dao: io.github.mangi.eta.data.db.RuntimeRunDao) {
+        runCatching {
+            val now = System.currentTimeMillis()
+            val rows = dao.runtimeResultRows().sortedBy { it.createdAt }
+            val expired = rows.filter { now - it.createdAt > MAX_RESULT_AGE_MS }
+            expired.forEach { runCatching { dao.deleteRuntimeResult(it.runId) } }
+            val retained = rows.filterNot { it.runId in expired.map { e -> e.runId } }
+            if (retained.size > MAX_RETAINED_RESULTS) {
+                retained.take(retained.size - MAX_RETAINED_RESULTS)
+                    .forEach { runCatching { dao.deleteRuntimeResult(it.runId) } }
+            }
         }
     }
 

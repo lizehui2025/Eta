@@ -21,6 +21,8 @@ import org.json.JSONArray
  * thinking and tool activity that third-party assistant surfaces cannot show.
  */
 internal object AgentRunArchiveStore {
+    /** 外部归档保留上限：超限删最旧，避免进程级持久堆积。 */
+    private const val MAX_RETAINED_ARCHIVES = 20
 
     data class ArchivedRun(
         val handoff: AgentRuntimeWire.EntryHandoff,
@@ -40,6 +42,15 @@ internal object AgentRunArchiveStore {
                 run = compacted.toEntity(archiveRunId),
                 events = compacted.toEventEntities(archiveRunId),
             )
+            runCatching {
+                val rows = dao.archivedRunRows().sortedBy { it.run.createdAt }
+                if (rows.size > MAX_RETAINED_ARCHIVES) {
+                    rows.take(rows.size - MAX_RETAINED_ARCHIVES).forEach {
+                        runCatching { dao.deleteArchivedRunByArchiveId(it.run.archiveRunId) }
+                        runCatching { dao.deleteArchivedEvents(it.run.archiveRunId) }
+                    }
+                }
+            }
         }
     }
 

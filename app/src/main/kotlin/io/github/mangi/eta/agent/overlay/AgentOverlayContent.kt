@@ -150,7 +150,8 @@ internal fun AgentOverlayGlow(state: AgentOverlayState) {
             val h = size.height
             val cx = w / 2f
             val cy = h / 2f
-            val strokePx = 40f
+            // 描边与模糊减半：全屏 RoundRect + Blur 每帧重绘是悬浮窗最大开销，视觉差异小但 GPU 负载明显下降。
+            val strokePx = 24f
             val colorsArgb = RainbowColors.map { it.toArgb() }
             val positions = floatArrayOf(
                 0f, 0.13f, 0.257f, 0.37f, 0.505f, 0.634f, 0.744f, 0.87f, 1f
@@ -228,14 +229,19 @@ private fun AssistantOrb(
 ) {
     val accent = phaseAccent(phase)
     val pulsing = phase == AgentOverlayPhase.RUNNING
-    val transition = rememberInfiniteTransition(label = "orb")
-    val pulse by transition.animateFloat(
-        initialValue = 0.6f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(1400), RepeatMode.Reverse),
-        label = "pulse",
-    )
-    val haloAlpha = if (pulsing) pulse else 0.85f
+    // 非运行态不创建帧时钟，避免常驻动画空转。
+    val haloAlpha = if (pulsing) {
+        val transition = rememberInfiniteTransition(label = "orb")
+        val pulse by transition.animateFloat(
+            initialValue = 0.6f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(1400), RepeatMode.Reverse),
+            label = "pulse",
+        )
+        pulse
+    } else {
+        0.85f
+    }
     val tapModifier = if (onClick != null) Modifier.clickable { onClick() } else Modifier
     Box(
         modifier = modifier

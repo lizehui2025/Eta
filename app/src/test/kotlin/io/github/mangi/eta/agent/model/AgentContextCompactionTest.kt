@@ -14,8 +14,9 @@ class AgentContextCompactionTest {
     )
 
     @Test
-    fun unknownWindowDoesNotCompactBecauseHistoryExceedsLegacyStorageLimit() {
-        val original = "历史事实".repeat(40_000)
+    fun unknownWindowUsesFallbackBudgetInsteadOfNeverCompacting() {
+        // window=null 回退到 100k 预算：小历史不压缩，大历史按回退线压缩。
+        val original = "历史事实".repeat(4_000)
         var requests = 0
         val result = AgentModelClient.complete(config, "继续", AgentModelClient.ToolExecutor { error("不应执行工具") },
             history = listOf(AgentModelClient.ConversationMessage("assistant", original)),
@@ -168,7 +169,14 @@ class AgentContextCompactionTest {
         assertFalse(budget.shouldCompact(8499))
         assertTrue(budget.shouldCompact(8500))
         assertFalse(budget.shouldCompact(0))
-        assertFalse(AgentContextBudget(null).shouldCompact(Int.MAX_VALUE))
+        // window=null 回退到 FALLBACK_WINDOW_TOKENS，不再永不压缩。
+        assertFalse(AgentContextBudget(null).shouldCompact(0))
+        assertFalse(
+            AgentContextBudget(null).shouldCompact(
+                (AgentContextBudget.FALLBACK_WINDOW_TOKENS * AgentContextBudget.TRIGGER_RATIO).toInt() - 1,
+            ),
+        )
+        assertTrue(AgentContextBudget(null).shouldCompact(Int.MAX_VALUE))
         assertEquals(4, AgentContextBudget.textTokens("中文测试"))
         assertEquals(2, AgentContextBudget.textTokens("abcdef"))
         val messages = JSONArray().put(AgentConversationCodec.userTextMessage("文本"))

@@ -30,9 +30,10 @@ internal sealed interface KimiWebLaunchResult {
 
 /** 取得启动期前台引用，解析带 token 的本机地址后交给系统浏览器。 */
 internal class KimiWebLauncher(
-    private val context: Context,
+    context: Context,
     private val daemonSupervisor: DetachedTaskSupervisor,
 ) {
+    private val appContext = context.applicationContext
     private val session = KimiWebSession(
         tasks = object : KimiWebSession.Tasks {
             override fun list() = daemonSupervisor.list()
@@ -44,7 +45,7 @@ internal class KimiWebLauncher(
         },
         openUrl = { url ->
             try {
-                context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                appContext.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 true
             } catch (_: android.content.ActivityNotFoundException) {
                 false
@@ -57,11 +58,11 @@ internal class KimiWebLauncher(
     suspend fun launch(environment: TerminalEnvironment): KimiWebLaunchResult = launchMutex.withLock {
         withContext(Dispatchers.IO) {
             val distribution = environment.linuxDistribution ?: return@withContext KimiWebLaunchResult.Failed("INVALID_ENVIRONMENT")
-            val rootfs = LinuxEnvironmentPaths.rootfsDir(context, distribution)
+            val rootfs = LinuxEnvironmentPaths.rootfsDir(appContext, distribution)
             if (!LinuxEnvironmentPaths.rootfsReady(rootfs.absolutePath)) return@withContext KimiWebLaunchResult.Failed("LINUX_ENVIRONMENT_NOT_READY")
             val identity = TerminalRuntime.defaultIdentity(environment, rootfs.absolutePath)
             val job = currentCoroutineContext().job
-            if (identity == "user" && !AgentExecutionService.acquire(context, LAUNCH_ID) { job.cancel() }) {
+            if (identity == "user" && !AgentExecutionService.acquire(appContext, LAUNCH_ID) { job.cancel() }) {
                 return@withContext KimiWebLaunchResult.Failed("BACKGROUND_START_NOT_ALLOWED")
             }
             try {
@@ -75,7 +76,7 @@ internal class KimiWebLauncher(
 
     suspend fun status(environment: TerminalEnvironment): KimiWebRuntimeStatus = withContext(Dispatchers.IO) {
         val distribution = environment.linuxDistribution ?: return@withContext KimiWebRuntimeStatus(code = "INVALID_ENVIRONMENT")
-        val rootfs = LinuxEnvironmentPaths.rootfsDir(context, distribution)
+        val rootfs = LinuxEnvironmentPaths.rootfsDir(appContext, distribution)
         if (!LinuxEnvironmentPaths.rootfsReady(rootfs.path)) return@withContext KimiWebRuntimeStatus(code = "LINUX_ENVIRONMENT_NOT_READY")
         val identity = TerminalRuntime.defaultIdentity(environment, rootfs.path)
         if (identity == "root" && !TerminalRuntime.rootAvailable) return@withContext KimiWebRuntimeStatus(code = "ROOT_REQUIRED")

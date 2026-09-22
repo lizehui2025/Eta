@@ -54,6 +54,16 @@ internal class AgentLoop(
     private val accumulatedReasoning = StringBuilder()
     private val sensitiveToolCallIds = linkedSetOf<String>()
     private var pendingToolImageMessage: JSONObject? = null
+
+    /** 思考链有界：超限丢弃最旧的一半，避免单轮发散吃掉内存。 */
+    private fun appendReasoning(delta: String) {
+        if (delta.isEmpty()) return
+        accumulatedReasoning.append(delta)
+        if (accumulatedReasoning.length > MAX_REASONING_CHARS) {
+            val drop = accumulatedReasoning.length - MAX_REASONING_CHARS / 2
+            accumulatedReasoning.delete(0, drop)
+        }
+    }
     private val context = AgentContextSession(
         config, messages, systemCount, operationId, provider, runController,
         { sensitiveToolCallIds }, onEvent, onContextSnapshot, { transcript.length() },
@@ -94,8 +104,8 @@ internal class AgentLoop(
             runController.throwIfCancelled()
             if (maxRounds != null && round > maxRounds) {
                 publishTranscript()
-                // 触顶截断：携带最近一次非空 assistant 文本作为部分结果，正常返回路径不受影响。
-                val partial = lastAssistantText.take(ROUND_LIMIT_PARTIAL_CHARS)
+                // 触顶不截断：携带最近一次非空 assistant 全文作为部分结果，不再按 1500 字符裁剪。
+                val partial = lastAssistantText
                 val limitNote = buildString {
                     append(ROUND_LIMIT_MARKER_PREFIX).append(maxRounds)
                     if (partial.isNotEmpty()) {
@@ -142,7 +152,7 @@ internal class AgentLoop(
                                 if (providerEvent is ProviderEvent.BlockDelta &&
                                     providerEvent.kind == AssistantBlockKind.THINKING
                                 ) {
-                                    accumulatedReasoning.append(providerEvent.delta)
+                                    appendReasoning(providerEvent.delta)
                                 }
                                 providerEvent.toAgentEvent(attemptRound)?.let(onEvent)
                             },
@@ -188,7 +198,7 @@ internal class AgentLoop(
                 assistantReasoning.isNotBlank() &&
                 accumulatedReasoning.length == reasoningLengthBeforeRound
             ) {
-                accumulatedReasoning.append(assistantReasoning)
+                appendReasoning(assistantReasoning)
             }
 
             // 记录最近一次非空 assistant 文本；轮数触顶时作为截断前的部分结果带回。
@@ -521,7 +531,7 @@ internal class AgentLoop(
         /** 轮数触顶标记前缀；AgentSubagentExecutor 据此从 Result.content 中剥出部分结果。 */
         const val ROUND_LIMIT_MARKER_PREFIX = "ROUND_LIMIT_TRUNCATED: maxRounds="
 
-        /** 触顶时保留的部分结果字符上限。 */
-        const val ROUND_LIMIT_PARTIAL_CHARS = 1500
+        /** 单轮思考链上限：超限丢弃最旧部分，只防内存无界，不截断正常结果。 */
+        const val MAX_REASONING_CHARS = 200_000
     }
 }

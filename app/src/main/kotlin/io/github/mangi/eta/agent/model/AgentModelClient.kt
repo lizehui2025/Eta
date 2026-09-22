@@ -179,6 +179,8 @@ internal object AgentModelClient {
                     traceFormatter = traceFormatter,
                     onEvent = onEvent,
                     depth = 0,
+                    parentMessagesProvider = { messages },
+                    parentSystemCount = systemCount,
                 )
             }.getOrNull()
         }

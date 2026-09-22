@@ -420,7 +420,7 @@ class AgentSubagentPolicyTest {
     }
 
     @Test
-    fun oversizedSubagentOutputIsBoundedInMainContextButKeptWholeInDetailEvent() {
+    fun oversizedSubagentOutputIsPassedThroughWholeWithoutTruncation() {
         // 超长子代理输出：进入主循环的副本按模式截断并打标记（防主上下文被单次扇出撑爆而被迫压缩），
         // SubagentFinished 事件仍保留完整结果供详情窗口展示。
         val huge = "F".repeat(100_000)
@@ -445,11 +445,8 @@ class AgentSubagentPolicyTest {
         val json = JSONObject(exec.fanout(1, AgentModelClient.ToolCall("c1", "spawn_agents", args.toString())).content)
         assertEquals(1, json.getInt("succeeded"))
         val taskResult = json.getJSONArray("results").getJSONObject(0)
-        assertTrue(taskResult.optBoolean("content_truncated", false))
-        assertEquals(huge.length, taskResult.optInt("content_chars", -1))
-        val contextCopy = taskResult.getString("content")
-        assertTrue(contextCopy.contains("主上下文保护"))
-        assertTrue(contextCopy.length < huge.length / 10)
+        assertFalse(taskResult.optBoolean("content_truncated", false))
+        assertEquals(huge, taskResult.getString("content"))
         val finished = events.filterIsInstance<AgentEvent.SubagentFinished>().single()
         assertEquals(huge.length, finished.content.length)
     }
@@ -574,7 +571,7 @@ class AgentSubagentPolicyTest {
     }
 
     @Test
-    fun subagentErrorTruncationMarksContentChars() {
+    fun subagentErrorIsPassedThroughWholeWithoutTruncation() {
         val hugeMsg = "E".repeat(5_000)
         val failing = stubProvider { throw RuntimeException(hugeMsg) }
         val exec = AgentSubagentExecutor(
@@ -593,11 +590,11 @@ class AgentSubagentPolicyTest {
         val json = JSONObject(
             exec.fanout(1, AgentModelClient.ToolCall("c1", "spawn_agents", args.toString())).content,
         )
-        // provider 抛异常：子代理收敛为 SUBAGENT_ERROR，且 2000 字符界截断并标记。
+        // provider 抛异常：子代理收敛为 SUBAGENT_ERROR，异常全文完整回填不截断。
         val r = json.getJSONArray("results").getJSONObject(0)
         assertEquals("SUBAGENT_ERROR", r.optString("code"))
-        assertTrue(r.optBoolean("content_truncated", false))
-        assertEquals(hugeMsg.length, r.optInt("content_chars", -1))
+        assertFalse(r.optBoolean("content_truncated", false))
+        assertTrue(r.getString("content").contains(hugeMsg.take(100)))
     }
 
     @Test
@@ -606,8 +603,9 @@ class AgentSubagentPolicyTest {
         val fn = (0 until tools.length()).map { tools.getJSONObject(it).getJSONObject("function") }
             .first { it.getString("name") == "spawn_agents" }
         val props = fn.getJSONObject("parameters").getJSONObject("properties")
-        assertTrue(props.getJSONObject("max_rounds").getString("description").contains("12"))
-        assertTrue(props.getJSONObject("timeout_ms").getString("description").contains("180000"))
+        assertTrue(props.getJSONObject("max_rounds").getString("description").contains("30"))
+        assertTrue(props.getJSONObject("timeout_ms").getString("description").contains("300000"))
+        assertTrue(props.has("context_mode"))
         assertTrue(fn.getString("description").contains("4"))
     }
     @Test
@@ -638,5 +636,61 @@ class AgentSubagentPolicyTest {
         assertTrue(result.roundLimited)
         assertTrue(result.content.contains("ROUND_LIMIT_TRUNCATED: maxRounds=2"))
         assertTrue(result.content.contains("阶段性结论2"))
+    }
+
+    @Test
+    fun contextModeParsingDefaultsToPureAndRejectsUnknown() {
+        assertEquals(SubagentContextMode.PURE, SubagentContextMode.parse(null))
+        assertEquals(SubagentContextMode.PURE, SubagentContextMode.parse(""))
+        assertEquals(SubagentContextMode.SHARED, SubagentContextMode.parse("SHARED"))
+        assertEquals(null, SubagentContextMode.parse("full"))
+    }
+
+    @Test
+    fun sharedContextModeSeesParentWindowButRunsIndependently() {
+        var sawParent = false
+        val parentMessages = JSONArray()
+            .put(AgentConversationCodec.userTextMessage("主窗口关键背景：项目根在 /tmp/proj"))
+        val sharedProvider = stubProvider { request ->
+            val dump = request.messages.toString()
+            if (dump.contains("主窗口关键背景")) sawParent = true
+            ProviderResponse(
+                JSONObject().put("role", "assistant").put("content", "shared-done").put("finish_reason", "stop"),
+            )
+        }
+        val events = java.util.Collections.synchronizedList(mutableListOf<AgentEvent>())
+        val exec = AgentSubagentExecutor(
+            config = modelConfig(),
+            provider = sharedProvider,
+            parentRunController = AgentRunController(),
+            parentOperationId = "op-shared",
+            parentTools = toolArray("search_files"),
+            systemMessages = JSONArray(),
+            baseToolExecutor = AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("ok") },
+            traceFormatter = AgentTraceFormatter(),
+            onEvent = events::add,
+            depth = 0,
+            parentMessagesProvider = { parentMessages },
+            parentSystemCount = 0,
+        )
+        val args = JSONObject()
+            .put("tasks", JSONArray().put(JSONObject().put("prompt", "复述背景")))
+            .put("context_mode", "shared")
+        val json = JSONObject(exec.fanout(1, AgentModelClient.ToolCall("c1", "spawn_agents", args.toString())).content)
+        assertEquals("shared", json.getString("context_mode"))
+        assertEquals(1, json.getInt("succeeded"))
+        assertTrue(sawParent)
+        // 独立运行：主 messages 未被回写，只多出 fanout 汇总由主循环处理。
+        assertEquals(1, parentMessages.length())
+    }
+
+    @Test
+    fun invalidContextModeIsRejected() {
+        val exec = subagentExecutor(toolArray("search_files"))
+        val args = JSONObject()
+            .put("tasks", JSONArray().put(JSONObject().put("prompt", "task")))
+            .put("context_mode", "full")
+        val result = exec.fanout(1, AgentModelClient.ToolCall("c1", "spawn_agents", args.toString()))
+        assertTrue(result.content.contains("INVALID_ARGUMENT"))
     }
 }

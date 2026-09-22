@@ -27,4 +27,33 @@ class AgentCompactionUiTest {
         assertEquals(4_000, next.contextTokens)
         assertFalse(next.estimated)
     }
+
+    @Test
+    fun windowBreakdownSeparatesDialogueToolsThinkingAndCode() {
+        val messages = listOf(
+            UserMessageUi("u", "你好"),
+            ThinkingMessageUi("t", "先想一下", isStreaming = false),
+            ToolActivityMessageUi(
+                id = "tool-file", toolName = "read_file",
+                status = ToolActivityStatusUi.Success,
+                argumentsSummary = "读文件", resultSummary = "文件正文".repeat(50),
+            ),
+            ToolActivityMessageUi(
+                id = "tool-other", toolName = "get_setting",
+                status = ToolActivityStatusUi.Success,
+                argumentsSummary = "读设置", resultSummary = "ok",
+            ),
+            AgentMessageUi("a", "查到了"),
+        )
+        val usage = latestContextUsage(messages, null)
+        val breakdown = checkNotNull(usage.breakdown)
+        assertTrue(breakdown.dialogueTokens > 0)
+        assertTrue(breakdown.thinkingTokens > 0)
+        assertTrue(breakdown.toolCallTokens > 0)
+        assertTrue(breakdown.codeDataTokens > breakdown.toolCallTokens)
+        val line = formatContextBreakdown(breakdown, java.util.Locale.US)
+        assertTrue(line.contains("对话"))
+        assertTrue(line.contains("思考链"))
+        assertTrue(line.contains("代码数据"))
+    }
 }

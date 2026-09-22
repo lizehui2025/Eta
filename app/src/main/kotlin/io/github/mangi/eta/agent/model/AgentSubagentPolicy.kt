@@ -3,7 +3,7 @@ package io.github.mangi.eta.agent.model
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** 子代理工作模式：research 只读搜集；code 在声明范围内编辑文件。 */
+/** 子代理执行模式：research 只读搜集；code 在声明范围内编辑文件。 */
 internal enum class SubagentMode(val wireName: String) {
     RESEARCH("research"),
     CODE("code");
@@ -21,37 +21,47 @@ internal enum class SubagentMode(val wireName: String) {
     }
 }
 
+/**
+ * 子代理上下文模式：pure 纯净隔离；shared 非纯净共享主窗口。
+ * shared 使用主 Agent 窗口快照作为前缀上下文（只读复制），但依旧独立运行：
+ * 独立 controller、独立 transcript、独立 tool loop，不回写主 messages，
+ * 终态只经 fanout 汇总进入主循环。
+ */
+internal enum class SubagentContextMode(val wireName: String) {
+    PURE("pure"),
+    SHARED("shared");
+
+    companion object {
+        /** 空值按 pure 处理；无法识别返回 null，由调用方拒绝。 */
+        fun parse(raw: String?): SubagentContextMode? {
+            val value = raw?.trim()?.lowercase().orEmpty()
+            return when (value) {
+                "", PURE.wireName -> PURE
+                SHARED.wireName -> SHARED
+                else -> null
+            }
+        }
+    }
+}
+
 /** 并发子代理的工具隔离策略。只允许一层，不允许子代理再 spawn。 */
 internal object AgentSubagentPolicy {
     const val TOOL_NAME = "spawn_agents"
 
     // 默认护栏（非硬上限）：省略即按默认执行，避免一个卡死拖住整批。
     // 显式传超大值仍允许（不限上限），等价于按需放开。
-    const val DEFAULT_MAX_ROUNDS = 12
-    const val DEFAULT_FANOUT_TIMEOUT_MS = 180_000
+    const val DEFAULT_MAX_ROUNDS = 30
+    const val DEFAULT_FANOUT_TIMEOUT_MS = 300_000
     const val MAX_PARALLEL_TASKS = 4
     const val MAX_PROMPT_CHARS = 4000
     const val MAX_LABEL_CHARS = 64
     const val MAX_WRITE_PATH_CHARS = 1024
 
-    /**
-     * 主上下文回填界（非执行配额）：单个子代理进入主循环 tool result 的内容上限。
-     * 子代理执行默认按 DEFAULT_MAX_ROUNDS / DEFAULT_FANOUT_TIMEOUT_MS 执行（显式传超大值可放开）；
-     * 超限输出只截断进入主上下文的副本并打标记，
-     * 完整结果仍保留在 SubagentFinished 事件（子代理详情窗口）中。
-     * 不设此界时，一次扇出的全量输出会直接撑满有限的模型窗口，反而被迫触发整轮上下文压缩。
-     */
-    const val RESEARCH_MAIN_CONTEXT_CHARS = 4_000
-    const val CODE_MAIN_CONTEXT_CHARS = 12_000
-
-    /** 进入主上下文汇总的改动文件列表上限（UI 事件保留完整列表）。 */
-    const val MAX_CHANGED_FILES_IN_CONTEXT = 100
-
-    /** 异常信息进入主上下文的上限（避免异常携带的大文本撑爆上下文）。 */
-    const val MAX_ERROR_CHARS_IN_CONTEXT = 2_000
-
-    fun maxMainContextChars(mode: SubagentMode): Int =
-        if (mode == SubagentMode.CODE) CODE_MAIN_CONTEXT_CHARS else RESEARCH_MAIN_CONTEXT_CHARS
+    // 注意：不再对子代理输出做任何主上下文截断。
+    // 历史上的 RESEARCH/CODE_MAIN_CONTEXT_CHARS、MAX_CHANGED_FILES_IN_CONTEXT、
+    // MAX_ERROR_CHARS_IN_CONTEXT 会把完整结果截成“部分结果 + 追问指引”，主代理拿到残缺
+    // 输出只能重试或再派发子任务，直接浪费一整轮算力。主窗口容量由正常的
+    // AgentContextSession.compact() 按实时窗口统一裁决，子代理侧一律完整回填。
 
     /** 写工具集合：仅在 code 模式下按任务声明的 write_paths 放行。 */
     val writeTools: Set<String> = setOf("write_file", "edit_file")

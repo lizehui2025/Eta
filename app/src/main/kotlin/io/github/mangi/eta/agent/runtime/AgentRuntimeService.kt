@@ -49,7 +49,6 @@ import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.ModuleConfig
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
-import kotlin.concurrent.thread
 import kotlinx.coroutines.runBlocking
 import top.yukonga.miuix.kmp.squircle.LocalSquircleEnabled
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -72,6 +71,10 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val resultIo = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "agent-result-io") }
+    /** 后台 run/ingest 共用有界池，避免每次请求裸 thread() 瞬时堆线程。 */
+    private val runtimeBg = Executors.newFixedThreadPool(2) { runnable ->
+        Thread(runnable, "agent-runtime-bg").apply { isDaemon = true }
+    }
     private val serviceMessenger = Messenger(IncomingHandler())
 
     @Volatile
@@ -153,6 +156,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         activeSession?.cancel("Agent Runtime 服务已停止")
         activeSession = null
         resultIo.shutdownNow()
+        runCatching { runtimeBg.shutdownNow() }
         mainHandler.removeCallbacksAndMessages(null)
         resultCardView?.let { view -> runCatching { windowManager?.removeView(view) } }
         bubbleView?.let { view -> runCatching { windowManager?.removeView(view) } }
@@ -264,7 +268,8 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         }
         val pending = PendingStartRequest(generation, incoming, replyTo)
         pendingStartRequest = pending
-        thread(name = "agent-runtime-image-ingest") {
+        try {
+            runtimeBg.execute {
             val prepared = runCatching {
                 val request = AgentRuntimeImageTransfer.materialize(incoming)
                 if (!AgentRuntimeRequestConfigResolver.requiresRuntimeConfig(request)) {
@@ -309,6 +314,10 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                     },
                 )
             }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            pendingStartRequest = null
+            finishWithFailure("Agent Runtime 繁忙，请稍后重试", replyTo)
         }
     }
 
@@ -358,12 +367,22 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             }
         }
 
-        thread(name = "agent-runtime") {
+        try {
+            runtimeBg.execute {
             try {
                 executeRun(session, request)
             } finally {
                 AgentExecutionService.release("run:${request.runId}")
             }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            AgentExecutionService.release("run:${request.runId}")
+            session.complete(
+                AgentRuntimeWire.RunResult(
+                    runId = request.runId, ok = false, content = "",
+                    error = "Agent Runtime 繁忙，请稍后重试",
+                ),
+            ) {}
         }
     }
 
