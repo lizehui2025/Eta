@@ -227,11 +227,11 @@ class AgentToolCatalogTest {
         val function = AgentToolCatalog.build(terminalTools = false, browserTools = false).function("spawn_agents")
         val properties = function.getJSONObject("parameters").getJSONObject("properties")
 
-        // 默认不再限制子代理开销：任务数/工具数不设 maxItems，轮数/超时不设 maximum。
+        // 子代理不设任何开销上限：任务数/工具数不设 maxItems，也不再有轮数与超时参数。
         assertFalse(properties.getJSONObject("tasks").has("maxItems"))
         assertFalse(properties.getJSONObject("allowed_tools").has("maxItems"))
-        assertFalse(properties.getJSONObject("max_rounds").has("maximum"))
-        assertFalse(properties.getJSONObject("timeout_ms").has("maximum"))
+        assertFalse("max_rounds 参数应已移除", properties.has("max_rounds"))
+        assertFalse("timeout_ms 参数应已移除", properties.has("timeout_ms"))
     }
 
     @Test

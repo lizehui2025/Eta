@@ -36,13 +36,11 @@ internal class AgentLoop(
     initialSupplementIndex: Int = 0,
     private val subagentHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
     private val todoHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
-    private val maxRounds: Int? = null,
 ) {
     data class Result(
         val content: String,
         val reasoningContent: String,
         val sensitiveToolCallIds: Set<String>,
-        val roundLimited: Boolean = false,
     )
 
     private data class ToolOutcome(
@@ -100,29 +98,9 @@ internal class AgentLoop(
 
     fun run(): Result {
         var round = 1
-        // 轮数触顶时用于回填部分结果：最近一次非空 assistant 文本。
-        var lastAssistantText = ""
 
         while (true) {
             runController.throwIfCancelled()
-            if (maxRounds != null && round > maxRounds) {
-                publishTranscript()
-                // 触顶不截断：携带最近一次非空 assistant 全文作为部分结果，不再按 1500 字符裁剪。
-                val partial = lastAssistantText
-                val limitNote = buildString {
-                    append(ROUND_LIMIT_MARKER_PREFIX).append(maxRounds)
-                    if (partial.isNotEmpty()) {
-                        append("\n\n").append(partial)
-                    }
-                }
-                onEvent(AgentEvent.RunFinished(round = round - 1, contentChars = limitNote.length))
-                return Result(
-                    content = limitNote,
-                    reasoningContent = reasoningSnapshot(),
-                    sensitiveToolCallIds = sensitiveToolCallIds.toSet(),
-                    roundLimited = true,
-                )
-            }
             if (purpose.allowsTools) appendPendingSteeringMessage()
 
             val roundTools = if (purpose.allowsTools) toolsForRound?.invoke() ?: tools else JSONArray()
@@ -202,12 +180,6 @@ internal class AgentLoop(
                 accumulatedReasoning.length == reasoningLengthBeforeRound
             ) {
                 appendReasoning(assistantReasoning)
-            }
-
-            // 记录最近一次非空 assistant 文本；轮数触顶时作为截断前的部分结果带回。
-            val assistantText = assistantMessage.optString("content").trim()
-            if (assistantText.isNotBlank() && assistantText != "null") {
-                lastAssistantText = assistantText
             }
 
             appendMessage(
@@ -531,9 +503,6 @@ internal class AgentLoop(
         }
 
     companion object {
-        /** 轮数触顶标记前缀；AgentSubagentExecutor 据此从 Result.content 中剥出部分结果。 */
-        const val ROUND_LIMIT_MARKER_PREFIX = "ROUND_LIMIT_TRUNCATED: maxRounds="
-
         /** 单轮思考链上限：超限丢弃最旧部分，只防内存无界，不截断正常结果。 */
         const val MAX_REASONING_CHARS = 200_000
     }

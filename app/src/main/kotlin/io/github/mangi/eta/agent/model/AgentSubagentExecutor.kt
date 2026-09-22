@@ -120,19 +120,7 @@ internal class AgentSubagentExecutor(
             SubagentContextMode.parse(contextModeRaw)
                 ?: return err("INVALID_ARGUMENT", "context_mode 仅支持 pure 或 shared")
         }
-        // 默认护栏：max_rounds / timeout_ms 省略时按默认值执行，避免一个卡死拖住整批；
-        // 显式提供时按调用方给定值执行，仅做有效性下限兜底（>= 1），不设上限（超大值等价于放开）。
-        val maxRounds: Int = if (args.has("max_rounds")) {
-            args.optInt("max_rounds", 1).coerceAtLeast(1)
-        } else {
-            AgentSubagentPolicy.DEFAULT_MAX_ROUNDS
-        }
-        val timeoutMs: Int = if (args.has("timeout_ms")) {
-            args.optInt("timeout_ms", 1).coerceAtLeast(1)
-        } else {
-            AgentSubagentPolicy.DEFAULT_FANOUT_TIMEOUT_MS
-        }
-        val timeoutIsDefault = !args.has("timeout_ms")
+        // 子代理不设轮数与超时：只做有效性下限兜底，长任务按它自己的节奏跑完。
         val requested = AgentSubagentPolicy.parseRequestedAllowedTools(args, mode)
         val subTools = AgentSubagentPolicy.filterTools(parentTools, requested, mode)
         if (subTools.length() == 0) {
@@ -210,7 +198,6 @@ internal class AgentSubagentExecutor(
                         parentToolCallId = call.id,
                         index = index,
                         task = task,
-                        maxRounds = maxRounds,
                         subTools = subTools,
                         holders = subControllers,
                         mode = mode,
@@ -225,11 +212,13 @@ internal class AgentSubagentExecutor(
                 }
             }
             // 整体超时默认即生效：到点取消未完成任务，走下方超时收敛路径。
-            val futures = pool.invokeAll(callables, timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            // 不设整体超时：invokeAll 会一直等到所有任务自然结束。子代理只由父取消终止，
+            // 此时各子控制器被 cancel，阻塞中的模型请求与工具调用会随之中断。
+            val futures = pool.invokeAll(callables)
             val results = JSONArray()
             var okCount = 0
-            var timeoutCount = 0
-            // 超时后有界等待只做一次，避免等待时长随超时任务数叠加。
+            var interruptedCount = 0
+            // 取消/中断后有界等待只做一次，避免等待时长随未完成任务数叠加。
             var poolStopRequested = false
             for (i in tasks.indices) {
                 val f = futures[i]
@@ -245,24 +234,18 @@ internal class AgentSubagentExecutor(
                         }
                     }
                     val stillRunning = !pool.isTerminated
-                    // 超时汇总完整回填：changed_files 不截断，主窗口容量由 compact 统一裁决。
+                    // 未完成汇总完整回填：changed_files 不截断，主窗口容量由 compact 统一裁决。
                     val changedAll = synchronized(changedFilesByIndex[i]) { changedFilesByIndex[i].toList() }
                     val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - fanoutStartNano)
-                    val timeoutSource = if (timeoutIsDefault) {
-                        "默认 timeout_ms=${timeoutMs}"
-                    } else {
-                        "显式 timeout_ms=${timeoutMs}"
-                    }
-                    val timeoutContent = "子代理超时未完成（${timeoutSource} 到点取消）；" +
+                    val interruptedContent = "子代理被取消或中断，未完成；" +
                         "执行状态未知、可能已部分写入：请先按 changed_files 读取文件核实落盘，再决定缩小任务重试或继续；不要直接重放写操作"
-                    val timeoutJson = JSONObject()
+                    val interruptedJson = JSONObject()
                         .put("label", label)
                         .put("ok", false)
-                        .put("code", "SUBAGENT_TIMEOUT")
-                        .put("content", timeoutContent)
-                        .put("verify_hint", "先读 changed_files 核实，再重试；仍超时的任务请拆小或显式加大 timeout_ms")
-                        .put("timeout_ms", timeoutMs)
-                        .put("thread", "timeout")
+                        .put("code", "SUBAGENT_INTERRUPTED")
+                        .put("content", interruptedContent)
+                        .put("verify_hint", "先读 changed_files 核实现状，再决定重试或继续")
+                        .put("thread", "interrupted")
                         .put("started_ms", fanoutStartWallMs)
                         .put("finished_ms", fanoutStartWallMs + elapsedMs)
                         .put("duration_ms", elapsedMs)
@@ -273,9 +256,9 @@ internal class AgentSubagentExecutor(
                     val won = terminalClaimed[i].compareAndSet(false, true)
                     val committed = terminalResults[i]
                     if (won) {
-                        timeoutCount++
-                        results.put(timeoutJson)
-                        // 超时任务的 runSingle 可能仍在收尾，其迟到 SubagentFinished 会被 compareAndSet 拦下；
+                        interruptedCount++
+                        results.put(interruptedJson)
+                        // 未完成任务的 runSingle 可能仍在收尾，其迟到 SubagentFinished 会被 compareAndSet 拦下；
                         // 这里补发一行，保证 UI 独立行收敛到终态。
                         onEvent(
                             AgentEvent.SubagentFinished(
@@ -284,18 +267,18 @@ internal class AgentSubagentExecutor(
                                 subIndex = i,
                                 label = label,
                                 ok = false,
-                                content = timeoutContent,
+                                content = interruptedContent,
                                 durationMs = elapsedMs,
-                                code = "SUBAGENT_TIMEOUT",
+                                code = "SUBAGENT_INTERRUPTED",
                             ),
                         )
                     } else if (committed != null) {
-                        // 超时边界上子代理已抢先上报终态：采用其已提交结果，不再重复上报或覆盖。
+                        // 中断边界上子代理已抢先上报终态：采用其已提交结果，不再重复上报或覆盖。
                         if (committed.optBoolean("ok", false)) okCount++
                         results.put(committed)
                     } else {
-                        timeoutCount++
-                        results.put(timeoutJson)
+                        interruptedCount++
+                        results.put(interruptedJson)
                     }
                 } else {
                     val r = runCatching { f.get() }.getOrElse { t ->
@@ -330,10 +313,8 @@ internal class AgentSubagentExecutor(
                 .put("context_mode", contextMode.wireName)
                 .put("total", tasks.size)
                 .put("succeeded", okCount)
-                .put("timed_out", timeoutCount)
+                .put("interrupted", interruptedCount)
                 .put("fanout_elapsed_ms", fanoutElapsedMs)
-                .put("max_rounds", maxRounds)
-                .put("timeout_ms", timeoutMs)
                 .put("results", results)
                 .apply {
                     if (filteredTools.isNotEmpty()) put("filtered_tools", JSONArray(filteredTools))
@@ -364,7 +345,6 @@ internal class AgentSubagentExecutor(
         parentToolCallId: String,
         index: Int,
         task: SubTask,
-        maxRounds: Int,
         subTools: JSONArray,
         holders: Array<AgentRunController?>,
         mode: SubagentMode,
@@ -524,7 +504,7 @@ internal class AgentSubagentExecutor(
                     append("禁止 GUI/浏览器/前台操作与任何写操作（含 shell、文件写入），禁止再调用 spawn_agents；")
                     append("如需的工具不可用，直接如实返回缺失，不要编造。\n")
                 }
-                append("请在最多 ").append(maxRounds).append(" 轮模型调用内完成，")
+                append("请在拿到足够事实后自行结束，不要为了凑轮数继续；")
                 append("最后用简洁中文给出")
                 append(if (mode == SubagentMode.CODE) "改动结果。" else "事实结果。")
                 append("\n<subtask>\n")
@@ -546,26 +526,8 @@ internal class AgentSubagentExecutor(
                 transcript = JSONArray(),
                 systemCount = subSystemCount,
                 operationId = "$parentOperationId-sub-$index",
-                maxRounds = maxRounds,
             )
             val r = loop.run()
-            if (r.roundLimited) {
-                // 轮数触顶不丢弃：完整部分结果直接可用（ok=true），主代理可继续使用而非整体重试。
-                val partial = r.content
-                    .removePrefix(AgentLoop.ROUND_LIMIT_MARKER_PREFIX + maxRounds)
-                    .trim()
-                val content = if (partial.isNotBlank()) {
-                    partial + "\n\n（说明：子代理达到 max_rounds=$maxRounds 上限停止，以上为已完成的部分结果，可直接使用；" +
-                        "如需继续请派发新的子任务。）"
-                } else {
-                    "（子代理在 max_rounds=$maxRounds 内未产生可保留文本）"
-                }
-                return finishUi(
-                    ok = partial.isNotBlank(),
-                    content = content,
-                    code = "SUBAGENT_ROUND_LIMIT",
-                )
-            }
             // 完整结果直接回填，不截断。
             val content = r.content.trim()
             return finishUi(

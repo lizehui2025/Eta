@@ -48,10 +48,9 @@ internal enum class SubagentContextMode(val wireName: String) {
 internal object AgentSubagentPolicy {
     const val TOOL_NAME = "spawn_agents"
 
-    // 默认护栏（非硬上限）：省略即按默认执行，避免一个卡死拖住整批。
-    // 显式传超大值仍允许（不限上限），等价于按需放开。
-    const val DEFAULT_MAX_ROUNDS = 30
-    const val DEFAULT_FANOUT_TIMEOUT_MS = 300_000
+    // 子代理不设轮数上限与整体超时：长任务是正常的，把子代理在半途截断只会
+    // 让主代理拿到残缺结果、再派一次，反而更贵。子代理只被两件事终止——父运行取消，
+    // 或它自己自然结束。唯一保留的并发护栏是同时运行的子代理数量上限。
     const val MAX_PARALLEL_TASKS = 4
     const val MAX_PROMPT_CHARS = 4000
     const val MAX_LABEL_CHARS = 64

@@ -131,12 +131,12 @@ class AgentSubagentPolicyTest {
         val fn = (0 until tools.length()).map { tools.getJSONObject(it).getJSONObject("function") }.first { it.getString("name") == "spawn_agents" }
         val props = fn.getJSONObject("parameters").getJSONObject("properties")
         assertEquals(1, fn.getJSONObject("parameters").getJSONArray("required").length())
-        // 默认不再限制子代理开销：schema 不声明任务数/工具数/轮数/超时的配额上限。
+        // 子代理不设任何开销上限：schema 不声明任务数/工具数，也不再提供轮数与超时参数。
         assertFalse("tasks 不应设数量上限", props.getJSONObject("tasks").has("maxItems"))
         assertEquals(1, props.getJSONObject("tasks").getInt("minItems"))
         assertFalse("allowed_tools 不应设数量上限", props.getJSONObject("allowed_tools").has("maxItems"))
-        assertFalse("max_rounds 不应设上限", props.getJSONObject("max_rounds").has("maximum"))
-        assertFalse("timeout_ms 不应设上限", props.getJSONObject("timeout_ms").has("maximum"))
+        assertFalse("max_rounds 参数应已移除", props.has("max_rounds"))
+        assertFalse("timeout_ms 参数应已移除", props.has("timeout_ms"))
     }
 
     @Test
@@ -159,31 +159,37 @@ class AgentSubagentPolicyTest {
     }
 
     @Test
-    fun loopMaxRoundsTruncatesEndlessToolCalls() {
+    fun loopRunsUntilProviderStopsWithoutRoundQuota() {
+        // 子代理不再有轮数上限：循环只由模型自然结束（或取消）终止。
         var providerCalls = 0
-        val looping = stubProvider {
+        val finishing = stubProvider {
             providerCalls++
-            val tc = JSONObject().put("id", "c$providerCalls").put("type", "function")
-                .put("function", JSONObject().put("name", "get_current_context").put("arguments", "{}"))
-            ProviderResponse(
-                JSONObject().put("role", "assistant").put("content", "").put("finish_reason", "tool_calls")
-                    .put("tool_calls", JSONArray().put(tc)),
-            )
+            if (providerCalls < 5) {
+                val tc = JSONObject().put("id", "c$providerCalls").put("type", "function")
+                    .put("function", JSONObject().put("name", "get_current_context").put("arguments", "{}"))
+                ProviderResponse(
+                    JSONObject().put("role", "assistant").put("content", "").put("finish_reason", "tool_calls")
+                        .put("tool_calls", JSONArray().put(tc)),
+                )
+            } else {
+                ProviderResponse(
+                    JSONObject().put("role", "assistant").put("content", "完成").put("finish_reason", "stop"),
+                )
+            }
         }
         val loop = AgentLoop(
             config = modelConfig(),
             messages = JSONArray().put(AgentConversationCodec.userTextMessage("hi")),
             tools = toolArray("get_current_context"),
-            provider = looping,
+            provider = finishing,
             toolExecutor = AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("{}") },
             runController = AgentRunController(),
             traceFormatter = AgentTraceFormatter(),
             onEvent = {},
-            maxRounds = 2,
         )
         val result = loop.run()
-        assertTrue(result.roundLimited)
-        assertEquals(2, providerCalls)
+        assertEquals("完成", result.content)
+        assertEquals(5, providerCalls)
     }
 
     @Test
@@ -240,7 +246,7 @@ class AgentSubagentPolicyTest {
         val result = exec.fanout(1, AgentModelClient.ToolCall("c12", "spawn_agents", args.toString()))
         val json = JSONObject(result.content)
         assertEquals(12, json.getInt("succeeded"))
-        assertEquals(0, json.optInt("timed_out", -1))
+        assertEquals(0, json.optInt("interrupted", -1))
     }
 
     @Test
@@ -256,8 +262,8 @@ class AgentSubagentPolicyTest {
     }
 
     @Test
-    fun explicitRoundAndTimeoutLimitsAreHonoredWithoutCeilings() {
-        // 显式声明远超旧上限的 max_rounds / timeout_ms（旧上限 16 / 600000）不再被拒绝或截断。
+    fun legacyRoundAndTimeoutArgumentsAreIgnored() {
+        // 旧客户端仍可能传已移除的 max_rounds / timeout_ms：不报错、也不生效，任务照常跑完。
         val exec = subagentExecutor(toolArray("search_files"))
         val args = JSONObject()
             .put("tasks", JSONArray().put(JSONObject().put("prompt", "task")))
@@ -266,7 +272,9 @@ class AgentSubagentPolicyTest {
         val result = exec.fanout(1, AgentModelClient.ToolCall("c1", "spawn_agents", args.toString()))
         val json = JSONObject(result.content)
         assertEquals(1, json.getInt("succeeded"))
-        assertEquals(0, json.optInt("timed_out", -1))
+        assertEquals(0, json.optInt("interrupted", -1))
+        assertFalse("汇总不再回显轮数", json.has("max_rounds"))
+        assertFalse("汇总不再回显超时", json.has("timeout_ms"))
     }
 
     @Test
@@ -475,15 +483,16 @@ class AgentSubagentPolicyTest {
     }
 
     @Test
-    fun fanoutAppliesDefaultGuardrailsWhenOmitted() {
+    fun fanoutSummaryOmitsRemovedQuotaFields() {
         val exec = subagentExecutor(toolArray("search_files"))
         val args = JSONObject().put("tasks", JSONArray().put(JSONObject().put("prompt", "task")))
         val json = JSONObject(
             exec.fanout(1, AgentModelClient.ToolCall("c1", "spawn_agents", args.toString())).content,
         )
         assertEquals(1, json.getInt("succeeded"))
-        assertEquals(AgentSubagentPolicy.DEFAULT_MAX_ROUNDS, json.getInt("max_rounds"))
-        assertEquals(AgentSubagentPolicy.DEFAULT_FANOUT_TIMEOUT_MS, json.getInt("timeout_ms"))
+        assertFalse("不再回显轮数上限", json.has("max_rounds"))
+        assertFalse("不再回显整体超时", json.has("timeout_ms"))
+        assertFalse("不再回显超时计数", json.has("timed_out"))
     }
 
     @Test
@@ -502,49 +511,46 @@ class AgentSubagentPolicyTest {
     }
 
     @Test
-    fun fanoutTimeoutConvergesWithVerifyHint() {
-        // provider 无视中断睡 15s：300ms 到点取消时 runSingle 不可能已提交，必走超时收敛分支。
-        val hanging = stubProvider {
-            try {
-                Thread.sleep(15_000)
-            } catch (_: InterruptedException) {
-                try {
-                    Thread.sleep(15_000)
-                } catch (_: InterruptedException) {
-                    // 仍被中断则如实抛，由 runSingle 收敛；此时超时分支大概率已先提交。
-                    throw UnsupportedOperationException("interrupted twice")
-                }
+    fun subagentRunsFarBeyondTheOldRoundQuota() {
+        // 子代理不再有轮数上限：40 轮工具往返（旧默认只有 30 轮）必须能跑完并正常收尾。
+        var providerCalls = 0
+        val longRunning = stubProvider {
+            providerCalls++
+            if (providerCalls <= 40) {
+                val tc = JSONObject().put("id", "c$providerCalls").put("type", "function")
+                    .put("function", JSONObject().put("name", "search_files").put("arguments", "{}"))
+                ProviderResponse(
+                    JSONObject().put("role", "assistant").put("content", "").put("finish_reason", "tool_calls")
+                        .put("tool_calls", JSONArray().put(tc)),
+                )
+            } else {
+                ProviderResponse(
+                    JSONObject().put("role", "assistant").put("content", "长任务完成").put("finish_reason", "stop"),
+                )
             }
-            ProviderResponse(
-                JSONObject().put("role", "assistant").put("content", "done").put("finish_reason", "stop"),
-            )
         }
         val exec = AgentSubagentExecutor(
             config = modelConfig(),
-            provider = hanging,
+            provider = longRunning,
             parentRunController = AgentRunController(),
-            parentOperationId = "op-timeout",
+            parentOperationId = "op-long",
             parentTools = toolArray("search_files"),
             systemMessages = JSONArray(),
-            baseToolExecutor = AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("ok") },
+            baseToolExecutor = AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("{\"ok\":true}") },
             traceFormatter = AgentTraceFormatter(),
             onEvent = {},
             depth = 0,
         )
-        val args = JSONObject()
-            .put("tasks", JSONArray().put(JSONObject().put("label", "slow").put("prompt", "task")))
-            .put("timeout_ms", 300)
+        val args = JSONObject().put("tasks", JSONArray().put(JSONObject().put("prompt", "task")))
         val json = JSONObject(
             exec.fanout(1, AgentModelClient.ToolCall("c1", "spawn_agents", args.toString())).content,
         )
-        assertEquals(1, json.getInt("total"))
-        assertEquals(0, json.getInt("succeeded"))
-        assertEquals(1, json.getInt("timed_out"))
+        assertEquals(1, json.getInt("succeeded"))
+        assertEquals(0, json.optInt("interrupted", -1))
+        assertEquals(41, providerCalls)
         val r = json.getJSONArray("results").getJSONObject(0)
-        assertEquals("SUBAGENT_TIMEOUT", r.getString("code"))
-        assertTrue(r.getString("content").contains("核实"))
-        assertTrue(r.has("verify_hint"))
-        assertEquals(300, r.getInt("timeout_ms"))
+        assertFalse("不应再有轮数触顶标记", r.has("code"))
+        assertEquals("长任务完成", r.getString("content"))
     }
 
     @Test
@@ -598,44 +604,54 @@ class AgentSubagentPolicyTest {
     }
 
     @Test
-    fun spawnToolDeclaresDefaultGuardrails() {
+    fun spawnToolDeclaresParallelCapButNoQuotaArguments() {
         val tools = AgentToolCatalog.build(terminalTools = false, browserTools = false)
         val fn = (0 until tools.length()).map { tools.getJSONObject(it).getJSONObject("function") }
             .first { it.getString("name") == "spawn_agents" }
         val props = fn.getJSONObject("parameters").getJSONObject("properties")
-        assertTrue(props.getJSONObject("max_rounds").getString("description").contains("30"))
-        assertTrue(props.getJSONObject("timeout_ms").getString("description").contains("300000"))
+        assertFalse("轮数参数应已移除", props.has("max_rounds"))
+        assertFalse("超时参数应已移除", props.has("timeout_ms"))
         assertTrue(props.has("context_mode"))
         assertTrue(fn.getString("description").contains("4"))
+        assertTrue(
+            "描述必须说明不设超时且长时间运行是正常的",
+            fn.getString("description").contains("不设轮数与整体超时") &&
+                fn.getString("description").contains("长时间运行"),
+        )
     }
     @Test
-    fun loopMaxRoundsKeepsLastPartialAssistantText() {
+    fun loopKeepsRunningUntilProviderStopsOnItsOwn() {
+        // 不再有轮数护栏：循环只在模型给出终止原因（或取消）时结束。
         var providerCalls = 0
-        val looping = stubProvider {
+        val finishing = stubProvider {
             providerCalls++
-            val tc = JSONObject().put("id", "c$providerCalls").put("type", "function")
-                .put("function", JSONObject().put("name", "get_current_context").put("arguments", "{}"))
-            ProviderResponse(
-                JSONObject().put("role", "assistant").put("content", "阶段性结论$providerCalls")
-                    .put("finish_reason", "tool_calls")
-                    .put("tool_calls", JSONArray().put(tc)),
-            )
+            if (providerCalls < 3) {
+                val tc = JSONObject().put("id", "c$providerCalls").put("type", "function")
+                    .put("function", JSONObject().put("name", "get_current_context").put("arguments", "{}"))
+                ProviderResponse(
+                    JSONObject().put("role", "assistant").put("content", "阶段性结论$providerCalls")
+                        .put("finish_reason", "tool_calls")
+                        .put("tool_calls", JSONArray().put(tc)),
+                )
+            } else {
+                ProviderResponse(
+                    JSONObject().put("role", "assistant").put("content", "最终结论").put("finish_reason", "stop"),
+                )
+            }
         }
         val loop = AgentLoop(
             config = modelConfig(),
             messages = JSONArray().put(AgentConversationCodec.userTextMessage("hi")),
             tools = toolArray("get_current_context"),
-            provider = looping,
+            provider = finishing,
             toolExecutor = AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("{}") },
             runController = AgentRunController(),
             traceFormatter = AgentTraceFormatter(),
             onEvent = {},
-            maxRounds = 2,
         )
         val result = loop.run()
-        assertTrue(result.roundLimited)
-        assertTrue(result.content.contains("ROUND_LIMIT_TRUNCATED: maxRounds=2"))
-        assertTrue(result.content.contains("阶段性结论2"))
+        assertEquals("最终结论", result.content)
+        assertEquals(3, providerCalls)
     }
 
     @Test

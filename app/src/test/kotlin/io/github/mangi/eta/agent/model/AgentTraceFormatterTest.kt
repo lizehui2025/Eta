@@ -649,7 +649,7 @@ class AgentTraceFormatterTest {
     }
 
     @Test
-    fun subagentResultShowsTimeoutAndFilteredTools() {
+    fun subagentResultShowsInterruptionAndFilteredTools() {
         val results = org.json.JSONArray()
             .put(
                 JSONObject()
@@ -663,11 +663,10 @@ class AgentTraceFormatterTest {
                 JSONObject()
                     .put("label", "改码 B")
                     .put("ok", false)
-                    .put("code", "SUBAGENT_TIMEOUT")
+                    .put("code", "SUBAGENT_INTERRUPTED")
                     .put("duration_ms", 180000)
-                    .put("content", "子代理超时未完成")
-                    .put("verify_hint", "先读 changed_files 核实")
-                    .put("timeout_ms", 180000)
+                    .put("content", "子代理被取消或中断")
+                    .put("verify_hint", "先读 changed_files 核实现状")
                     .put("still_running", true)
                     .put("changed_files", org.json.JSONArray().put("/repo/a.kt")),
             )
@@ -677,10 +676,8 @@ class AgentTraceFormatterTest {
                 .put("mode", "research")
                 .put("total", 2)
                 .put("succeeded", 1)
-                .put("timed_out", 1)
+                .put("interrupted", 1)
                 .put("fanout_elapsed_ms", 181000)
-                .put("max_rounds", 12)
-                .put("timeout_ms", 180000)
                 .put("results", results)
                 .put("filtered_tools", org.json.JSONArray().put("terminal"))
                 .toString(),
@@ -688,11 +685,11 @@ class AgentTraceFormatterTest {
 
         val summary = formatter.summarizeResult("spawn_agents", result)
         assertTrue(summary.contains("1/2 成功"))
-        assertTrue(summary.contains("超时 1"))
+        assertTrue(summary.contains("未完成 1"))
         assertTrue(summary.contains("已过滤 1 个工具"))
 
         val detail = formatter.summarizeDetail("spawn_agents", """{"tasks":[{"label":"x"}]}""", result)
-        assertTrue(detail.contains("共 2 项 · 成功 1 项 · 超时 1 项"))
+        assertTrue(detail.contains("共 2 项 · 成功 1 项 · 未完成 1 项"))
         assertTrue(detail.contains("被模式过滤的工具"))
         assertTrue(detail.contains("terminal"))
         assertTrue(detail.contains("✓ 调研 A"))

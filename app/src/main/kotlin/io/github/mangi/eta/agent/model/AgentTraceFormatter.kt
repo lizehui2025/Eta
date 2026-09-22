@@ -340,7 +340,7 @@ internal class AgentTraceFormatter {
 
     /**
      * 展开态的详细信息：文件读写展示变更，目录/搜索展示命中与截断指引，
-     * 子代理展示超时与过滤信息，终端展示更完整的输出。返回空串表示没有可展示的详情。
+     * 子代理展示取消与过滤信息，终端展示更完整的输出。返回空串表示没有可展示的详情。
      */
     fun summarizeDetail(
         toolName: String,
@@ -502,20 +502,11 @@ internal class AgentTraceFormatter {
         val succeeded = json.optInt("succeeded", 0)
         val builder = StringBuilder()
         builder.append("共 $total 项 · 成功 $succeeded 项")
-        json.optInt("timed_out", 0).takeIf { it > 0 }?.let { builder.append(" · 超时 $it 项") }
+        json.optInt("interrupted", 0).takeIf { it > 0 }?.let { builder.append(" · 未完成 $it 项") }
         if (json.has("fanout_elapsed_ms")) builder.append(" · 用时 ${json.optLong("fanout_elapsed_ms")}ms")
         val mode = json.optString("mode").takeIf { it.isNotBlank() }
-        val maxRounds = json.optInt("max_rounds", -1)
-        val timeoutMs = json.optInt("timeout_ms", -1)
-        if (mode != null || maxRounds >= 0 || timeoutMs >= 0) {
-            builder.append("\n")
-            builder.append(
-                listOfNotNull(
-                    mode?.let { "模式 $it" },
-                    maxRounds.takeIf { it >= 0 }?.let { "每任务最多 $it 轮" },
-                    timeoutMs.takeIf { it >= 0 }?.let { "超时 ${it}ms" },
-                ).joinToString(" · "),
-            )
+        mode?.let {
+            builder.append("\n").append("模式 $it")
         }
         json.optJSONArray("filtered_tools")?.takeIf { it.length() > 0 }?.let { array ->
             val names = (0 until array.length())
@@ -538,7 +529,7 @@ internal class AgentTraceFormatter {
                 add("$marker $label")
                 if (duration >= 0) add("${duration}ms")
                 when (item.optString("code")) {
-                    "SUBAGENT_TIMEOUT" -> add("超时：先读 changed_files 核实，再拆小重试")
+                    "SUBAGENT_INTERRUPTED" -> add("被取消：先读 changed_files 核实，再决定重试")
                     "SUBAGENT_ERROR" -> add("失败")
                     else -> Unit
                 }
@@ -630,7 +621,7 @@ internal class AgentTraceFormatter {
         val okCount = json.optInt("succeeded", 0)
         val base = buildList {
             add("子代理完成 · $okCount/$total 成功")
-            json.optInt("timed_out", 0).takeIf { it > 0 }?.let { add("超时 $it") }
+            json.optInt("interrupted", 0).takeIf { it > 0 }?.let { add("未完成 $it") }
             json.optJSONArray("filtered_tools")?.takeIf { it.length() > 0 }?.let {
                 add("已过滤 ${it.length()} 个工具")
             }
