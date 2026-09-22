@@ -2,11 +2,17 @@ package io.github.mangi.eta.agent.mcp
 
 import android.util.Base64
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.model.McpProtocolMode
 import io.github.mangi.eta.data.model.McpServerSetting
 import io.github.mangi.eta.data.model.McpToolDefinition
 import io.github.mangi.eta.data.repository.McpServerRepository
 import java.security.MessageDigest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -50,24 +56,16 @@ internal class McpRunSnapshot(
     companion object {
         val EMPTY = McpRunSnapshot(emptyList())
 
-        suspend fun load(): McpRunSnapshot {
-            val projected = mutableListOf<McpRunTool>()
+        suspend fun load(): McpRunSnapshot = coroutineScope {
             val now = System.currentTimeMillis()
-            McpServerRepository.enabledServers().forEach { configured ->
-                val bearerToken = McpServerRepository.bearerToken(configured.id)
-                val needsRefresh = configured.lastProtocolVersion == null ||
-                    configured.lastProtocolVersion == McpProtocolMode.LATEST &&
-                    (configured.toolsExpireAt == null || configured.toolsExpireAt <= now)
-                val server = if (needsRefresh) {
-                    runCatching {
-                        McpServerManager.discover(configured, bearerToken).also {
-                            McpServerRepository.update(it)
-                        }
-                    }.getOrNull()
-                        ?: return@forEach
-                } else {
-                    configured
-                }
+            val projected = mutableListOf<McpRunTool>()
+            // 并发发现 + 单服务器超时：旧实现串行遍历所有待刷新服务器，一个不响应的服务器
+            // 就能把"第一个模型请求"推迟到它自己的完整超时（HTTP 路径最坏可达分钟级）。
+            val resolved = McpServerRepository.enabledServers()
+                .map { configured -> async(Dispatchers.IO) { resolve(configured, now) } }
+                .awaitAll()
+            resolved.forEach { entry ->
+                val (server, bearerToken) = entry ?: return@forEach
                 server.activeTools.forEach { tool ->
                     if (projected.size >= MAX_RUN_TOOLS) return@forEach
                     projected += McpRunTool(
@@ -78,7 +76,31 @@ internal class McpRunSnapshot(
                     )
                 }
             }
-            return McpRunSnapshot(projected)
+            McpRunSnapshot(projected)
+        }
+
+        /** 返回 null 表示本次运行不提供该服务器的工具（未刷新、发现失败或被抑制）。 */
+        private suspend fun resolve(configured: McpServerSetting, now: Long): Pair<McpServerSetting, String?>? {
+            val bearerToken = McpServerRepository.bearerToken(configured.id)
+            val needsRefresh = configured.lastProtocolVersion == null ||
+                configured.lastProtocolVersion == McpProtocolMode.LATEST &&
+                (configured.toolsExpireAt == null || configured.toolsExpireAt <= now)
+            if (!needsRefresh) return configured to bearerToken
+            if (McpDiscoveryBackoff.isSuppressed(configured.id, now)) return null
+            val discovered = withTimeoutOrNull(DISCOVERY_TIMEOUT_MS) {
+                runCatching { McpServerManager.discover(configured, bearerToken) }.getOrNull()
+            }
+            if (discovered == null) {
+                // 失败不再静默吞掉，也不再每次运行都重付一遍等待：抑制窗口内跳过，之后照常重试。
+                McpDiscoveryBackoff.recordFailure(configured.id, System.currentTimeMillis())
+                AndroidAgentLogger.warnThrottled("agent_mcp_discovery_failed") {
+                    "MCP server discovery failed or timed out: id=${configured.id.take(16)}"
+                }
+                return null
+            }
+            McpDiscoveryBackoff.clear(configured.id)
+            runCatching { McpServerRepository.update(discovered) }
+            return discovered to bearerToken
         }
 
         private fun modelToolName(serverId: String, toolName: String): String {
@@ -96,14 +118,37 @@ internal class McpRunSnapshot(
         }
 
         private const val MAX_RUN_TOOLS = 64
+
+        /** 单个服务器的发现超时：宁可本次运行暂时没有它的工具，也不让首步一直等。 */
+        private const val DISCOVERY_TIMEOUT_MS = 8_000L
+    }
+}
+
+/**
+ * MCP 发现失败的短时抑制：失败不再每次 run 都完整重付一遍超时等待。
+ * 进程内缓存即可——运行服务随进程存活；手动刷新会清掉对应条目。
+ */
+internal object McpDiscoveryBackoff {
+    private const val SUPPRESS_MS = 60_000L
+    private val failuresUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    fun isSuppressed(serverId: String, now: Long): Boolean = (failuresUntil[serverId] ?: 0L) > now
+
+    fun recordFailure(serverId: String, now: Long) {
+        failuresUntil[serverId] = now + SUPPRESS_MS
+    }
+
+    fun clear(serverId: String) {
+        failuresUntil.remove(serverId)
     }
 }
 
 internal class McpToolExecutor(
     private val snapshot: McpRunSnapshot,
+    private val clientFactory: (McpServerSetting, String?) -> McpServerClient = McpServerManager::clientFor,
 ) : AgentModelClient.ToolExecutor, AutoCloseable {
     private val lifecycleLock = Any()
-    private val clients = mutableMapOf<String, McpHttpClient>()
+    private val clients = mutableMapOf<String, McpServerClient>()
     private var closed = false
 
     override fun execute(toolCall: AgentModelClient.ToolCall): AgentModelClient.ToolResult {
@@ -116,10 +161,8 @@ internal class McpToolExecutor(
         return runCatching {
             val client = synchronized(lifecycleLock) {
                 if (closed) return failure("MCP_EXECUTOR_CLOSED", "MCP 工具执行器已关闭")
-                clients[tool.server.id] ?: McpHttpClient(
-                    server = tool.server,
-                    bearerToken = tool.bearerToken,
-                ).also { clients[tool.server.id] = it }
+                clients[tool.server.id] ?: clientFactory(tool.server, tool.bearerToken)
+                    .also { clients[tool.server.id] = it }
             }
             adaptResult(tool, client.callTool(tool.definition, arguments))
         }.getOrElse {

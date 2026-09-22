@@ -149,6 +149,80 @@ class AgentContextCompactionTest {
     }
 
     @Test
+    fun linearSplitScanMatchesPerBoundaryCheck() {
+        val call = JSONObject().put("role", "assistant").put("tool_calls", JSONArray().apply {
+            listOf("a", "b").forEach { put(JSONObject().put("id", it).put("type", "function")
+                .put("function", JSONObject().put("name", "fixture").put("arguments", "{}"))) }
+        })
+        val mixed = listOf(
+            JSONObject().put("role", "user").put("content", "开始"),
+            JSONObject().put("role", "assistant").put("content", "答复").put("tool_calls",
+                JSONArray().put(JSONObject().put("id", "t1").put("type", "function")
+                    .put("function", JSONObject().put("name", "fixture").put("arguments", "{}")))),
+            JSONObject().put("role", "tool").put("tool_call_id", "t1").put("content", "结果"),
+            AgentConversationCodec.userTextMessage("继续"),
+            JSONObject().put("role", "assistant").put("content", "完成"),
+            call,
+        )
+        assertEquals(
+            (1..mixed.size).filter { AgentContextCompactor.canSplit(mixed, it) },
+            AgentContextCompactor.splitEnds(mixed),
+        )
+
+        // 长历史（含多轮工具批次）上，一次线性扫描必须与逐点校验完全一致。
+        val long = mutableListOf<JSONObject>()
+        repeat(60) { index ->
+            long += AgentConversationCodec.userTextMessage("任务 $index")
+            val id = "call-$index"
+            long += JSONObject().put("role", "assistant").put("tool_calls", JSONArray().put(
+                JSONObject().put("id", id).put("type", "function")
+                    .put("function", JSONObject().put("name", "fixture").put("arguments", "{}")),
+            ))
+            long += JSONObject().put("role", "tool").put("tool_call_id", id).put("content", "结果 $index")
+            long += JSONObject().put("role", "assistant").put("content", "答复 $index")
+        }
+        assertEquals(
+            (1..long.size).filter { AgentContextCompactor.canSplit(long, it) },
+            AgentContextCompactor.splitEnds(long),
+        )
+    }
+
+    @Test
+    fun cachedEstimateMatchesRawEstimateAndInvalidatesOnInPlaceEdit() {
+        val budget = AgentContextBudget(50_000)
+        val messages = jsonHistory()
+        val tools = JSONArray().put(JSONObject().put("type", "function"))
+        assertEquals(
+            AgentContextBudget.rawEstimate(messages, tools),
+            budget.rawEstimateCached(messages, tools),
+        )
+        assertEquals(budget.rawEstimateCached(messages, tools), budget.rawEstimateCached(messages, tools))
+
+        // 就地改写正文后缓存必须失效，否则判压缩会一直用旧值。
+        messages.getJSONObject(messages.length() - 1).put("content", "改写过的新正文".repeat(500))
+        assertEquals(
+            AgentContextBudget.rawEstimate(messages, tools),
+            budget.rawEstimateCached(messages, tools),
+        )
+
+        // 追加消息同样立刻反映。
+        messages.put(AgentConversationCodec.userTextMessage("追加请求"))
+        assertEquals(
+            AgentContextBudget.rawEstimate(messages, tools),
+            budget.rawEstimateCached(messages, tools),
+        )
+
+        // 图片仍按 4096/张计入，且与无缓存口径一致。
+        val withImage = JSONArray().put(AgentConversationCodec.userMessage("图片", listOf(
+            AgentModelClient.ModelImage("data:image/png;base64," + "A".repeat(4000), "image/png", 4000),
+        )))
+        assertEquals(
+            AgentContextBudget.rawEstimate(withImage),
+            budget.rawEstimateCached(withImage),
+        )
+    }
+
+    @Test
     fun toolBatchCannotBeSplitUntilEveryResultIsPresent() {
         val call = JSONObject().put("role", "assistant").put("tool_calls", JSONArray().apply {
             listOf("a", "b").forEach { put(JSONObject().put("id", it).put("type", "function")

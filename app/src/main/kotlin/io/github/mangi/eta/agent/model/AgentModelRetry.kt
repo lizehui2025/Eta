@@ -5,6 +5,8 @@ import io.github.mangi.eta.agent.runtime.AgentRunController
 
 /** 重试只包围模型请求；完整响应返回前不提交历史或执行本地工具。 */
 internal class AgentModelRetry(
+    /** 压缩等"用户正等着"的串行调用只重试一次；普通对话轮次保持 3 次。 */
+    private val maxRetries: Int = MAX_RETRIES,
     private val waitBeforeRetry: (AgentRunController, Long) -> Unit = { controller, delay ->
         controller.awaitRetryDelay(delay)
     },

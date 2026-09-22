@@ -131,9 +131,10 @@ internal object AgentModelClient {
         val systemCount = AgentPromptBuilder.buildSystemMessages(
             config, skillContext, memoryContext, initialCapabilities.rootAvailable, roleplayContext,
         ).length()
-        fun toolsFor(capabilities: AgentToolCapabilities): JSONArray {
-            if (rewriteReply) return JSONArray()
-            val tools = AgentToolCatalog.build(
+        // 工具 schema 只随能力变化：缓存整份（含附加工具）并复用同一实例，避免每轮重建全部 schema，
+        // 也让窗口预算按同一实例命中工具表估算缓存，而不是每轮把整份 schema 重新序列化一遍。
+        val toolsByCapabilities = AgentToolSchemaCache { capabilities ->
+            AgentToolCatalog.build(
                 terminalTools = config.terminalTools,
                 browserTools = config.browserTools,
                 deviceDirectTools = config.deviceDirectTools,
@@ -144,11 +145,15 @@ internal object AgentModelClient {
                 memoryTools = memoryContext.enabled,
                 memoryWritable = roleplayContext == null,
                 capabilities = capabilities,
-            )
-            for (index in 0 until additionalTools.length()) {
-                tools.put(additionalTools.opt(index))
+            ).also { tools ->
+                for (index in 0 until additionalTools.length()) {
+                    tools.put(additionalTools.opt(index))
+                }
             }
-            return tools
+        }
+        fun toolsFor(capabilities: AgentToolCapabilities): JSONArray {
+            if (rewriteReply) return JSONArray()
+            return toolsByCapabilities.tools(capabilities)
         }
         val tools = toolsFor(initialCapabilities)
         onEvent(

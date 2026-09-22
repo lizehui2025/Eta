@@ -1159,6 +1159,15 @@
   <string name="mcp_delete_confirm">删除 %1$s？此操作无法撤销。</string>
   <string name="mcp_read_only_tool">只读工具</string>
   <string name="mcp_may_modify_data">可能修改数据或访问外部服务</string>
+  <string name="mcp_transport_local">本地命令（stdio）</string>
+  <string name="mcp_transport_local_summary">通过 stdin/stdout 把本地可执行文件作为 MCP 服务器运行</string>
+  <string name="mcp_server_command">命令</string>
+  <string name="mcp_server_args">参数（可选，空格分隔）</string>
+  <string name="mcp_server_env">环境变量（可选，每行 KEY=VALUE）</string>
+  <string name="mcp_server_working_dir">工作目录（可选）</string>
+  <string name="mcp_command_required">请输入本地命令</string>
+  <string name="mcp_local_process">本地进程</string>
+  <string name="mcp_local_runs_as_app">以应用身份运行，仅使用受信任的命令</string>
   <string name="data_backup_title">数据备份</string>
   <string name="data_backup_actions">备份</string>
   <string name="data_backup_warning_title">请妥善保管备份文件</string>

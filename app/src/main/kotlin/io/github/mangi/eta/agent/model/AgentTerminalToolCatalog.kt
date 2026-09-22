@@ -58,7 +58,7 @@ internal object AgentTerminalToolCatalog {
                                     "cwd",
                                     JSONObject()
                                         .put("type", "string")
-                                        .put("description", "Working directory. Defaults to /data/local/tmp/eta for android and /workspace for linux. Relative paths use the environment default. ~/ means /storage/emulated/0.")
+                                        .put("description", "Working directory. Defaults to workspace for android and /workspace for linux. Relative paths use the environment default. ~/ means /storage/emulated/0.")
                                 )
                                 .put(
                                     "timeout_ms",
@@ -137,7 +137,7 @@ internal object AgentTerminalToolCatalog {
                                     "cwd",
                                     JSONObject()
                                         .put("type", "string")
-                                        .put("description", "工作目录，默认 /data/local/tmp/eta。相对路径也按该目录解析；用户存储可用 ~/ 表示 /storage/emulated/0。")
+                                        .put("description", "工作目录，默认 workspace 终端工作区。相对路径也按该目录解析；用户存储可用 ~/ 表示 /storage/emulated/0。")
                                 )
                                 .put(
                                     "timeout_seconds",
@@ -199,7 +199,7 @@ internal object AgentTerminalToolCatalog {
             .put(
                 AgentToolSchema.function(
                     name = "list_directory",
-                    description = "列出 Android 目录内容（按名排序，目录前缀 d、文件前缀 -，不含 . 和 ..）。默认 /data/local/tmp/eta；支持 limit/offset 翻页、glob 按文件名过滤（逗号分隔，支持 * 与 ?）、recursive 递归列出子目录。返回 total/count/offset/truncated 与 entries_text；按名找文件用它，按内容定位用 search_code，找手机文档/下载用 search_files，不要用 ls/find 手工分页。",
+                    description = "列出 Android 目录内容（按名排序，目录前缀 d、文件前缀 -，不含 . 和 ..）。默认 workspace 终端工作区；支持 limit/offset 翻页、glob 按文件名过滤（逗号分隔，支持 * 与 ?）、recursive 递归列出子目录。返回 total/count/offset/truncated 与 entries_text；按名找文件用它，按内容定位用 search_code，找手机文档/下载用 search_files，不要用 ls/find 手工分页。",
                     parameters = JSONObject()
                         .put("type", "object")
                         .put(

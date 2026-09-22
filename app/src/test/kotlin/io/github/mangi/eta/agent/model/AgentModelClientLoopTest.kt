@@ -56,6 +56,53 @@ class AgentModelClientLoopTest {
     }
 
     @Test
+    fun requestPrefixAndToolSchemaStayStableAcrossRounds() {
+        // 服务商侧的前缀缓存命中率取决于"上一轮发出的内容是否逐字节保留"：
+        // 循环只允许追加，不能在能力不变时重排或重写已发出的历史与工具表。
+        val provider = ScriptedProvider(
+            assistant(finishReason = "tool_calls", toolCalls = listOf(toolCall("c1", "get_current_context", "{}"))),
+            assistant(finishReason = "tool_calls", toolCalls = listOf(toolCall("c2", "get_current_context", "{}"))),
+            assistant(content = "完成", finishReason = "stop"),
+        )
+        val published = mutableListOf<List<AgentModelClient.ConversationMessage>>()
+        val result = AgentModelClient.complete(
+            config = modelConfig().copy(terminalTools = true),
+            prompt = "开始",
+            toolExecutor = AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("{\"ok\":true}") },
+            provider = provider,
+            onTranscript = published::add,
+        )
+
+        assertEquals(3, provider.requests.size)
+        for (index in 1 until provider.requests.size) {
+            val previous = provider.requests[index - 1]
+            val current = provider.requests[index]
+            assertTrue("本轮必须比上轮更长", current.length() > previous.length())
+            for (position in 0 until previous.length()) {
+                assertEquals(
+                    "第 ${index + 1} 轮请求的第 $position 条消息被改写，前缀缓存会失效",
+                    previous.getJSONObject(position).toString(),
+                    current.getJSONObject(position).toString(),
+                )
+            }
+        }
+        assertEquals(
+            "能力不变时工具表必须逐字节一致",
+            1,
+            provider.toolSchemas.distinct().size,
+        )
+
+        // transcript 发布必须是单调追加，且每次都等于"整份重转"的结果。
+        assertEquals("完成", result.transcript.last().content)
+        published.forEachIndexed { index, snapshot ->
+            if (index == 0) return@forEachIndexed
+            val previous = published[index - 1]
+            assertTrue("已发布的 transcript 不能变短", snapshot.size >= previous.size)
+            assertEquals("已发布的前缀不能被改写", previous, snapshot.take(previous.size))
+        }
+    }
+
+    @Test
     fun textOnlyRunReturnsIncrementalTranscript() {
         val provider = ScriptedProvider(
             assistant(content = "完成", finishReason = "stop")
@@ -643,6 +690,7 @@ class AgentModelClientLoopTest {
         )
 
         val requests = mutableListOf<JSONArray>()
+        val toolSchemas = mutableListOf<String>()
         private var index = 0
 
         override fun complete(
@@ -651,6 +699,7 @@ class AgentModelClientLoopTest {
             onEvent: (ProviderEvent) -> Unit,
         ): ProviderResponse {
             requests += JSONArray(request.messages.toString())
+            toolSchemas += request.effectiveTools.toString()
             val response = responses.getOrNull(index)
                 ?: error("缺少第 ${index + 1} 个 scripted response")
             index += 1

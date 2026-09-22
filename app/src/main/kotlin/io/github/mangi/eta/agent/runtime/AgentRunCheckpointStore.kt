@@ -64,13 +64,29 @@ internal object AgentRunCheckpointStore {
         event: AgentEvent,
         now: Long = System.currentTimeMillis(),
     ) {
+        appendAll(context, runId, listOf(sortIndex to event), now)
+    }
+
+    /**
+     * 批量追加同一 run 的事件：一次事务写完，落盘时机与逐条追加完全一致
+     * （调用方返回前已经提交），只是不再为每条事件各开一次事务。
+     */
+    fun appendAll(
+        context: Context,
+        runId: String,
+        events: List<Pair<Int, AgentEvent>>,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        if (events.isEmpty()) return
         runBlocking(Dispatchers.IO) {
-            EtaDatabase.get(context.applicationContext).runtimeRunDao().appendInFlightEvent(
-                event = RuntimeInFlightEventEntity(
-                    runId = runId,
-                    sortIndex = sortIndex,
-                    eventJson = AgentEventJsonCodec.encode(event),
-                ),
+            EtaDatabase.get(context.applicationContext).runtimeRunDao().appendInFlightEvents(
+                events = events.map { (sortIndex, event) ->
+                    RuntimeInFlightEventEntity(
+                        runId = runId,
+                        sortIndex = sortIndex,
+                        eventJson = AgentEventJsonCodec.encode(event),
+                    )
+                },
                 updatedAt = now,
             )
         }

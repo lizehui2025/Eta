@@ -146,6 +146,18 @@ internal interface ConversationDao : ChunkedTextDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertState(state: ConversationStateEntity)
 
+    @Query("SELECT id FROM conversations")
+    suspend fun conversationRowIds(): List<String>
+
+    @Query("DELETE FROM conversations WHERE id IN (:ids)")
+    suspend fun deleteConversationRows(ids: List<String>)
+
+    @Query("DELETE FROM conversation_messages WHERE conversation_id = :conversationId")
+    suspend fun deleteMessagesOf(conversationId: String)
+
+    @Query("DELETE FROM conversation_context_checkpoints WHERE conversation_id = :conversationId")
+    suspend fun deleteCheckpointOf(conversationId: String)
+
     @Query("DELETE FROM conversations")
     suspend fun deleteConversations()
 
@@ -157,6 +169,37 @@ internal interface ConversationDao : ChunkedTextDao {
 
     @Query("DELETE FROM conversation_state")
     suspend fun deleteState()
+
+    /**
+     * 增量保存：只覆盖本次传入的会话与其消息、检查点，未传入的会话按删除处理。
+     *
+     * 与 [replaceAll] 的最终状态一致（[replaceAll] 的语义是"以传入内容为准的整库覆盖"），
+     * 但不再删除并重插未变化的会话——那会让每次保存都为全部历史重写一遍文本分块。
+     * 删除的会话显式删消息与检查点，保证分块清理触发器照常触发，不依赖外键级联的触发语义。
+     */
+    @Transaction
+    suspend fun saveIncremental(
+        conversations: List<ConversationEntity>,
+        messagesByConversation: Map<String, List<ConversationMessageEntity>>,
+        contextCheckpoints: List<ConversationContextCheckpointEntity> = emptyList(),
+        removedConversationIds: List<String> = emptyList(),
+        state: ConversationStateEntity?,
+    ) {
+        removedConversationIds.forEach { conversationId ->
+            deleteMessagesOf(conversationId)
+            deleteCheckpointOf(conversationId)
+        }
+        if (removedConversationIds.isNotEmpty()) deleteConversationRows(removedConversationIds)
+        insertConversations(conversations)
+        conversations.forEach { row ->
+            val messages = messagesByConversation[row.id] ?: return@forEach
+            deleteMessagesOf(row.id)
+            if (messages.isNotEmpty()) insertMessages(messages)
+        }
+        insertContextCheckpoints(contextCheckpoints)
+        deleteState()
+        state?.let { insertState(it) }
+    }
 
     @Transaction
     suspend fun replaceAll(

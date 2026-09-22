@@ -27,7 +27,7 @@ internal class AgentContextBudget(private val window: Int?) {
     }
 
     fun estimate(messages: JSONArray, tools: JSONArray): Int =
-        ceil(rawEstimate(messages, tools) * calibration).toInt()
+        ceil(rawEstimateCached(messages, tools) * calibration).toInt()
 
     /**
      * 实时窗口投影：有真实值时以“上轮真实 input + 本轮新增增量”为准，
@@ -36,7 +36,7 @@ internal class AgentContextBudget(private val window: Int?) {
      * 避免压缩刚完成又因旧锚点虚高而反复触发。
      */
     fun effectiveTokens(messages: JSONArray, tools: JSONArray): Int {
-        val raw = rawEstimate(messages, tools)
+        val raw = rawEstimateCached(messages, tools)
         val real = lastRealInput ?: return ceil(raw * calibration).toInt()
         val projected = real + (raw - lastEstimateAtObserve)
         return projected.coerceIn(0, maxOf(real, ceil(raw * calibration).toInt()))
@@ -46,6 +46,89 @@ internal class AgentContextBudget(private val window: Int?) {
     fun calibrationFactor(): Double = calibration
 
     fun lastRealInputTokens(): Int? = lastRealInput
+
+    private val messageTokenCache = java.util.IdentityHashMap<JSONObject, CachedEstimate>()
+    private val toolSchemaTokenCache = java.util.IdentityHashMap<JSONArray, CachedEstimate>()
+    private var messageHits = 0
+    private var messageMisses = 0
+    private var toolSchemaHits = 0
+    private var toolSchemaMisses = 0
+
+    /** 估算缓存命中统计：命中率过低说明有地方在每轮重建消息对象，缓存等于没生效。 */
+    data class Stats(
+        val messageHits: Int,
+        val messageMisses: Int,
+        val toolSchemaHits: Int,
+        val toolSchemaMisses: Int,
+    ) {
+        val messageHitRate: Double
+            get() = ratio(messageHits, messageMisses)
+
+        val toolSchemaHitRate: Double
+            get() = ratio(toolSchemaHits, toolSchemaMisses)
+
+        private fun ratio(hits: Int, misses: Int): Double =
+            if (hits + misses == 0) 0.0 else hits.toDouble() / (hits + misses)
+    }
+
+    fun stats(): Stats = Stats(messageHits, messageMisses, toolSchemaHits, toolSchemaMisses)
+
+    private class CachedEstimate(val signature: Int, val tokens: Int)
+
+    /**
+     * 带缓存的 rawEstimate 口径。同一份历史在一轮里会被估算 4-6 次（判压缩、窗口分类日志、
+     * 压缩前后对比、溢出重试），每次都把每条消息重新序列化一遍；工具结果常有上百 KB，
+     * 估算成本因此随历史总量线性放大并被重复付出，是压缩与首步延迟的主要来源之一。
+     * 这里按消息对象身份缓存，并用内容签名兜底：对象被就地改写（追加标记、替换正文）时自动失效。
+     */
+    fun rawEstimateCached(messages: JSONArray, tools: JSONArray = JSONArray()): Int {
+        if (messageTokenCache.size > CACHE_LIMIT) messageTokenCache.clear()
+        if (toolSchemaTokenCache.size > CACHE_LIMIT) toolSchemaTokenCache.clear()
+        var tokens = cachedToolSchemaTokens(tools) + 16
+        for (index in 0 until messages.length()) {
+            val message = messages.optJSONObject(index) ?: continue
+            tokens += cachedMessageTokens(message)
+        }
+        return tokens
+    }
+
+    private fun cachedToolSchemaTokens(tools: JSONArray): Int {
+        val signature = tools.length()
+        val cached = toolSchemaTokenCache[tools]
+        if (cached != null && cached.signature == signature) {
+            toolSchemaHits++
+            return cached.tokens
+        }
+        toolSchemaMisses++
+        val tokens = textTokens(tools.toString())
+        toolSchemaTokenCache[tools] = CachedEstimate(signature, tokens)
+        return tokens
+    }
+
+    private fun cachedMessageTokens(message: JSONObject): Int {
+        val signature = contentSignature(message)
+        val cached = messageTokenCache[message]
+        if (cached != null && cached.signature == signature) {
+            messageHits++
+            return cached.tokens
+        }
+        messageMisses++
+        val tokens = messageTokens(message)
+        messageTokenCache[message] = CachedEstimate(signature, tokens)
+        return tokens
+    }
+
+    /** 廉价的内容指纹：正文对象身份 + 长度 + 键数量，足以发现就地改写，成本与正文大小无关。 */
+    private fun contentSignature(message: JSONObject): Int {
+        val content = message.opt("content")
+        val contentSignature = when {
+            content is String -> 31 * content.length + System.identityHashCode(content)
+            content is JSONArray -> 17 * content.length()
+            content == null || content == JSONObject.NULL -> 0
+            else -> 1
+        }
+        return contentSignature * 31 + message.length()
+    }
 
     fun shouldCompact(tokens: Int): Boolean {
         val w = window?.takeIf { it > 0 } ?: FALLBACK_WINDOW_TOKENS
@@ -67,6 +150,8 @@ internal class AgentContextBudget(private val window: Int?) {
          * 取常见 100k 档，主窗口容量仍由服务商真实 input 锚点 + 压缩统一裁决。
          */
         const val FALLBACK_WINDOW_TOKENS = 100_000
+        /** 消息级估算缓存的规模上限，超过即整体丢弃，避免长会话把对象图钉在内存里。 */
+        const val CACHE_LIMIT = 4096
 
         fun textTokens(text: String): Int {
             var ascii = 0
@@ -79,22 +164,28 @@ internal class AgentContextBudget(private val window: Int?) {
             var tokens = textTokens(tools.toString()) + 16
             for (index in 0 until messages.length()) {
                 val message = messages.optJSONObject(index) ?: continue
-                val copy = JSONObject()
-                message.keys().forEach { key -> if (key != "content") copy.put(key, message.get(key)) }
-                val parts = message.optJSONArray("content")
-                if (parts != null) {
-                    val text = JSONArray()
-                    for (partIndex in 0 until parts.length()) {
-                        val part = parts.optJSONObject(partIndex) ?: continue
-                        if (part.optString("type") in setOf("image_url", "input_image", "image")) {
-                            tokens += 4096
-                        } else text.put(part)
-                    }
-                    copy.put("content", text)
-                } else copy.put("content", message.opt("content"))
-                tokens += textTokens(copy.toString()) + 8
+                tokens += messageTokens(message)
             }
             return tokens
+        }
+
+        /** 单条消息的估算口径：图片按 4096 计，其余按整串启发式计数。 */
+        fun messageTokens(message: JSONObject): Int {
+            var tokens = 0
+            val copy = JSONObject()
+            message.keys().forEach { key -> if (key != "content") copy.put(key, message.get(key)) }
+            val parts = message.optJSONArray("content")
+            if (parts != null) {
+                val text = JSONArray()
+                for (partIndex in 0 until parts.length()) {
+                    val part = parts.optJSONObject(partIndex) ?: continue
+                    if (part.optString("type") in setOf("image_url", "input_image", "image")) {
+                        tokens += 4096
+                    } else text.put(part)
+                }
+                copy.put("content", text)
+            } else copy.put("content", message.opt("content"))
+            return tokens + textTokens(copy.toString()) + 8
         }
     }
 }

@@ -63,6 +63,59 @@ internal object AgentSubagentPolicy {
     // 输出只能重试或再派发子任务，直接浪费一整轮算力。主窗口容量由正常的
     // AgentContextSession.compact() 按实时窗口统一裁决，子代理侧一律完整回填。
 
+    /**
+     * 上下文污染特征的任务分配：主上下文只保留决策与摘要，批量搜集一律走纯净子代理。
+     *
+     * pureOffloadableTools 是只读、高体量、适合并行的搜集工具：单个结果就可能很大，
+     * 在主循环里直接循环调用会把文件内容、历史记录、个人数据列表等低信号密度文本
+     * 全部压进主窗口，挤占后续推理。符合以下任一情形时，主代理必须用 spawn_agents
+     * 以 pure + research 扇出，而不是自己逐个调用：
+     * - 需要 2 次以上文件/代码读取（read_file/search_code/list_directory 组合）；
+     * - 需要跨 2 个以上个人数据源取样（短信/通话/联系人/日历/相册/便签/录音/系统记忆等）；
+     * - 开放式检索（先定位再细读、不确定哪份文件/哪条记录是答案）。
+     * 子代理在隔离窗口内消化原文，只把蒸馏后的事实摘要回填主上下文。
+     *
+     * mainOnlyBoundedTools 是必须留在主代理、且必须单次有界调用的工具：
+     * 前台 GUI/观察、离屏浏览器、shell、MCP 外部工具、图片与完整历史。
+     * 它们或独占前台/共享浏览器状态无法安全并行，或携带 token/外部副作用，
+     * 因此不进纯净子代理。主代理调用时只做单次最小探针（小 limit、小 max_bytes、
+     * 小 max_chars、不递归、不翻页追全量），不循环、不追全量；需要深挖时把已拿到的
+     * 最小证据拆成新的纯净搜集子任务，而不是在主循环里放大原始输出。
+     */
+    val pureOffloadableTools: Set<String> = setOf(
+        "read_file", "search_code", "list_directory",
+        "search_files", "search_downloads",
+        "search_media", "search_audio", "search_recordings",
+        "search_calendar_events", "search_contacts", "search_call_history", "search_messages",
+        "search_coloros_notes", "search_coloros_recordings", "search_recording_summaries",
+        "search_coloros_memories", "search_saved_places", "search_personal_orders",
+        "search_qq_chat_images", "search_wechat_chat_images",
+        "search_notification_history", "recent_notifications", "recent_app_activity", "app_usage_summary",
+        "search_clipboard_history", "get_logcat", "get_health_summary",
+        "list_alarms", "list_active_timers", "get_device_environment",
+        "device_status", "network_info", "top_memory_apps", "top_storage_apps",
+        "memory_get", "skills_list", "skills_read", "skills_read_resource",
+        "skills_list_curated", "skills_inspect_github",
+        "search_apps", "get_current_context", "read_image",
+    )
+
+    private val mainOnlyBoundedTools: Set<String> = setOf(
+        "browser_use", "terminal", "run_command",
+        "observe_screen",
+        "conversation_history",
+        "tap", "tap_area", "tap_element", "long_press", "long_press_element",
+        "swipe", "scroll", "scroll_element",
+        "input_text", "replace_text", "clear_text", "paste_text", "press_key",
+        "open_system_panel", "wait_for_text", "wait_for_package", "launch_app", "open_uri",
+    )
+
+    fun isPureOffloadable(toolName: String): Boolean = toolName in pureOffloadableTools
+
+    fun isMainOnlyBounded(toolName: String): Boolean {
+        if (toolName.startsWith("mcp_")) return true
+        return toolName in mainOnlyBoundedTools
+    }
+
     /** 写工具集合：仅在 code 模式下按任务声明的 write_paths 放行。 */
     val writeTools: Set<String> = setOf("write_file", "edit_file")
 

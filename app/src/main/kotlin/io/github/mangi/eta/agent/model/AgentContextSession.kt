@@ -27,6 +27,7 @@ internal class AgentContextSession(
         message.optInt("_eta_compacted_users") + if (message.optString("role") == "user") 1 else 0
     }
     private var committedSnapshot: AgentContextSnapshot? = null
+    private var publishedSignature: String? = null
 
     fun snapshot(): AgentContextSnapshot? = committedSnapshot
 
@@ -37,10 +38,17 @@ internal class AgentContextSession(
 
     private fun publishSnapshot(candidate: JSONArray = messages) {
         if (!compacted) return
+        // 压缩一旦发生，之后每轮都会走到这里；若上下文与已提交快照一致就不必再全量转换 + 落库。
+        val signature = listOf(
+            candidate.length(), consumedUserTurns, consumedSupplementCount, transcriptSize(),
+            System.identityHashCode(candidate.opt(candidate.length() - 1)),
+        ).joinToString(":")
+        if (signature == publishedSignature && committedSnapshot != null) return
         val snapshot = createSnapshot(candidate)
         snapshot.encode()
         onContextSnapshot(snapshot)
         committedSnapshot = snapshot
+        publishedSignature = signature
     }
 
     private fun createSnapshot(candidate: JSONArray): AgentContextSnapshot {
@@ -59,8 +67,10 @@ internal class AgentContextSession(
         // 实时口径：有上轮服务商真实 input 即按“真实+增量”投影判压缩，
         // 无真实值才回退校准估算；日志同时记录分类明细，便于对账窗口内容。
         val before = budget.effectiveTokens(messages, roundTools)
-        if (!force) logWindowBreakdown("压缩检查", roundTools, before)
-        if (!force && !budget.shouldCompact(before)) {
+        val shouldCompact = force || budget.shouldCompact(before)
+        // 分类明细是第二遍全量扫描（含整份工具 schema），只在真正要压缩时才算；未触发时只留一行计数日志。
+        logWindowBreakdown("压缩检查", roundTools, before, detailed = shouldCompact)
+        if (!shouldCompact) {
             try {
                 publishSnapshot()
             } catch (failure: Exception) {
@@ -78,9 +88,11 @@ internal class AgentContextSession(
             var candidate = messages
             var attempts = 0
             do {
-                candidate = AgentContextCompactor(config, provider, runController, roleplay = roleplay).compact(
-                    candidate, systemCount, sensitiveIds(), force,
-                )
+                candidate = AgentContextCompactor(
+                    config, provider, runController,
+                    estimate = { candidate -> budget.rawEstimateCached(candidate) },
+                    roleplay = roleplay,
+                ).compact(candidate, systemCount, sensitiveIds(), force)
                 attempts++
                 val tokens = budget.effectiveTokens(candidate, roundTools)
                 if (!budget.shouldCompact(tokens)) break
@@ -100,7 +112,7 @@ internal class AgentContextSession(
             while (messages.length() > 0) messages.remove(messages.length() - 1)
             for (index in 0 until candidate.length()) messages.put(candidate.getJSONObject(index))
             val after = budget.effectiveTokens(messages, roundTools)
-            logWindowBreakdown("压缩完成", roundTools, after)
+            logWindowBreakdown("压缩完成", roundTools, after, detailed = true)
             onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_COMPLETED, before,
                 after))
         } catch (failure: Exception) {
@@ -115,16 +127,24 @@ internal class AgentContextSession(
         }
     }
 
-    /** 窗口分类日志：每次判压缩前后各一行，读文件抓了多少、思考链占多少直接可见。 */
-    private fun logWindowBreakdown(stage: String, roundTools: JSONArray, tokens: Int) {
+    /** 窗口分类日志：每次判压缩一行；明细是第二遍全量分类统计，只在真要压缩时才计算。 */
+    private fun logWindowBreakdown(stage: String, roundTools: JSONArray, tokens: Int, detailed: Boolean) {
         runCatching {
-            val breakdown = AgentContextBreakdownCounter.breakdown(messages, roundTools)
+            val breakdown = if (detailed) {
+                " 分类[${AgentContextBreakdownCounter.breakdown(messages, roundTools).summaryLine()}]"
+            } else {
+                ""
+            }
             val real = budget.lastRealInputTokens()
+            val stats = budget.stats()
+            val cacheLine = " 估算缓存[消息=" + "%.0f".format(stats.messageHitRate * 100) + "%(未命中" +
+                stats.messageMisses + "次), 工具表=" + "%.0f".format(stats.toolSchemaHitRate * 100) + "%]"
             AndroidAgentLogger.info(
                 "Agent context $stage: effective=$tokens" +
                     (real?.let { " (实时锚点=$it, 校准=${"%.2f".format(budget.calibrationFactor())})" }
                         ?: " (无实时锚点, 校准=${"%.2f".format(budget.calibrationFactor())})") +
-                    " 分类[${breakdown.summaryLine()}]",
+                    cacheLine +
+                    breakdown,
             )
         }
     }

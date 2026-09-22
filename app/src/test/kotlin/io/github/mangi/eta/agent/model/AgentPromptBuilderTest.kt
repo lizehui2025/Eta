@@ -68,7 +68,24 @@ class AgentPromptBuilderTest {
     }
 
     @Test
+    fun taskAllocationPrefersPureSubagentsForPollutingReads() {
+        val config = modelConfig("", terminalTools = false, browserTools = false)
+        val withPlan = AgentPromptBuilder.buildSystemMessages(
+            config = config,
+            skillContext = SkillContext.EMPTY,
+            memoryContext = AgentMemoryContext.DISABLED,
+            rootAvailable = false,
+        )
+        val contents = withPlan.systemContents()
+        assertTrue(contents.any { it.contains("主上下文只保留决策与摘要") })
+        assertTrue(contents.any { it.contains("批量搜集一律走纯净子代理") })
+        assertTrue(contents.any { it.contains("只做单次最小探针") })
+        assertTrue(contents.any { it.contains("蒸馏后的事实摘要") })
+    }
+
+    @Test
     fun messagesKeepSystemHistoryAndCurrentImageInputInStableOrder() {
+
         val image = AgentModelClient.ModelImage(
             reference = "data:image/png;base64,AA==",
             mimeType = "image/png",

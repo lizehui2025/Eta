@@ -80,9 +80,12 @@ internal class AgentLoop(
 
     private var publishedTranscriptSize = 0
 
+    /** transcript 只追加；发布只转换新增部分，避免每轮整份重转导致的平方增长。 */
+    private val transcriptPublisher = AgentTranscriptPublisher { sensitiveToolCallIds }
+
     private fun publishTranscript() {
         if (publishedTranscriptSize == transcript.length()) return
-        onTranscript(AgentConversationCodec.transcript(transcript, 0, sensitiveToolCallIds))
+        onTranscript(transcriptPublisher.publish(transcript).toList())
         publishedTranscriptSize = transcript.length()
     }
 

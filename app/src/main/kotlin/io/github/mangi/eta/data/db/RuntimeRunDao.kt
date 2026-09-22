@@ -222,6 +222,12 @@ internal interface RuntimeRunDao : ChunkedTextDao {
     }
 
     @Transaction
+    suspend fun appendInFlightEvents(events: List<RuntimeInFlightEventEntity>, updatedAt: Long) {
+        events.forEach { insertInFlightEvent(it) }
+        events.firstOrNull()?.let { touchInFlightRun(it.runId, updatedAt) }
+    }
+
+    @Transaction
     suspend fun appendInFlightEvent(event: RuntimeInFlightEventEntity, updatedAt: Long) {
         insertInFlightEvent(event)
         touchInFlightRun(event.runId, updatedAt)

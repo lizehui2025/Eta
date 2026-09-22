@@ -555,6 +555,14 @@ internal fun AgentConversationMessages(
             }
             if (remainingDistancePx <= 0f) continue
 
+            // 大段突发直接贴底，避免长时间追赶式的滞后卡顿感。
+            if (remainingDistancePx >= BOTTOM_FOLLOW_INSTANT_JUMP_PX) {
+                scrollState.requestScrollToItem(currentBottomItemIndex)
+                remainingDistancePx = 0f
+                previousFrameNanos = 0L
+                continue
+            }
+
             val frameNanos = withFrameNanos { it }
             val elapsedSeconds = if (previousFrameNanos == 0L) {
                 1f / 60f
@@ -577,13 +585,13 @@ internal fun AgentConversationMessages(
             var consumedStep = 0f
             try {
                 scrollState.scroll {
-                    scrollBy(step)
-                    consumedStep = step
+                    // 用真实消费距离扣减，未消费时等下一次布局的新 overflow，避免丢距离造成的顿挫与空转。
+                    consumedStep = scrollBy(step)
                 }
-                remainingDistancePx = if (consumedStep > 0f) {
-                    (remainingDistancePx - consumedStep).coerceAtLeast(0f)
-                } else {
+                remainingDistancePx = if (consumedStep <= 0f) {
                     0f
+                } else {
+                    (remainingDistancePx - consumedStep).coerceAtLeast(0f)
                 }
             } catch (cancelled: CancellationException) {
                 if (!currentCoroutineContext().isActive) throw cancelled
@@ -946,11 +954,12 @@ private fun AgentChatBottomBar(
 private val ChatBottomFrostHeight = 24.dp
 
 private const val ChatBottomSentinelKey = "agent-chat-bottom-sentinel"
-private const val BOTTOM_FOLLOW_RESPONSE_SECONDS = 0.085f
+private const val BOTTOM_FOLLOW_RESPONSE_SECONDS = 0.16f
 private const val BOTTOM_FOLLOW_MAX_FRAME_SECONDS = 0.05f
-private const val BOTTOM_FOLLOW_MAX_SPEED_DP_PER_SECOND = 720f
-private const val BOTTOM_FOLLOW_MIN_STEP_PX = 0.5f
-private const val BOTTOM_FOLLOW_SNAP_DISTANCE_PX = 0.75f
+private const val BOTTOM_FOLLOW_MAX_SPEED_DP_PER_SECOND = 1400f
+private const val BOTTOM_FOLLOW_MIN_STEP_PX = 1f
+private const val BOTTOM_FOLLOW_SNAP_DISTANCE_PX = 3f
+private const val BOTTOM_FOLLOW_INSTANT_JUMP_PX = 2400f
 
 internal fun resolveKeepBottomAnchored(
     current: Boolean,

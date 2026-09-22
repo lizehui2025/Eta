@@ -42,8 +42,13 @@ pending steering
 - GUI/终端工具保持串行。Android 前台状态和会话式 Shell 都不具备可安全并行的通用语义。
 - 例外：`spawn_agents` 可在一次调用内并行扇出子代理（任务数与并行度不设上限），每个任务独立 messages/loop 并发执行，结果汇总为单条 tool result 返回主循环。子代理有两种模式：`research`（默认，只读搜集）与 `code`（在任务声明的 `write_paths` 范围内用 `write_file` / `edit_file` 编辑，同一 canonical 文件由 fanout 级注册表互斥）；mode 可省略：任务声明 write_paths 或点名写工具时自动按 code 处理，否则默认 research；`allowed_tools` 只收窄工具集、不设数量上限，显式空数组视为未提供；显式声明的 mode 必须与 write_paths 自洽（research 禁写范围、code 必须带写范围），在调用级校验。两种模式都禁 GUI/浏览器、终端 shell（`terminal`、`run_command`）、敏感写、安装类与 `spawn_agents` 自身：违例返回 `EXCLUSIVE_TOOL_BUSY`，嵌套派生返回 `NESTED_SPAWN_NOT_ALLOWED`，越界写入返回 `WRITE_NOT_DECLARED`，文件写入冲突返回 `FILE_BUSY`，声明范围互相重叠在派生前返回 `WRITE_CONFLICT`。`max_rounds` 与 `timeout_ms` 均可省略，省略时不设轮数与整体超时；显式超时到点以 `SUBAGENT_TIMEOUT` 收尾并保留已记录的 `changed_files`，取消后最多再等 2 秒让收尾线程记完写入，线程仍存活时结果 JSON 含 `still_running: true`；显式 `max_rounds` 触顶以 `SUBAGENT_ROUND_LIMIT` 收尾，结果保留截断前最后一次非空 assistant 文本（最多 1500 字符）作为部分成果；子代理执行本身不限输出，但进入主循环的单任务副本按模式加界（research 4000 / code 12000 字符，超限截断并附 `content_truncated` 与恢复指引），完整结果仍保留在子代理详情事件中——否则单次扇出的全量输出会直接撑满有限的模型窗口，反而被迫触发整轮上下文压缩；改动文件列表进入主循环的部分最多保留 100 项（超限附 `changed_files_truncated`），详情事件保留完整列表。汇总结果带 `mode` 与各任务 `changed_files`，子代理行尾展示“已改 N 个文件”。父取消会联动取消全部子代理；每个子代理终态只上报一次（AtomicBoolean CAS），迟到事件不覆盖已上报的语义。每个子代理的工具调用经 `SubagentToolStarted` / `SubagentToolFinished` 事件（含 `detail`）转写为消息行的独立步骤：折叠行展示最新步骤摘要，点击打开独立详情窗口按步骤查看，结果区展示最终答复、耗时与改动文件。
 - 主代理可用 `todo_write` 维护任务清单（Plan）：整体替换语义，1–50 条、单条 ≤500 字符，状态仅 `pending`/`in_progress`/`completed`；校验通过后广播 `TodoUpdated` 进度事件（overlay 与工具卡片共用），tool result 回填 total/completed 供后续轮次复用。子代理不可调用该工具；系统提示只对非角色会话注入自动 Plan 引导，子代理快照不注入。
+- 任务分配按上下文污染特征：主上下文只保留决策与摘要，批量搜集一律走纯净子代理（默认 pure + research）。2 次以上文件/代码读取、跨 2 个以上个人数据源取样、开放式检索必须扇出子代理；分片改码用 code 模式并声明互不重叠的 write_paths。浏览器、终端、MCP、前台 GUI、截图与完整历史留在主代理且只做单次最小探针，不循环追全量；子代理只回填蒸馏后的事实摘要，不转储原文。
 - 工具行默认折叠：`read_file` 折叠行显示文件名，展开显示行范围（“第 1–N 行”）与字节数，schema 注明读取上限（有 Root 时 262144 字节、无 Root 时 16000），`truncated` 统一表示用户可见内容被截断（读满 limit 或触达 16000 字符上限）；`write_file` / `edit_file` 展开显示目标文件与修改对比（`AgentTextDiff` 裁剪公共前后缀），`terminal` / `run_command` 展开显示更长的 stdout/stderr 与截断标记。详情由 `ToolFinished.detail` / `SubagentToolFinished.detail` 携带，经 runtime wire 与归档 JSON 往返，不进入模型上下文；写入 wire 前 detail 统一 clamp 到 4000 字符（超出以省略号收尾）。
 - 单次 run 不设置固定回合数或总时限，由模型自然结束、用户取消或不可恢复错误终止。
+- run 开始前的准备并行执行：技能索引扫描、长期记忆上下文、角色设定与 MCP 工具发现互不依赖，首步等待取决于其中最长的一项，而不是各项相加。工具 schema 按本轮能力目录缓存并在能力不变时复用同一实例，不每轮重建，也不每轮重新序列化整份 schema 做预算估算。
+- transcript 发布只转换新增消息（`AgentTranscriptPublisher`），不再每轮整份重转：线性替代平方。发布边界由守卫保证——前缀里留有未闭合工具调用、或新变敏感的调用 id 已落在已发布前缀里时，退回整份重建，因此任何时刻的发布结果都与"整份重转"一致。窗口预算按消息对象缓存 token 估算并记录命中率，命中率明显下降即说明有地方在每轮重建消息对象。
+- 请求前缀与工具表在能力不变时逐字节保持稳定：循环只允许向上下文追加内容，不重排或重写已发出的历史。这是服务商侧前缀缓存（prompt cache）能持续命中的前提，回归测试会直接比对相邻两轮请求的逐条消息序列化结果。
+- 检查点写入按批共用一次事务（`AgentRunCheckpointStore.appendAll`）：落盘时机与逐条追加相同，调用返回前已经提交，只是不再为每条事件各开一次事务。
 - cancel 是终止信号；pause 是检查点阻塞；steering 是下一回合输入。三者不能互相模拟。
 - cancel 的主线程路径只做原子终态与资源关闭：共享浏览器按 runId 校验归属；终端立即封闭新的进程接纳，并在后台按独立进程组终止同步命令、会话和 async job，再完成线程与流回收。Android 上 `setsid` 或 PID/PGID ownership 握手不可用时会 fail closed；非 Android 测试环境才允许父子树快照回退。终止前还会核验随机 ownership token，避免陈旧 PGID 复用后误杀无关进程。
 - 最终 steering 检查会原子关闭接收入口；Loop 返回后不会再把无人消费的补充指令误报为已接收。补充指令也不会解除 pause。
@@ -93,11 +98,11 @@ Chat Completions、Responses 与 Anthropic Messages 在 Provider 边界统一投
 
 ## MCP 工具
 
-Eta 直接作为 MCP 客户端连接远程 Streamable HTTP 服务器，不把协议能力绑定到某个模型 Provider。当前优先使用 `2026-07-28` 无状态协议，并兼容需要 `initialize` 与 session 的 `2025-11-25` 服务；只接入 `tools/list` 和 `tools/call`，暂不支持 Resources、Prompts、Tasks、stdio、OAuth、交互式补充输入或 Provider 托管 MCP。
+Eta 直接作为 MCP 客户端连接远程 Streamable HTTP 服务器，不把协议能力绑定到某个模型 Provider。当前优先使用 `2026-07-28` 无状态协议，并兼容需要 `initialize` 与 session 的 `2025-11-25` 服务；只接入 `tools/list` 和 `tools/call`，暂不支持 Resources、Prompts、Tasks、OAuth、交互式补充输入或 Provider 托管 MCP。本地命令经标准 stdio 传输（行分隔 JSON-RPC）在应用进程内运行，同样只接入 `tools/list` 和 `tools/call`。
 
 工具默认关闭，服务器也可整体停用。添加服务器时先发现并缓存工具目录，用户再逐项启用；未标记只读的工具需要额外确认。现代服务的目录按 `ttlMs` 到期并在下次 run 前刷新，legacy 目录由用户手动刷新。每次 run 开始时一并冻结启用目录与 Bearer Token，并生成带服务器命名空间的模型工具名，因此后续设置变化不会改变正在执行的 schema 或账户。Eta 不因 `$ref`、组合关键字、条件关键字等复杂 Schema 禁用工具，而是原样投影给模型并在调用前按同一份 Schema 校验；现代 Streamable HTTP 的 `x-mcp-header` 参数会同步映射为请求头。
 
-MCP 地址由用户直接配置，HTTP、HTTPS、局域网与本机地址使用同一条连接链路，并沿用共享 OkHttp 客户端的默认重定向和超时行为；HTTP 会明文传输 Token、工具参数和结果。Bearer Token 通过 Android Keystore 加密后保存在本机。MCP 原始参数与结果只在当前回合使用，持久 transcript、运行 checkpoint 和归档只保留脱敏记录；文本、结构化结果、图片、分页次数和单次 run 工具数仍有独立预算，不支持或超出预算的结果会携带明确标记。取消 run 会立即封闭新调用并关闭在途 HTTP 请求，legacy session 的释放只做异步 best-effort，不阻塞取消线程。
+MCP 地址由用户直接配置，HTTP、HTTPS、局域网与本机地址使用同一条连接链路，并沿用共享 OkHttp 客户端的默认重定向和超时行为；HTTP 会明文传输 Token、工具参数和结果。Bearer Token 通过 Android Keystore 加密后保存在本机。本地 stdio 服务器由用户配置命令、参数、环境变量与工作目录，添加时即拉起进程做工具发现；进程直接启动（不经过 shell），以应用身份运行，仅使用受信任的命令。run 内首次调用该服务器工具时拉起进程并复用到 run 结束，随执行器关闭而销毁；服务端发往客户端的请求一律回方法未找到，通知直接忽略。本地目录不设 TTL，首次发现后缓存，手动刷新重新发现。run 开始前的工具发现并发执行且每个服务器单独限时 8 秒，失败不再静默吞掉、也不每次运行重付一遍等待：进程内抑制 60 秒后重试，手动刷新立即解除抑制。MCP 原始参数与结果只在当前回合使用，持久 transcript、运行 checkpoint 和归档只保留脱敏记录；文本、结构化结果、图片、分页次数和单次 run 工具数仍有独立预算，不支持或超出预算的结果会携带明确标记。取消 run 会立即封闭新调用并关闭在途 HTTP 请求或销毁本地进程，legacy session 的释放只做异步 best-effort，不阻塞取消线程。本地与远端工具共用 `mcp_` 命名空间，同样默认关闭、敏感展示，且不透给子代理。
 
 ## 长期记忆
 
@@ -124,7 +129,7 @@ Root 探测在 IO 线程执行：存在 `su` 时首次自动请求一次，最�
 - `android` 继续使用系统 Shell。`user` 身份不升级权限；`root` 身份在 `su` 内探测 Magisk、KernelSU、APatch 或系统 BusyBox，并优先进入 standalone `ash`，因此 BusyBox applet 不要求预先加入 PATH。旧 `run_command`、文件读写和目录操作保持这一环境，避免改变既有 Android 路径与命令语义。
 - `linux` 解析用户选择的发行版和后端。chroot 保持原有 rootfs、独立 mount namespace、`/data/local/tmp/eta` 工作区与特权挂载。新建 PRoot 环境和普通工作区使用 App UID 独占的 `filesDir/terminal-user` 目录，避开旧 Root 目录的属主限制；已有普通环境继续使用原位置，路径统一由 `TerminalPrivateStorage` 解析，`/workspace` 映射该私有工作区。仅映射有权访问的共享目录，拒绝“所有文件访问”后仍可导入导出。Linux 内的模拟 root 不意味着 Android Root，两个后端都不构成隔离安全沙箱。
 - 已建立会话和任务保存后端与实际 rootfs/工作区，不因 Root 变化自动切换。持久任务记录的后端与宿主工作区字段为可选，兼容旧记录。获得 Root 不迁移 PRoot，失去 Root 不删除 chroot 或改变文件属主。
-- 普通 Android Shell、文件读写与图片读取使用 App UID；Root 用户保留原有特权路径。无法直接访问的选择器文件经有界复制导入工作区；目录选择不能冒充可实时访问的路径。
+- 普通 Android Shell、文件读写与图片读取使用 App UID；Root 用户保留原有特权路径。文件类工具（读、列、搜）的空白与相对路径默认使用终端工作区而非隔离日志目录；Linux 视图的 `/workspace/...` 与 `/workspace/mounts/<name>/...` 在执行前翻译为 Android 视图，保证子代理批量取证时可见；Root 搜索为单进程 `grep -r`（跳二进制、剪依赖构建目录），递归列目录同样剪枝，免 Root 搜索改流式逐行。无法直接访问的选择器文件经有界复制导入工作区；目录选择不能冒充可实时访问的路径。
 
 用户在 Alpine 与 Debian 中选择一个当前 Linux 发行版，模型与终端统一通过 `environment=linux` 使用该选择。基础环境安装与基础工具安装是两个独立步骤：安装器先下载固定版本、大小和 SHA-256 的 rootfs，在临时目录解压，运行检查成功后才写入基础完成标记；PRoot 的流式解包校验归档路径和链接，支持取消与失败清理；用户随后安装只含通用命令的基础工具集。Python profile 只安装 uv，随后由 uv 把最新正式版 Python 安装到 `/opt/eta/python` 并把全局命令链接到 `/usr/local/bin`。Node.js profile 在 Debian 安装上游最新正式版 ARM64/x64 制品，在 Alpine 安装稳定分支提供的 `nodejs-current`；SSH 使用所选发行版的最新稳定包。App 侧只读取安装器完成标记，不再重复检查 rootfs 内的符号链接、二进制或执行权限。中国大陆网络下，Alpine 使用阿里云镜像，Debian 主仓库使用清华 TUNA、安全更新使用 Debian 官方源，各自只保留官方主仓库作为失败出口；APT 还启用重试并关闭 HTTP pipelining。
 
@@ -151,6 +156,8 @@ App 在发起请求前已经把当前用户消息写入会话 history，因此 R
 
 完整脱敏历史 `journal`、可替换的模型上下文 `history` 和展示消息分别保存。Room 的大文本按小行分块存储，主记录仅保存分块引用；DAO 在同一事务中更新主记录与分块，读取时验证顺序与完整长度，删除所属记录时清理分块；分块引用只在严格匹配 `@eta:chunks:v1:<count>:<length>` 时按引用恢复，其余形态原样返回，损坏引用降级为空串并写节流日志。分块大小限制单行，不限制会话总长度。数据库迁移完整搬迁现存历史，不能恢复已被旧版本丢弃的内容。消息行还保存折叠展示所需的 `detail` 与子代理 `steps_json`（同一分块存储）；21→22 迁移只新增这两列与默认值。已存在会话保存时 `created_at` 沿用库中原值，避免反复保存漂移；设置备份导出在单事务内读取快照行集合，避免与并发保存交错。
 
+会话保存是增量的：`AgentConversationStore` 为每个会话维护内容指纹（只覆盖会落盘的字段，输入框草稿、流式与压缩标志不参与），未变化的会话不重写消息、检查点与文本分块；消失的会话按删除处理，删除前显式清理其消息与检查点，使分块清理触发器照常触发。跳过写入还有两个前置条件：该会话已在库中，且库中该行的 `updated_at` 仍是上次写入的值——备份恢复等绕过本对象的整库写入会被识别并重新整份写入。指纹只在事务提交成功后推进，保存失败不会留下"以为写过"的状态。整库覆盖仍由 `ConversationDao.replaceAll` 提供给备份恢复使用。
+
 新客户端通过只读文件描述符传递大段请求历史及完整结果，在后台校验并物化；临时文件打开后取消目录链接，发送端与接收端分别管理描述符所有权。同进程 Messenger 也显式复制描述符，不能依赖跨进程 Parcel 的自动复制。Binder 保留实际 Parcel 预算，文件传输另有单次内存预算；超限或传输不完整时明确失败，不能截断后冒充成功。完整结果仍在持久存储中。旧协议内联字段仅提供带缺失提示的兼容投影，新客户端优先读取完整载荷。
 
 浮层在已完成结果后发起的 continuation 会在 handoff 中只携带本次新增的 prompt supplement，不累计复制旧补充。App 回到前台时 drain outbox，把该用户消息和增量 transcript 一起写回 history。
@@ -159,7 +166,7 @@ App 在发起请求前已经把当前用户消息写入会话 history，因此 R
 
 首次模型请求前、完整工具批次结束后的下一次请求前，以及任务完成后检查模型窗口预算。请求估算达到窗口的 85% 时触发自动压缩；窗口未知时不根据字符数猜测容量，只支持手动压缩和明确的 Provider 上下文溢出恢复。估算包含系统提示、工具 schema、文本与图片，并以成功请求的输入 usage 校准。阈值集中在 `AgentContextBudget`，存储和传输分块大小不参与触发。
 
-压缩使用当前会话模型，额外请求会计费。摘要请求禁止本地及托管工具，也不接受自定义正文覆盖其输入；输入移除敏感工具原始参数、结果、图片正文与 opaque reasoning。近期历史以四条消息及窗口 20% 为目标，切分只能发生在完整工具批次之间；当前用户指令与未消费图片保留。过长历史按完整批次分段总结，明确的摘要输入溢出允许有限细分；单项过大、空摘要、截断摘要或没有容量收益时不提交。
+压缩使用当前会话模型，额外请求会计费。摘要请求禁止本地及托管工具，也不接受自定义正文覆盖其输入；输入移除敏感工具原始参数、结果、图片正文与 opaque reasoning。近期历史以四条消息及窗口 20% 为目标，切分只能发生在完整工具批次之间；当前用户指令与未消费图片保留。过长历史按完整批次分段总结，明确的摘要输入溢出允许有限细分；单项过大、空摘要、截断摘要或没有容量收益时不提交。压缩本身带整体预算：一次压缩最多 6 次摘要调用、90 秒墙钟，超预算立即放弃并保留原始上下文（不把界面挂在没有反应的等待上），压缩调用的失败重试降为一次。安全切分点一次线性扫描求出，消息级 token 估算按消息对象缓存（对象就地改写时自动失效），窗口分类明细只在真正触发压缩时统计。
 
 摘要作为带有明确说明的 assistant 历史保存，不提升为系统指令。成功后重建模型上下文，保留系统约束及近期规范化消息；被压缩的原文始终保留在完整脱敏历史中，不用摘要覆盖。Responses 的旧 opaque output Items 不跨越压缩边界，也不跨 run、跨 Provider 持久化。
 

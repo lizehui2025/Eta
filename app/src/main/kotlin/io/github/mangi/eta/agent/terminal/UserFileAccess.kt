@@ -11,8 +11,13 @@ import org.json.JSONObject
 internal object UserFileAccess {
     private const val MAX_LIST_SCAN = 5_000
     fun resolve(path: String): File {
+        // Linux 视图先翻译为 Android 视图：/workspace/... 与 /workspace/mounts/<name>/...
+        // 在 Android 侧不存在，不翻译会让子代理批量看不见文件。
+        val mounts = runCatching { SharedFolderMounts.current().map { it.name to it.sourcePath } }
+            .getOrDefault(emptyList())
+        val translated = AgentFilePathMapper.toAndroidPath(path, mounts, TerminalRuntime.userWorkspacePath)
         val workspace = File(TerminalRuntime.userWorkspacePath)
-        val raw = path.trim().ifBlank { workspace.absolutePath }
+        val raw = translated.trim().ifBlank { workspace.absolutePath }
         val file = when {
             raw == "~" -> workspace
             raw.startsWith("~/") -> File(workspace, raw.removePrefix("~/"))
@@ -234,13 +239,20 @@ internal object UserFileAccess {
                     if (child.length() > AgentCodeSearch.MAX_FILE_BYTES) continue
                     if (isProbablyBinary(child)) continue
                     scanned++
-                    val lines = runCatching { child.readLines() }.getOrNull() ?: continue
-                    for ((index, line) in lines.withIndex()) {
-                        if (regex.containsMatchIn(line)) {
-                            results += AgentCodeSearch.entry(child.absolutePath, index + 1, line)
-                            if (results.size >= max) return
+                    // 流式逐行读：readLines 会把整个文件一次性装进内存，命中靠前的记录
+                    // 也要等全文件读完；逐行读凑满 max 即停，大文件提前收尾。
+                    val reader = runCatching { child.bufferedReader() }.getOrNull() ?: continue
+                    reader.use { input ->
+                        var index = 0
+                        while (results.size < max) {
+                            val line = input.readLine() ?: break
+                            if (regex.containsMatchIn(line)) {
+                                results += AgentCodeSearch.entry(child.absolutePath, index + 1, line)
+                            }
+                            index++
                         }
                     }
+                    if (results.size >= max) return
                 }
             }
         }

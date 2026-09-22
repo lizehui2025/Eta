@@ -48,6 +48,8 @@ internal object AgentConversationStore {
     )
 
     private val saveMutex = Mutex()
+    /** 上一次成功落盘的会话指纹；只在事务提交成功后推进，失败时保持旧值以便下次重写。 */
+    private var savedConversations: Map<String, AgentConversationPersistence.Saved> = emptyMap()
 
     fun load(context: Context): Snapshot =
         runBlocking(Dispatchers.IO) {
@@ -73,41 +75,79 @@ internal object AgentConversationStore {
                     ?: sorted.firstOrNull()?.key
                 val now = System.currentTimeMillis()
                 val dao = EtaDatabase.get(appContext).conversationDao()
-                // 保存前只查一次现有 created_at 映射：已存在的会话沿用数据库中的原始创建时间，避免反复保存时漂移。
-                val existingCreatedAt = dao.conversationMetadataRows()
-                    .associate { row -> row.id to row.createdAt }
-                val conversations = sorted.map { (id, state) ->
-                    ConversationEntity(
+                // 保存前只查一次现有会话元数据：已存在的会话沿用数据库中的原始创建时间，避免反复保存时漂移；
+                // 同时据此判定哪些会话已从内存里删除。
+                val existingRows = dao.conversationMetadataRows()
+                    .associateBy { row -> row.id }
+                val removedConversationIds = (existingRows.keys - storedIds).toList()
+
+                // 只构造并写入内容确实变化的会话；未变化的会话连检查点编码都不做。
+                val conversations = mutableListOf<ConversationEntity>()
+                val messagesByConversation = mutableMapOf<String, List<ConversationMessageEntity>>()
+                val contextCheckpoints = mutableListOf<ConversationContextCheckpointEntity>()
+                val planned = mutableMapOf<String, AgentConversationPersistence.Saved>()
+                val previousSaved = savedConversations
+                sorted.forEach { (id, state) ->
+                    val title = titles[id].orEmpty()
+                    val previous = previousSaved[id]
+                    val existing = existingRows[id]
+                    val createdAt = AgentConversationPersistence.createdAt(existing?.createdAt, previous, now)
+                    val conversationUpdatedAt =
+                        AgentConversationPersistence.updatedAt(updatedAt[id], previous, now)
+                    val appliedRuntimeRunIdsJson = json.encodeToString(state.appliedRuntimeRunIds)
+                    val roleplayJson = state.roleplay?.let { json.encodeToString(it) }.orEmpty()
+                    val revisionsJson =
+                        if (state.roleplay == null) "" else json.encodeToString(state.roleplayMessages)
+                    val fingerprint = AgentConversationPersistence.fingerprint(
+                        state = state,
+                        title = title,
+                        createdAt = createdAt,
+                        updatedAt = conversationUpdatedAt,
+                        appliedRuntimeRunIdsJson = appliedRuntimeRunIdsJson,
+                        roleplayJson = roleplayJson,
+                        revisionsJson = revisionsJson,
+                    )
+                    planned[id] = AgentConversationPersistence.Saved(
+                        fingerprint = fingerprint,
+                        createdAt = createdAt,
+                        updatedAt = conversationUpdatedAt,
+                        storedUpdatedAt = conversationUpdatedAt,
+                    )
+                    if (!AgentConversationPersistence.shouldWrite(
+                            fingerprint = fingerprint,
+                            previous = previous,
+                            storedUpdatedAt = existing?.updatedAt,
+                        )
+                    ) {
+                        return@forEach
+                    }
+                    conversations += ConversationEntity(
                         id = id,
-                        title = titles[id].orEmpty(),
+                        title = title,
                         thinkingEnabled = state.reasoningEffort.enablesReasoning,
                         reasoningEffort = state.reasoningEffort.wireValue,
-                        appliedRuntimeRunIdsJson = json.encodeToString(state.appliedRuntimeRunIds),
-                        roleplayJson = state.roleplay?.let { json.encodeToString(it) }.orEmpty(),
-                        revisionsJson = if (state.roleplay == null) "" else json.encodeToString(state.roleplayMessages),
-                        createdAt = existingCreatedAt[id] ?: updatedAt[id] ?: now,
-                        updatedAt = updatedAt[id] ?: now,
+                        appliedRuntimeRunIdsJson = appliedRuntimeRunIdsJson,
+                        roleplayJson = roleplayJson,
+                        revisionsJson = revisionsJson,
+                        createdAt = createdAt,
+                        updatedAt = conversationUpdatedAt,
                     )
-                }
-                val messages = sorted.flatMap { (conversationId, state) ->
-                    state.messages
-                        .mapIndexedNotNull { index, message ->
-                            message.toEntityOrNull(conversationId, index)
-                        }
-                }
-                val contextCheckpoints = sorted.map { (conversationId, state) ->
-                    ConversationContextCheckpointEntity(
-                        conversationId = conversationId,
+                    messagesByConversation[id] = state.messages
+                        .mapIndexedNotNull { index, message -> message.toEntityOrNull(id, index) }
+                    contextCheckpoints += ConversationContextCheckpointEntity(
+                        conversationId = id,
                         historyJson = AgentConversationCodec.encodeConversationCheckpoint(state.history),
                         journalJson = AgentConversationCodec.encodeTranscriptForStorage(state.journal.ifEmpty { state.history }),
                     )
                 }
-                dao.replaceAll(
+                dao.saveIncremental(
                     conversations = conversations,
-                    messages = messages,
+                    messagesByConversation = messagesByConversation,
                     contextCheckpoints = contextCheckpoints,
+                    removedConversationIds = removedConversationIds,
                     state = selected?.let { ConversationStateEntity(selectedConversationId = it) },
                 )
+                savedConversations = planned
             }
         }
     }

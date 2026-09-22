@@ -20,7 +20,7 @@ import org.json.JSONObject
 internal class McpHttpClient(
     private val server: McpServerSetting,
     private val bearerToken: String?,
-) : AutoCloseable {
+) : McpServerClient {
     data class Discovery(
         val protocolVersion: String,
         val tools: List<McpToolDefinition>,
@@ -59,7 +59,7 @@ internal class McpHttpClient(
         }
     }
 
-    fun callTool(tool: McpToolDefinition, arguments: JSONObject): JSONObject {
+    override fun callTool(tool: McpToolDefinition, arguments: JSONObject): JSONObject {
         val version = negotiatedVersion ?: when (
             server.lastProtocolVersion ?: server.protocolMode
         ) {

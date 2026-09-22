@@ -685,7 +685,33 @@ class AgentSubagentPolicyTest {
     }
 
     @Test
+    fun pollutionAllocationKeepsBulkReadsInPureSubagents() {
+        // 高污染只读搜集：纯净子代理可并行消化，不进主窗口。
+        listOf(
+            "read_file", "search_code", "list_directory",
+            "search_files", "search_messages", "search_contacts", "search_calendar_events",
+            "search_media", "search_coloros_notes", "search_notification_history",
+            "get_logcat", "memory_get", "skills_read", "read_image",
+        ).forEach {
+            assertTrue("$it should be pure-offloadable", AgentSubagentPolicy.isPureOffloadable(it))
+            assertTrue("$it should stay allowed in research", AgentSubagentPolicy.isAllowed(it))
+        }
+        // 主代理单次有界：前台/浏览器/shell/MCP/图片与完整历史不进纯净子代理。
+        listOf(
+            "browser_use", "terminal", "run_command",
+            "observe_screen", "tap_element", "conversation_history",
+            "mcp_abc123_tool_deadbeef",
+        ).forEach {
+            assertTrue("$it should be main-only bounded", AgentSubagentPolicy.isMainOnlyBounded(it))
+            assertFalse("$it should stay blocked in subagents", AgentSubagentPolicy.isAllowed(it))
+        }
+        assertFalse(AgentSubagentPolicy.isPureOffloadable("browser_use"))
+        assertFalse(AgentSubagentPolicy.isMainOnlyBounded("search_code"))
+    }
+
+    @Test
     fun invalidContextModeIsRejected() {
+
         val exec = subagentExecutor(toolArray("search_files"))
         val args = JSONObject()
             .put("tasks", JSONArray().put(JSONObject().put("prompt", "task")))

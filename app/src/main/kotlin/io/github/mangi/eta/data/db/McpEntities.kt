@@ -5,7 +5,9 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 import io.github.mangi.eta.data.model.McpServerSetting
 import io.github.mangi.eta.data.model.McpToolDefinition
+import io.github.mangi.eta.data.model.McpTransport
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.SetSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -25,6 +27,11 @@ internal data class McpServerEntity(
     @ColumnInfo(name = "last_refreshed_at") val lastRefreshedAt: Long?,
     @ColumnInfo(name = "last_protocol_version") val lastProtocolVersion: String?,
     @ColumnInfo(name = "tools_expire_at") val toolsExpireAt: Long?,
+    @ColumnInfo(name = "transport") val transport: String = McpTransport.REMOTE,
+    @ColumnInfo(name = "command") val command: String = "",
+    @ColumnInfo(name = "args_json") val argsJson: String = "[]",
+    @ColumnInfo(name = "env_json") val envJson: String = "{}",
+    @ColumnInfo(name = "working_dir") val workingDir: String = "",
 )
 
 private val mcpJson = Json {
@@ -46,6 +53,11 @@ internal fun McpServerSetting.toEntity(): McpServerEntity = McpServerEntity(
     lastRefreshedAt = lastRefreshedAt,
     lastProtocolVersion = lastProtocolVersion,
     toolsExpireAt = toolsExpireAt,
+    transport = transport,
+    command = command,
+    argsJson = mcpJson.encodeToString(ListSerializer(String.serializer()), args),
+    envJson = mcpJson.encodeToString(MapSerializer(String.serializer(), String.serializer()), env),
+    workingDir = workingDir,
 )
 
 internal fun McpServerEntity.toDomain(): McpServerSetting = McpServerSetting(
@@ -66,4 +78,13 @@ internal fun McpServerEntity.toDomain(): McpServerSetting = McpServerSetting(
     lastRefreshedAt = lastRefreshedAt,
     lastProtocolVersion = lastProtocolVersion,
     toolsExpireAt = toolsExpireAt,
+    transport = transport,
+    command = command,
+    args = runCatching {
+        mcpJson.decodeFromString(ListSerializer(String.serializer()), argsJson)
+    }.getOrDefault(emptyList()),
+    env = runCatching {
+        mcpJson.decodeFromString(MapSerializer(String.serializer(), String.serializer()), envJson)
+    }.getOrDefault(emptyMap()),
+    workingDir = workingDir,
 )

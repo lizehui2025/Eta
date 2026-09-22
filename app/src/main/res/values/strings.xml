@@ -1173,6 +1173,15 @@
   <string name="mcp_delete_confirm">Delete %1$s? This cannot be undone.</string>
   <string name="mcp_read_only_tool">Read-only tool</string>
   <string name="mcp_may_modify_data">May modify data or call an external service</string>
+  <string name="mcp_transport_local">Local command (stdio)</string>
+  <string name="mcp_transport_local_summary">Run a local executable as the MCP server over stdin/stdout</string>
+  <string name="mcp_server_command">Command</string>
+  <string name="mcp_server_args">Arguments (optional, space-separated)</string>
+  <string name="mcp_server_env">Environment (optional, KEY=VALUE per line)</string>
+  <string name="mcp_server_working_dir">Working directory (optional)</string>
+  <string name="mcp_command_required">Enter the local command</string>
+  <string name="mcp_local_process">Local process</string>
+  <string name="mcp_local_runs_as_app">Runs as the app; only use commands you trust</string>
   <string name="data_backup_title">Data backup</string>
   <string name="data_backup_actions">Backup</string>
   <string name="data_backup_warning_title">Keep the backup file safe</string>

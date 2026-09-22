@@ -24,6 +24,8 @@ internal class RootShellTerminalController(
     private val rootAvailable: () -> Boolean = { TerminalRuntime.rootAvailable },
 ) : AutoCloseable {
     private companion object {
+        // 隔离日志目录 /data/local/tmp/eta 下有 daemon 日志与 mounts 挂载点，直接作为文件扫描默认会污染结果；
+        // 文件类工具的空白/相对路径默认改用终端工作区（Eta 私有 workspace），与免 Root 路径一致。
         const val DEFAULT_CWD = "/data/local/tmp/eta"
         const val LINUX_DEFAULT_CWD = "/workspace"
         const val USER_STORAGE = "/storage/emulated/0"
@@ -880,13 +882,19 @@ internal class RootShellTerminalController(
         recursive: Boolean = false,
     ): String {
         if (!rootAvailable()) return UserFileAccess.list(path, showHidden, limit, offset, glob, recursive)
-        val safePath = normalizePath(path.ifBlank { DEFAULT_CWD })
+        val safePath = normalizePath(path.ifBlank { defaultScanRoot() })
         val maxEntries = limit.coerceIn(1, MAX_LIST_ENTRIES)
         val skip = offset.coerceAtLeast(0)
         // Shell 只负责“全部列出+排序”，过滤/翻页/截断标记统一在 Kotlin 侧处理，
         // 与免 Root 实现保持同一口径；find 天然包含隐藏文件（含 . 开头），不含 . 和 ..。
         val depth = if (recursive) "" else "-maxdepth 1 "
-        val command = "cd ${shellQuote(safePath)} && find . -mindepth 1 ${depth}-print 2>/dev/null" +
+        // 递归时剪掉依赖与构建目录：否则 workspace 下一次 list 就扫几万文件，排序截断全挤在 5000 行里，翻页越翻越慢。
+        val prune = if (recursive) {
+            "'(' -name .git -o -name node_modules -o -name build -o -name .gradle -o -name .idea ')' -prune -o "
+        } else {
+            ""
+        }
+        val command = "cd ${shellQuote(safePath)} && find . -mindepth 1 ${depth}${prune}-print 2>/dev/null" +
             " | sort | head -n $MAX_LIST_SCAN" +
             " | while IFS= read -r n; do name=\"\${n#./}\";" +
             " if [ -d \"\$n\" ]; then printf 'd %s\\n' \"\$name\";" +
@@ -1024,18 +1032,17 @@ internal class RootShellTerminalController(
                 .put("ok", false).put("code", "INVALID_PATTERN").put("message", "pattern 不是合法正则")
                 .toString()
         }
-        val safeRoot = normalizePath(rootPath.ifBlank { DEFAULT_CWD })
+        val safeRoot = normalizePath(rootPath.ifBlank { defaultScanRoot() })
         val max = maxResults.coerceIn(1, AgentCodeSearch.MAX_RESULTS)
         val globTokens = glob.orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }
-        val globExpr = if (globTokens.isEmpty()) {
-            ""
-        } else {
-            " '(' " + globTokens.joinToString(" -o ") { "-name ${shellQuote(it)}" } + " ')'"
-        }
-        val command = "cd ${shellQuote(safeRoot)} && find . '(' -name .git -o -name node_modules " +
-            "-o -name build -o -name .gradle -o -name .idea ')' -prune -o -type f$globExpr -print " +
-            "2>/dev/null | head -n ${AgentCodeSearch.MAX_SCAN_FILES} | " +
-            "while IFS= read -r f; do grep -InHE -e ${shellQuote(trimmedPattern)} \"\$f\" 2>/dev/null; done | head -n $max"
+        // 单进程 grep -r 一轮出结果。旧实现是 find 列出 N 个文件再逐个 fork grep，大目录下
+        // 进程数爆炸且 30 秒超时；-I 跳过二进制，--exclude-dir 剪掉依赖与构建目录。
+        val includeExpr = globTokens.joinToString(" ") { "--include=${shellQuote(it)}" }
+        val command = "cd ${shellQuote(safeRoot)} && grep -rInHE -I " +
+            "--exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build " +
+            "--exclude-dir=.gradle --exclude-dir=.idea " +
+            (if (includeExpr.isNotEmpty()) "$includeExpr " else "") +
+            "-e ${shellQuote(trimmedPattern)} . 2>/dev/null | head -n $max"
         val result = runSuText(command, timeoutSeconds = 30)
         val rawLines = result.output.lineSequence().filter { it.isNotBlank() }.toList()
         if (result.exitCode != 0 && rawLines.isEmpty()) {
@@ -1148,14 +1155,24 @@ internal class RootShellTerminalController(
         } else normalizePath(environmentPath)
     }
 
+    private fun defaultScanRoot(): String =
+        runCatching { TerminalRuntime.userWorkspacePath }.getOrNull()?.takeIf { it.isNotBlank() } ?: DEFAULT_CWD
+
+    private fun linuxMountPairs(): List<Pair<String, String>> =
+        runCatching { linuxSharedMountsProvider().map { it.name to it.sourcePath } }
+            .getOrDefault(emptyList())
+
     private fun normalizePath(path: String): String {
         val raw = path.trim()
         require(raw.isNotBlank()) { "path 不能为空" }
+        // Linux 视图先翻译为 Android 视图：Root Shell 的挂载命名空间里没有 /workspace，
+        // 不翻译则读、列、搜遇到 Linux 写法直接失败，子代理批量取证时尤其致命。
+        val translated = AgentFilePathMapper.toAndroidPath(raw, linuxMountPairs(), TerminalRuntime.userWorkspacePath)
         val effective = when {
-            raw == "~" -> USER_STORAGE
-            raw.startsWith("~/") -> USER_STORAGE + "/" + raw.removePrefix("~/")
-            raw.startsWith("/") -> raw
-            else -> "$DEFAULT_CWD/$raw"
+            translated == "~" -> USER_STORAGE
+            translated.startsWith("~/") -> USER_STORAGE + "/" + translated.removePrefix("~/")
+            translated.startsWith("/") -> translated
+            else -> "${defaultScanRoot()}/$translated"
         }
         val normalized = File(effective).canonicalPath
         return normalized

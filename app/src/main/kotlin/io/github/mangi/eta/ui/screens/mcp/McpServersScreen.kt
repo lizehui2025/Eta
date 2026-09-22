@@ -27,12 +27,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
+import io.github.mangi.eta.agent.mcp.McpLocalConfig
 import io.github.mangi.eta.agent.mcp.McpServerManager
 import io.github.mangi.eta.agent.mcp.validateMcpEndpoint
 import io.github.mangi.eta.data.model.McpAuthorizationType
 import io.github.mangi.eta.data.model.McpProtocolMode
 import io.github.mangi.eta.data.model.McpServerSetting
 import io.github.mangi.eta.data.model.McpToolDefinition
+import io.github.mangi.eta.data.model.McpTransport
 import io.github.mangi.eta.data.repository.McpServerRepository
 import io.github.mangi.eta.ui.components.EtaArrowPreference
 import io.github.mangi.eta.ui.components.EtaCard
@@ -69,6 +71,11 @@ internal fun McpServersScreen(
     var name by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
+    var isLocal by remember { mutableStateOf(false) }
+    var command by remember { mutableStateOf("") }
+    var argsText by remember { mutableStateOf("") }
+    var envText by remember { mutableStateOf("") }
+    var workDir by remember { mutableStateOf("") }
     var working by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -135,25 +142,69 @@ internal fun McpServersScreen(
                 enabled = !working,
                 modifier = Modifier.fillMaxWidth(),
             )
-            TextField(
-                value = url,
-                onValueChange = { url = it },
-                label = stringResource(R.string.mcp_server_url),
-                singleLine = true,
+            EtaSwitchPreference(
+                title = stringResource(R.string.mcp_transport_local),
+                summary = stringResource(R.string.mcp_transport_local_summary),
+                checked = isLocal,
                 enabled = !working,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                modifier = Modifier.fillMaxWidth(),
+                onCheckedChange = { isLocal = it },
             )
-            TextField(
-                value = token,
-                onValueChange = { token = it },
-                label = stringResource(R.string.mcp_bearer_optional),
-                singleLine = true,
-                enabled = !working,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier.fillMaxWidth(),
-            )
+            if (isLocal) {
+                TextField(
+                    value = command,
+                    onValueChange = { command = it },
+                    label = stringResource(R.string.mcp_server_command),
+                    singleLine = true,
+                    enabled = !working,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextField(
+                    value = argsText,
+                    onValueChange = { argsText = it },
+                    label = stringResource(R.string.mcp_server_args),
+                    singleLine = true,
+                    enabled = !working,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextField(
+                    value = envText,
+                    onValueChange = { envText = it },
+                    label = stringResource(R.string.mcp_server_env),
+                    singleLine = false,
+                    enabled = !working,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextField(
+                    value = workDir,
+                    onValueChange = { workDir = it },
+                    label = stringResource(R.string.mcp_server_working_dir),
+                    singleLine = true,
+                    enabled = !working,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                TextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = stringResource(R.string.mcp_server_url),
+                    singleLine = true,
+                    enabled = !working,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextField(
+                    value = token,
+                    onValueChange = { token = it },
+                    label = stringResource(R.string.mcp_bearer_optional),
+                    singleLine = true,
+                    enabled = !working,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             error?.let {
                 Text(
                     text = it,
@@ -171,9 +222,24 @@ internal fun McpServersScreen(
                 onCancel = { showAdd = false },
                 onConfirm = {
                     val normalizedName = name.trim()
+                    val useLocal = isLocal
+                    // 本地配置先解析（失败直接显示原因，不进 IO）；远程只校验地址形状。
+                    val localParsed = if (useLocal) {
+                        runCatching {
+                            Triple(
+                                McpLocalConfig.validateCommand(command),
+                                McpLocalConfig.parseArgs(argsText),
+                                McpLocalConfig.parseEnv(envText),
+                            ) to McpLocalConfig.validateWorkingDir(workDir)
+                        }
+                    } else {
+                        null
+                    }
                     val normalizedUrl = url.trim()
                     error = when {
                         normalizedName.isBlank() -> resources.getString(R.string.mcp_name_required)
+                        useLocal && command.isBlank() -> resources.getString(R.string.mcp_command_required)
+                        useLocal -> localParsed?.exceptionOrNull()?.message
                         else -> runCatching { validateMcpEndpoint(normalizedUrl) }
                             .exceptionOrNull()?.message
                     }
@@ -181,18 +247,39 @@ internal fun McpServersScreen(
                         working = true
                         val result = withContext(Dispatchers.IO) {
                             runCatching {
-                                val draft = McpServerSetting(
-                                    id = "",
-                                    name = normalizedName,
-                                    url = normalizedUrl,
-                                    protocolMode = McpProtocolMode.AUTO,
-                                    authorizationType = if (token.isBlank()) {
-                                        McpAuthorizationType.NONE
-                                    } else {
-                                        McpAuthorizationType.BEARER
-                                    },
-                                )
-                                val discovered = McpServerManager.discover(draft, token)
+                                val draft = if (useLocal) {
+                                    val (triple, dir) = localParsed!!.getOrThrow()
+                                    val (parsedCommand, parsedArgs, parsedEnv) = triple
+                                    McpServerSetting(
+                                        id = "",
+                                        name = normalizedName,
+                                        url = "",
+                                        protocolMode = McpProtocolMode.AUTO,
+                                        authorizationType = McpAuthorizationType.NONE,
+                                        transport = McpTransport.STDIO,
+                                        command = parsedCommand,
+                                        args = parsedArgs,
+                                        env = parsedEnv,
+                                        workingDir = dir,
+                                    )
+                                } else {
+                                    McpServerSetting(
+                                        id = "",
+                                        name = normalizedName,
+                                        url = normalizedUrl,
+                                        protocolMode = McpProtocolMode.AUTO,
+                                        authorizationType = if (token.isBlank()) {
+                                            McpAuthorizationType.NONE
+                                        } else {
+                                            McpAuthorizationType.BEARER
+                                        },
+                                    )
+                                }
+                                val discovered = if (useLocal) {
+                                    McpServerManager.discover(draft, null)
+                                } else {
+                                    McpServerManager.discover(draft, token)
+                                }
                                 McpServerRepository.add(discovered, token)
                             }
                         }
@@ -202,6 +289,11 @@ internal fun McpServersScreen(
                             name = ""
                             url = ""
                             token = ""
+                            isLocal = false
+                            command = ""
+                            argsText = ""
+                            envText = ""
+                            workDir = ""
                             error = null
                             Toast.makeText(
                                 context,
@@ -276,7 +368,7 @@ internal fun McpServerDetailScreen(
             EtaPreferenceGroup(modifier = Modifier.padding(horizontal = 16.dp)) {
                 EtaSwitchPreference(
                     title = stringResource(R.string.mcp_enable_server),
-                    summary = server.url,
+                    summary = server.displayEndpoint().ifBlank { server.url },
                     checked = server.enabled,
                     onCheckedChange = { enabled ->
                         scope.launch(Dispatchers.IO) {
@@ -286,17 +378,24 @@ internal fun McpServerDetailScreen(
                 )
 
                 EtaPreferenceDivider(hasLeading = false)
-                EtaArrowPreference(
-                    title = stringResource(R.string.mcp_update_token),
-                    summary = stringResource(
-                        if (server.authorizationType == McpAuthorizationType.BEARER) {
-                            R.string.mcp_token_configured
-                        } else {
-                            R.string.mcp_no_authentication
-                        }
-                    ),
-                    onClick = { showToken = true },
-                )
+                if (server.isLocal) {
+                    EtaPreference(
+                        title = stringResource(R.string.mcp_local_process),
+                        summary = stringResource(R.string.mcp_local_runs_as_app),
+                    )
+                } else {
+                    EtaArrowPreference(
+                        title = stringResource(R.string.mcp_update_token),
+                        summary = stringResource(
+                            if (server.authorizationType == McpAuthorizationType.BEARER) {
+                                R.string.mcp_token_configured
+                            } else {
+                                R.string.mcp_no_authentication
+                            }
+                        ),
+                        onClick = { showToken = true },
+                    )
+                }
             }
         }
         item(key = "tools") {

@@ -9,9 +9,19 @@ internal class AgentContextCompactor(
     private val config: AgentModelClient.ModelConfig,
     private val provider: AgentProviderClient,
     private val controller: AgentRunController,
+    /** 估算入口：会话传入自带缓存的实现，避免同一份历史被反复整串序列化。 */
+    private val estimate: (JSONArray) -> Int = { AgentContextBudget.rawEstimate(it) },
     private val roleplay: Boolean = false,
 ) {
     private var overflowShrinks = 0
+    private val startedAtMillis = System.currentTimeMillis()
+    private var summaryCalls = 0
+    private val summaryLineTokenCache = java.util.IdentityHashMap<AgentModelClient.ConversationMessage, Int>()
+
+    /** 摘要输入的固定框架（system 提示 + “待整理的历史：”壳）token 数，整轮只算一次。 */
+    private val summaryBaseTokens: Int by lazy {
+        AgentContextBudget.rawEstimate(summaryInput(emptyList(), "", SUMMARY_CHARS_HINT))
+    }
 
     fun compact(
         messages: JSONArray,
@@ -25,7 +35,8 @@ internal class AgentContextCompactor(
             it.optString("role") == "user" && !it.has("_eta_observation")
         }
         // 最新用户请求及其后尚在进行的工具链必须可以继续；长任务允许压缩该请求之后的已完成批次。
-        val safeEnds = (1..history.size).filter { canSplit(history, it) }
+        // 切分点一次线性扫描求出：旧实现对每个候选位置重扫前缀，是 O(n²)。
+        val safeEnds = splitEnds(history)
         val recentLimit = config.contextWindow?.takeIf { it > 0 }?.let { (it * AgentContextBudget.RECENT_RATIO).toInt() }
         val initialEnd = safeEnds.lastOrNull { it <= history.size - AgentContextBudget.RECENT_MESSAGES }
             ?: safeEnds.firstOrNull { it < history.size }
@@ -33,7 +44,7 @@ internal class AgentContextCompactor(
         if (initialEnd == null || initialEnd <= 0) throw failure("CONTEXT_NOT_COMPACTABLE", "没有可安全压缩的完整历史批次。")
         var end: Int = initialEnd
         if (recentLimit != null) {
-            while (AgentContextBudget.rawEstimate(JSONArray(history.drop(end))) > recentLimit) {
+            while (estimate(JSONArray(history.drop(end))) > recentLimit) {
                 end = safeEnds.firstOrNull { it > end && it < history.size } ?: break
             }
         }
@@ -86,7 +97,7 @@ internal class AgentContextCompactor(
                 AgentConversationCodec.toJsonObject(AgentConversationCodec.fromJsonObject(message))
             } else message)
         }
-        if (AgentContextBudget.rawEstimate(result) >= AgentContextBudget.rawEstimate(messages)) {
+        if (estimate(result) >= estimate(messages)) {
             throw failure("CONTEXT_NO_REDUCTION", "摘要未能缩小上下文，原始上下文已保留。")
         }
         return result
@@ -98,8 +109,10 @@ internal class AgentContextCompactor(
         maxChars: Int,
     ): String {
         controller.throwIfCancelled()
+        requireCompactionBudget()
         val messages = summaryInput(chunk, previous, maxChars)
-        val retry = AgentModelRetry()
+        // 压缩是串行的额外模型调用，失败重试按 2/4/8s 退避只会让"等第一步"更久：压缩只重试一次。
+        val retry = AgentModelRetry(maxRetries = COMPACTION_MAX_RETRIES)
         val response = try {
             retry.complete(
                 initialRound = 0,
@@ -130,8 +143,38 @@ internal class AgentContextCompactor(
         return summary
     }
 
-    private fun estimateSummaryInput(chunk: List<AgentModelClient.ConversationMessage>, previous: String): Int =
-        AgentContextBudget.rawEstimate(summaryInput(chunk, previous, 12_000))
+    /**
+     * 摘要输入的估算：旧实现每评估一个分组就把整段 chunk 重新 toJsonObject 再拼串（近似 O(G²)，
+     * 大工具结果下就是主要耗时），这里改为「固定框架 + 逐条缓存的行 tokens + 旧摘要前缀」相加。
+     * 与整串口径只差拼接边界上的个位数 token，判定阈值（窗口的 60%）不受影响。
+     */
+    private fun estimateSummaryInput(chunk: List<AgentModelClient.ConversationMessage>, previous: String): Int {
+        var tokens = summaryBaseTokens
+        if (previous.isNotBlank()) {
+            tokens += AgentContextBudget.textTokens(PREVIOUS_SUMMARY_PREFIX) +
+                AgentContextBudget.textTokens(previous) + 2
+        }
+        chunk.forEach { message -> tokens += summaryLineTokens(message) }
+        return tokens
+    }
+
+    private fun summaryLineTokens(message: AgentModelClient.ConversationMessage): Int {
+        val cached = summaryLineTokenCache[message]
+        if (cached != null) return cached
+        val tokens = AgentContextBudget.textTokens(
+            AgentConversationCodec.toJsonObject(message).toString(),
+        ) + 8
+        summaryLineTokenCache[message] = tokens
+        return tokens
+    }
+
+    /** 压缩整体预算：宁可放弃压缩并保留原始上下文，也不让用户对着没有反应的界面等下去。 */
+    private fun requireCompactionBudget() {
+        if (summaryCalls >= MAX_SUMMARY_CALLS || System.currentTimeMillis() - startedAtMillis > MAX_COMPACTION_MILLIS) {
+            throw failure("CONTEXT_COMPACTION_TIMEOUT", "上下文压缩超出时间预算，原始上下文已保留。")
+        }
+        summaryCalls++
+    }
 
     private fun summaryInput(chunk: List<AgentModelClient.ConversationMessage>, previous: String, maxChars: Int): JSONArray =
         JSONArray().put(JSONObject().put("role", "system").put("content",
@@ -141,12 +184,18 @@ internal class AgentContextCompactor(
                     "虚构剧情与真实设备操作分开记录；不能把剧情动作写成实际工具执行结果，不能把人设当作用户现实事实。" else "") +
                 "保留有效旧摘要，删除重复和失效尝试，不能把尝试当成功或编造事实。只输出摘要正文，不超过 $maxChars 字符。"))
             .put(AgentConversationCodec.userTextMessage(buildString {
-                if (previous.isNotBlank()) append("此前分段摘要：\n").append(previous).append('\n')
+                if (previous.isNotBlank()) append(PREVIOUS_SUMMARY_PREFIX).append(previous).append('\n')
                 append("待整理的历史：\n")
                 chunk.forEach { append(AgentConversationCodec.toJsonObject(it)).append('\n') }
             }))
 
     companion object {
+        private const val MAX_COMPACTION_MILLIS = 90_000L
+        private const val MAX_SUMMARY_CALLS = 6
+        private const val COMPACTION_MAX_RETRIES = 1
+        private const val SUMMARY_CHARS_HINT = 12_000
+        private const val PREVIOUS_SUMMARY_PREFIX = "此前分段摘要：\n"
+
         fun canSplit(history: List<JSONObject>, end: Int): Boolean {
             if (end <= 0 || end > history.size) return false
             val last = history[end - 1]
@@ -159,15 +208,33 @@ internal class AgentContextCompactor(
             return open.isEmpty()
         }
 
+        /**
+         * 一次线性扫描求出全部安全切分点（工具批次必须完整闭合）。
+         * 旧实现是 `(1..size).filter { canSplit(history, it) }`，每个候选位置都重扫前缀并重解析
+         * tool_calls，整体 O(n²)；历史越长，"开始压缩前的找切分点"就越慢。
+         */
+        fun splitEnds(history: List<JSONObject>): List<Int> {
+            val ends = mutableListOf<Int>()
+            val open = linkedSetOf<String>()
+            for (index in 0 until history.size) {
+                val message = history[index]
+                AgentConversationCodec.parseToolCalls(message).forEach { open += it.id }
+                if (message.optString("role") == "tool") open.remove(message.optString("tool_call_id"))
+                val end = index + 1
+                if (message.optString("role") == "user") continue
+                if (history.getOrNull(end)?.optString("role") == "tool") continue
+                if (open.isEmpty()) ends += end
+            }
+            return ends
+        }
+
         private fun completeGroups(messages: List<AgentModelClient.ConversationMessage>): List<List<AgentModelClient.ConversationMessage>> {
             val json = messages.map(AgentConversationCodec::toJsonObject)
             val groups = mutableListOf<List<AgentModelClient.ConversationMessage>>()
             var start = 0
-            for (end in 1..json.size) {
-                if (canSplit(json, end)) {
-                    groups += messages.subList(start, end)
-                    start = end
-                }
+            for (end in splitEnds(json)) {
+                if (end > start) groups += messages.subList(start, end)
+                start = end
             }
             if (start < messages.size) groups += messages.subList(start, messages.size)
             return groups

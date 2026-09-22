@@ -20,6 +20,10 @@ import io.github.mangi.eta.agent.mcp.RoutingToolExecutor
 import io.github.mangi.eta.agent.overlay.AgentOverlayVisibilityPolicy
 import io.github.mangi.eta.agent.skill.SkillCompatibilityChecker
 import io.github.mangi.eta.agent.skill.SkillContext
+import io.github.mangi.eta.agent.skill.SkillIndexService
+import io.github.mangi.eta.agent.skill.SkillLoader
+import io.github.mangi.eta.agent.skill.SkillPackageInstaller
+import io.github.mangi.eta.agent.skill.SkillResourceReader
 import io.github.mangi.eta.agent.skill.SkillRuntime
 import io.github.mangi.eta.agent.skill.PublicGitHubSkillSource
 import io.github.mangi.eta.agent.tool.AgentLocalTools
@@ -31,6 +35,8 @@ import io.github.mangi.eta.agent.voice.EtaAssistantOverlayService
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.repository.AgentMemoryRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 
@@ -61,6 +67,66 @@ internal class AgentRuntimeRunExecutor(
 
     private val appContext = context.applicationContext
 
+    /** 并行准备的结果：技能索引、记忆上下文、角色设定与 MCP 工具目录。 */
+    private class RunPreparation(
+        val skills: SkillPreparation,
+        val memoryContext: AgentMemoryContext,
+        val roleplayContext: RoleplayRunContext?,
+        val mcpSnapshot: McpRunSnapshot,
+    )
+
+    private class SkillPreparation(
+        val indexService: SkillIndexService,
+        val loader: SkillLoader,
+        val resourceReader: SkillResourceReader,
+        val packageInstaller: SkillPackageInstaller,
+        val githubSource: PublicGitHubSkillSource,
+        val skillContext: SkillContext,
+    )
+
+    private fun prepareSkills(): SkillPreparation {
+        val indexService = SkillRuntime.createIndexService(appContext)
+        val installedSkills = indexService.listInstalledSkills()
+            .filter { SkillCompatibilityChecker.evaluate(it).available }
+        return SkillPreparation(
+            indexService = indexService,
+            loader = SkillRuntime.createLoader(appContext),
+            resourceReader = SkillRuntime.createResourceReader(appContext),
+            packageInstaller = SkillRuntime.createPackageInstaller(appContext),
+            githubSource = PublicGitHubSkillSource(
+                cacheRoot = appContext.cacheDir,
+                baseClient = AgentHttpClient.client,
+            ),
+            skillContext = SkillContext(installedSkills = installedSkills),
+        )
+    }
+
+    /** 记忆上下文不可用时降级为空，与旧行为一致；失败只留限流日志，不影响本次运行。 */
+    private fun prepareMemoryContext(memoryEnabled: Boolean, contextWindow: Int?): AgentMemoryContext =
+        if (!memoryEnabled) {
+            AgentMemoryContext.DISABLED
+        } else {
+            runCatching {
+                AgentMemoryContextBuilder.build(
+                    snapshot = AgentMemoryRepository.snapshot(),
+                    contextWindow = contextWindow,
+                )
+            }.getOrElse { throwable ->
+                AndroidAgentLogger.warnThrottled("agent_memory_context_failed") {
+                    "Agent memory context unavailable: type=${throwable.safeLogType()}"
+                }
+                AgentMemoryContextBuilder.empty(contextWindow)
+            }
+        }
+
+    private fun prepareMcpSnapshot(): McpRunSnapshot =
+        runCatching { runBlocking { McpRunSnapshot.load() } }.getOrElse { throwable ->
+            AndroidAgentLogger.warnThrottled("agent_mcp_snapshot_failed") {
+                "MCP tool snapshot unavailable: type=${throwable.safeLogType()}"
+            }
+            McpRunSnapshot.EMPTY
+        }
+
     fun execute(
         session: AgentRuntimeSession,
         request: AgentRuntimeWire.RunRequest,
@@ -84,33 +150,53 @@ internal class AgentRuntimeRunExecutor(
                     EtaAssistantOverlayService.dismissForForegroundOperation(appContext)
                 },
             )
-            val skillIndexService = SkillRuntime.createIndexService(appContext)
-            val skillLoader = SkillRuntime.createLoader(appContext)
-            val skillResourceReader = SkillRuntime.createResourceReader(appContext)
-            val skillPackageInstaller = SkillRuntime.createPackageInstaller(appContext)
-            val githubSkillSource = PublicGitHubSkillSource(
-                cacheRoot = appContext.cacheDir,
-                baseClient = AgentHttpClient.client,
-            )
-            val skillContext = SkillContext(
-                installedSkills = skillIndexService.listInstalledSkills()
-                    .filter { SkillCompatibilityChecker.evaluate(it).available },
-            )
             val memoryEnabled = runBlocking { AgentMemoryRepository.isEnabled() }
             val uiPayload = request.handoff
                 ?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
                 ?.let { AgentUiHandoffPayload.from(it.payload) }
             val conversationId = uiPayload?.conversationId
                 ?.takeIf { it.isNotBlank() }
-            val roleplayContext = conversationId?.let { id ->
-                runBlocking { RoleplayRunContext.resolve(appContext, id, request.config.contextWindow, memoryEnabled) }
+            // 技能索引是文件系统全量扫描，记忆快照、角色设定与 MCP 发现互不依赖：
+            // 并行准备把首步等待从「逐项相加」压到「最慢的一项」。
+            val preparation = runBlocking {
+                val skills = async(Dispatchers.IO) { prepareSkills() }
+                val memory = async(Dispatchers.IO) {
+                    prepareMemoryContext(memoryEnabled, request.config.contextWindow)
+                }
+                val roleplay = async(Dispatchers.IO) {
+                    conversationId?.let { id ->
+                        runBlocking {
+                            RoleplayRunContext.resolve(
+                                appContext, id, request.config.contextWindow, memoryEnabled,
+                            )
+                        }
+                    }
+                }
+                val mcp = async(Dispatchers.IO) { prepareMcpSnapshot() }
+                RunPreparation(
+                    skills = skills.await(),
+                    memoryContext = memory.await(),
+                    roleplayContext = roleplay.await(),
+                    mcpSnapshot = mcp.await(),
+                )
             }
+            val skillIndexService = preparation.skills.indexService
+            val skillLoader = preparation.skills.loader
+            val skillResourceReader = preparation.skills.resourceReader
+            val skillPackageInstaller = preparation.skills.packageInstaller
+            val githubSkillSource = preparation.skills.githubSource
+            val skillContext = preparation.skills.skillContext
+            val memoryContext = preparation.memoryContext
+            val roleplayContext = preparation.roleplayContext
+            val mcpSnapshot = preparation.mcpSnapshot
             if (request.operation == AgentRuntimeWire.OP_REWRITE_REPLY) {
                 require(roleplayContext != null) { "只有角色会话可以改写角色回复" }
                 val target = request.rewriteTargetMessageId?.takeIf { it.isNotBlank() && it.length <= 256 }
                     ?: throw IllegalArgumentException("缺少有效的角色回复目标")
+                // roleplayContext 非空即意味着会话标识存在；这里显式取出，避免依赖编译器的空值推断。
+                val rewriteConversationId = checkNotNull(conversationId) { "缺少角色会话标识" }
                 require(runBlocking {
-                    EtaDatabase.get(appContext).conversationDao().hasAssistantMessage(conversationId, target)
+                    EtaDatabase.get(appContext).conversationDao().hasAssistantMessage(rewriteConversationId, target)
                 }) { "角色回复目标不存在或不属于当前会话" }
             }
             val characterMemoryTools = roleplayContext?.let { roleplay ->
@@ -118,30 +204,7 @@ internal class AgentRuntimeRunExecutor(
                     runBlocking { AgentMemoryRepository.isEnabled() }
                 }
             }
-            val memoryContext = if (memoryEnabled) {
-                runCatching {
-                    AgentMemoryContextBuilder.build(
-                        snapshot = AgentMemoryRepository.snapshot(),
-                        contextWindow = request.config.contextWindow,
-                    )
-                }.getOrElse { throwable ->
-                    AndroidAgentLogger.warnThrottled("agent_memory_context_failed") {
-                        "Agent memory context unavailable: type=${throwable.safeLogType()}"
-                    }
-                    AgentMemoryContextBuilder.empty(request.config.contextWindow)
-                }
-            } else {
-                AgentMemoryContext.DISABLED
-            }
             val pendingSkillConflict = PendingSkillConflictCapabilityParser.parse(request.history)
-            val mcpSnapshot = runBlocking {
-                runCatching { McpRunSnapshot.load() }.getOrElse { throwable ->
-                    AndroidAgentLogger.warnThrottled("agent_mcp_snapshot_failed") {
-                        "MCP tool snapshot unavailable: type=${throwable.safeLogType()}"
-                    }
-                    McpRunSnapshot.EMPTY
-                }
-            }
             val mcpTools = JSONArray().also(mcpSnapshot::appendModelTools)
             val executor = AgentLocalTools(
                 context = appContext,

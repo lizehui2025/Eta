@@ -55,7 +55,7 @@ internal class AgentRunCheckpointRecorder private constructor(
                 flushed + checkpointEvent
             }
         }
-        toAppend.forEach { appendWithIndex(it) }
+        appendBatch(toAppend)
     }
 
     /** 把最后一段增量提交到日志；日志由结果 ACK 或中断恢复负责删除。 */
@@ -65,7 +65,7 @@ internal class AgentRunCheckpointRecorder private constructor(
             pendingDelta = null
             flushed
         }
-        toAppend.forEach { appendWithIndex(it) }
+        appendBatch(toAppend)
     }
 
     fun discard() {
@@ -73,13 +73,14 @@ internal class AgentRunCheckpointRecorder private constructor(
         AgentRunCheckpointStore.remove(appContext, runId)
     }
 
-    private fun appendWithIndex(event: AgentEvent) {
-        val index = synchronized(lock) { nextSortIndex++ }
-        AgentRunCheckpointStore.append(
+    /** 一批事件共用一个事务：落盘时机不变（返回前已提交），仅减少事务次数。 */
+    private fun appendBatch(events: List<AgentEvent>) {
+        if (events.isEmpty()) return
+        val indexed = synchronized(lock) { events.map { event -> nextSortIndex++ to event } }
+        AgentRunCheckpointStore.appendAll(
             context = appContext,
             runId = runId,
-            sortIndex = index,
-            event = event,
+            events = indexed,
         )
     }
 
