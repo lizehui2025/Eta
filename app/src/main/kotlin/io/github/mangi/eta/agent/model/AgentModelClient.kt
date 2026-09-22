@@ -166,6 +166,7 @@ internal object AgentModelClient {
             runCatching {
                 val sysSnapshot = AgentPromptBuilder.buildSystemMessages(
                     config, skillContext, memoryContext, initialCapabilities.rootAvailable, roleplayContext,
+                    planGuidance = false,
                 )
                 AgentSubagentExecutor(
                     config = config,
@@ -181,6 +182,7 @@ internal object AgentModelClient {
                 )
             }.getOrNull()
         }
+        val todoList = AgentTodoList()
         val loop = AgentLoop(
             transcript = transcript,
             systemCount = systemCount,
@@ -204,6 +206,7 @@ internal object AgentModelClient {
                     if (call.name == AgentSubagentPolicy.TOOL_NAME) exec.fanout(round, call) else null
                 }
             },
+            todoHandler = { round: Int, call: ToolCall -> todoList.write(round, call, onEvent) },
             toolsForRound = {
                 val capabilities = capabilitiesProvider()
                 if (capabilities.rootAvailable != promptRootAvailable) {
@@ -328,7 +331,23 @@ internal object AgentModelClient {
         val id: String,
         val name: String,
         val argumentsJson: String
-    )
+    ) {
+        @Volatile
+        private var cachedArgs: Result<JSONObject>? = null
+
+        /**
+         * 工具参数的缓存解析：同一 ToolCall 在校验、执行、轨迹摘要中会被多次读取，
+         * 缓存避免每层重复 JSONObject 解析。返回的 JSONObject 只读使用，不要修改。
+         */
+        fun parsedArgs(): Result<JSONObject> {
+            cachedArgs?.let { return it }
+            val parsed = runCatching { JSONObject(argumentsJson.ifBlank { "{}" }) }
+            cachedArgs = parsed
+            return parsed
+        }
+
+        fun parsedArgsOrNull(): JSONObject? = parsedArgs().getOrNull()
+    }
 
     data class ToolResult(
         val content: String,

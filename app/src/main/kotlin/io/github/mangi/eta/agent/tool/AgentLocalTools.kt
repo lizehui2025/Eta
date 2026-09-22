@@ -31,6 +31,7 @@ import io.github.mangi.eta.agent.skill.GitHubSkillInspection
 import io.github.mangi.eta.agent.skill.GitHubSkillRepository
 import io.github.mangi.eta.agent.skill.GitHubSkillSourceException
 import io.github.mangi.eta.agent.skill.PublicGitHubSkillSource
+import io.github.mangi.eta.agent.terminal.AgentCodeSearch
 import io.github.mangi.eta.agent.terminal.AlpineEnvironmentPaths
 import io.github.mangi.eta.agent.terminal.DetachedTaskSupervisor
 import io.github.mangi.eta.agent.terminal.LinuxEnvironmentPaths
@@ -149,7 +150,7 @@ internal class AgentLocalTools(
 
     override fun execute(toolCall: AgentModelClient.ToolCall): AgentModelClient.ToolResult =
         runCatching {
-            val args = JSONObject(toolCall.argumentsJson.ifBlank { "{}" })
+            val args = toolCall.parsedArgs().getOrThrow()
             if (AgentToolRequirements.find(toolCall.name) != null &&
                 AgentToolRequirements.rootDenied(toolCall.name, args, rootAvailable())
             ) {
@@ -203,6 +204,8 @@ internal class AgentLocalTools(
                 "run_command" -> textResult(terminalTool { runCommand(args) })
                 "read_file" -> textResult(terminalTool { readFile(args) })
                 "write_file" -> textResult(terminalTool { writeFile(args) })
+                "edit_file" -> textResult(terminalTool { editFile(args) })
+                "search_code" -> textResult(terminalTool { searchCode(args) })
                 "list_directory" -> textResult(terminalTool { listDirectory(args) })
                 "memory_get" -> textResult(memoryGet(args))
                 "memory_write" -> textResult(memoryWrite(args))
@@ -721,7 +724,26 @@ internal class AgentLocalTools(
         terminalController.listDirectory(
             path = args.optString("path"),
             showHidden = args.optBoolean("show_hidden", false),
-            limit = args.optInt("limit", 80)
+            limit = args.optInt("limit", 80),
+            offset = args.optInt("offset", 0),
+            glob = args.optString("glob"),
+            recursive = args.optBoolean("recursive", false),
+        )
+
+    private fun editFile(args: JSONObject): String =
+        terminalController.editFile(
+            path = args.optString("path"),
+            oldText = args.optString("old_string"),
+            newText = args.optString("new_string"),
+            replaceAll = args.optBoolean("replace_all", false),
+        )
+
+    private fun searchCode(args: JSONObject): String =
+        terminalController.searchCode(
+            rootPath = args.optString("path"),
+            pattern = args.optString("pattern"),
+            glob = args.optString("glob"),
+            maxResults = args.optInt("max_results", AgentCodeSearch.MAX_RESULTS),
         )
 
     private fun findAppByPackage(packageName: String): AppInfo? =

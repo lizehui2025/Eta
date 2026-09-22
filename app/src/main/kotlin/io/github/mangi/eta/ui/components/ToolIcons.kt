@@ -14,6 +14,7 @@ import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.ContentPaste
@@ -84,6 +85,8 @@ internal fun iconForTool(toolId: String): ImageVector = when (toolId) {
     "image_generation", "image_generation_call", "图像生成" -> Icons.Rounded.Image
     "mcp_call", "MCP 工具" -> Icons.Rounded.Extension
     "memory_get", "memory_write" -> Icons.Rounded.Psychology
+    "spawn_agents", "subagent" -> Icons.Rounded.Psychology
+    "todo_write" -> Icons.Rounded.Checklist
     "press_key" -> Icons.Rounded.KeyboardCommandKey
     "open_system_panel" -> Icons.Rounded.WebAsset
     "read_image" -> Icons.Rounded.Image
@@ -125,5 +128,7 @@ internal fun iconForTool(toolId: String): ImageVector = when (toolId) {
     "read_file" -> Icons.Rounded.Description
     "write_file" -> Icons.Rounded.EditNote
     "list_directory" -> Icons.Rounded.FolderOpen
+    "edit_file" -> Icons.Rounded.FindReplace
+    "search_code" -> Icons.Rounded.Search
     else -> if (toolId.startsWith("mcp_")) Icons.Rounded.Extension else Icons.Rounded.Build
 }

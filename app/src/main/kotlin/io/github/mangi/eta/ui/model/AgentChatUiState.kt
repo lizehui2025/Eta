@@ -140,7 +140,21 @@ data class ToolActivityMessageUi(
     val command: String? = null,
     val resultSummary: String? = null,
     val imageCount: Int = 0,
+    /** 文件/终端工具的展开详情；子代理行存放最终结果全文。 */
+    val detail: String? = null,
+    /** 子代理行的工具步骤序列；普通工具行为空。 */
+    val steps: List<ToolStepUi> = emptyList(),
 ) : AgentChatMessageUi
+
+/** 子代理的一个工具步骤：折叠时展示单行摘要，展开后展示详情。 */
+@Immutable
+data class ToolStepUi(
+    val id: String,
+    val toolName: String,
+    val status: ToolActivityStatusUi,
+    val summary: String,
+    val detail: String = "",
+)
 
 enum class ToolActivityStatusUi {
     Running,

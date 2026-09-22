@@ -214,6 +214,7 @@
     <item quantity="other">Preparing %d tools</item>
   </plurals>
   <string name="overlay_reasoning_round">Reasoning · round %1$d</string>
+  <string name="overlay_todo_progress">Task list · %1$d/%2$d done</string>
   <string name="overlay_requesting_model">Requesting model</string>
   <string name="overlay_model_responded">Model responded</string>
   <string name="overlay_generating_tool_arguments">Generating tool arguments</string>
@@ -273,7 +274,12 @@
   <string name="tool_run_command">Run command</string>
   <string name="tool_read_file">Read file</string>
   <string name="tool_write_file">Write file</string>
+  <string name="tool_spawn_agents">Parallel subagents</string>
+  <string name="tool_todo_write">Task list</string>
+  <string name="tool_subagent">Subagent</string>
   <string name="tool_list_directory">List directory</string>
+  <string name="tool_edit_file">Edit file</string>
+  <string name="tool_search_code">Search code</string>
   <string name="system_notice_stopped">Stopped</string>
   <string name="system_notice_empty_result">The run completed without a text response.</string>
   <string name="system_notice_runtime_failed">Runtime failed</string>
@@ -810,6 +816,10 @@
   <string name="tool_ui_read_the_contents_of_mobile_phone_files_bf3066">Read the contents of mobile phone files</string>
   <string name="tool_ui_read_the_specified_settings_key_496975">Read the specified Settings key</string>
   <string name="tool_ui_read_file_dc995c">read file</string>
+  <string name="tool_ui_edit_file_3c7a1e">edit file</string>
+  <string name="tool_ui_exact_text_replacement_in_a_file_atomic_write_8d5b42">Edit a text file with exact string replacements; the write is atomic.</string>
+  <string name="tool_ui_search_code_5e2f90">search code</string>
+  <string name="tool_ui_regex_search_in_a_directory_returns_path_line_text_a17c64">Regex search in a directory; returns path:line:text and supports filename globs.</string>
   <string name="tool_ui_read_the_alarm_clock_that_has_been_created_in_th_2320d6">Read the alarm clock that has been created in the clock</string>
   <string name="tool_ui_read_running_or_paused_timers_3437c8">Read running or paused timers</string>
   <string name="tool_ui_read_power_memory_storage_and_system_version_c501d5">Read power, memory, storage and system version</string>
@@ -1181,4 +1191,12 @@
   <string name="context_compaction">Context compaction</string>
   <string name="context_compact_action">Compact context</string>
   <string name="context_usage_estimated">%1$s\nEstimated after compaction</string>
+  <string name="tool_detail_label">Details</string>
+  <string name="subagent_detail_title">Subagent details</string>
+  <string name="subagent_detail_steps">Steps</string>
+  <string name="subagent_detail_result">Final result</string>
+  <string name="subagent_detail_no_steps">No steps recorded</string>
+  <string name="roleplay_edit_reply_action">Edit character reply</string>
+  <string name="roleplay_previous_candidate_action">Previous candidate reply</string>
+  <string name="roleplay_next_candidate_action">Next candidate reply</string>
 </resources>

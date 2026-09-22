@@ -123,10 +123,40 @@ internal fun AgentOverlayState.applyEvent(event: AgentEvent): AgentOverlayState 
         detailText = "并行子代理 ×${event.count}",
     )
 
+    is AgentEvent.SubagentStarted -> copy(
+        phase = AgentOverlayPhase.RUNNING,
+        round = event.round,
+        status = AgentOverlayStatus.RunningTool("subagent"),
+        detailText = event.label,
+    )
+
+    is AgentEvent.SubagentToolStarted -> copy(
+        phase = AgentOverlayPhase.RUNNING,
+        round = event.round,
+        status = AgentOverlayStatus.RunningTool(event.innerToolName),
+        detailText = event.label + " · " + event.argsPreview.take(60),
+    )
+
+    is AgentEvent.SubagentToolFinished -> this
+
+    is AgentEvent.SubagentFinished -> copy(
+        phase = AgentOverlayPhase.RUNNING,
+        round = event.round,
+        status = AgentOverlayStatus.ToolCompleted("subagent"),
+        detailText = event.label + (if (event.changedFiles.isNotEmpty()) " · 改了 ${event.changedFiles.size} 个文件" else ""),
+    )
+
     is AgentEvent.SubagentsFinished -> copy(
         phase = AgentOverlayPhase.RUNNING,
         round = event.round,
         status = AgentOverlayStatus.ToolCompleted("spawn_agents"),
+    )
+
+    is AgentEvent.TodoUpdated -> copy(
+        phase = AgentOverlayPhase.RUNNING,
+        round = event.round,
+        status = AgentOverlayStatus.TodoProgress(event.completed, event.total),
+        detailText = event.current,
     )
 
     is AgentEvent.HostedToolStarted -> copy(

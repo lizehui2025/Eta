@@ -108,6 +108,100 @@ class AgentRuntimeWireTest {
     }
 
     @Test
+    fun todoUpdatedEventSurvivesIpcAndArchiveJson() {
+        val event = AgentEvent.TodoUpdated(3, "call-1", 5, 2, "改 UI")
+        assertEquals(event, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(event)))
+        assertEquals(event, AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(event)))
+    }
+
+    @Test
+    fun toolDetailSurvivesIpcAndArchiveJson() {
+        val finished = AgentEvent.ToolFinished(
+            round = 3,
+            toolCallId = "call-read",
+            name = "read_file",
+            resultSummary = "读取文件 · Main.kt · 第 1–88 行",
+            imageCount = 0,
+            imageBytes = 0,
+            success = true,
+            detail = "文件：Main.kt\n行：第 1–88 行 · 读取 4096 字节",
+        )
+        assertEquals(finished, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(finished)))
+        assertEquals(finished, AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(finished)))
+
+        val subFinished = AgentEvent.SubagentToolFinished(
+            round = 2,
+            toolCallId = "call-spawn",
+            subIndex = 0,
+            label = "改 UI",
+            innerToolName = "write_file",
+            innerToolCallId = "inner-1",
+            resultSummary = "已编辑 · 替换 1 处",
+            success = true,
+            detail = "文件：Main.kt\n\n旧内容对比：\n- a\n+ b",
+        )
+        assertEquals(subFinished, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(subFinished)))
+        assertEquals(subFinished, AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(subFinished)))
+    }
+
+    @Test
+    fun oversizedToolDetailIsClampedForIpcWhileEmptyDetailStaysEmpty() {
+        val longDetail = "长".repeat(9_000)
+        val finished = AgentEvent.ToolFinished(
+            round = 1,
+            toolCallId = "call-long",
+            name = "read_file",
+            resultSummary = "读取文件",
+            imageCount = 0,
+            imageBytes = 0,
+            success = true,
+            detail = longDetail,
+        )
+        val decoded = AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(finished)) as AgentEvent.ToolFinished
+        assertTrue(decoded.detail.length <= 4_000)
+        assertTrue(decoded.detail.endsWith("…"))
+        assertTrue(longDetail.startsWith(decoded.detail.dropLast(1)))
+
+        val subFinished = AgentEvent.SubagentToolFinished(
+            round = 2,
+            toolCallId = "call-spawn",
+            subIndex = 0,
+            label = "改 UI",
+            innerToolName = "write_file",
+            innerToolCallId = "inner-1",
+            resultSummary = "已编辑",
+            success = true,
+            detail = longDetail,
+        )
+        val decodedSub = AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(subFinished)) as AgentEvent.SubagentToolFinished
+        assertTrue(decodedSub.detail.length <= 4_000)
+        assertTrue(decodedSub.detail.endsWith("…"))
+
+        val emptyDetail = finished.copy(detail = "")
+        assertEquals(emptyDetail, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(emptyDetail)))
+    }
+
+    @Test
+    fun replayMergeCapsSingleEventWhileKeepingAttachConcatenation() {
+        val session = AgentRuntimeSession("merge-1")
+        val chunk = "字".repeat(30_000)
+        repeat(3) {
+            assertTrue(
+                session.emit(
+                    AgentEvent.AssistantBlockDelta(1, AgentEvent.AssistantBlockKind.TEXT, 0, chunk.length, chunk)
+                )
+            )
+        }
+        val replayed = mutableListOf<AgentEvent>()
+        assertTrue(session.attach(eventSink = { replayed += it }, resultSink = {}))
+        val deltas = replayed.filterIsInstance<AgentEvent.AssistantBlockDelta>()
+        assertEquals(2, deltas.size)
+        assertEquals(60_000, deltas.first().delta.length)
+        assertEquals(chunk + chunk + chunk, deltas.joinToString("") { it.delta })
+        assertTrue(deltas.all { it.delta.length <= 64_000 })
+    }
+
+    @Test
     fun attachResponsePreservesRunIdentityAndDecision() {
         val accepted = AgentRuntimeWire.attachRunResponseBundle("run-1", attached = true)
         val rejected = AgentRuntimeWire.attachRunResponseBundle("run-2", attached = false)

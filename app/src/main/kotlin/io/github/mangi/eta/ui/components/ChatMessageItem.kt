@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
@@ -46,6 +47,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Build
@@ -59,6 +61,7 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lightbulb
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -141,6 +144,7 @@ import io.github.mangi.eta.agent.browser.AgentBrowserSession
 import io.github.mangi.eta.agent.browser.BrowserSessionSnapshot
 import io.github.mangi.eta.agent.model.AgentFileReferencePromptCodec
 import io.github.mangi.eta.agent.overlay.toolDisplayName
+import io.github.mangi.eta.ui.app.SUBAGENT_TOOL_NAME
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import io.github.mangi.eta.ui.model.AgentMessageUi
 import io.github.mangi.eta.ui.model.RunTraceMessageUi
@@ -366,14 +370,9 @@ internal fun AgentWorkProcess(
     } as? ToolActivityMessageUi
     val runningToolTitle = runningTool?.argumentsSummary?.takeIf { it.isNotBlank() }
         ?: runningTool?.let { toolDisplayName(it.toolName) }
-    var expanded by rememberSaveable(id) { mutableStateOf(running) }
-    var manuallyExpanded by rememberSaveable(id) { mutableStateOf(false) }
-
-    LaunchedEffect(running) {
-        if (running && !manuallyExpanded) {
-            expanded = true
-        }
-    }
+    // 工作过程默认折叠：运行中只更新标题栏（步数与当前工具），展开交给用户主动触发，
+    // 避免流式思考与工具输出在长列表里持续重排造成卡顿。
+    var expanded by rememberSaveable(id) { mutableStateOf(false) }
 
     val pulseAlpha = rememberActivePulse(active = running, label = "work_pulse")
 
@@ -394,10 +393,7 @@ internal fun AgentWorkProcess(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable {
-                    manuallyExpanded = true
-                    expanded = !expanded
-                }
+                .clickable { expanded = !expanded }
                 .padding(horizontal = 13.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -839,7 +835,7 @@ private fun AgentMessageBlock(
                         IconButton(onClick = onEdit, enabled = messageActionsEnabled, minWidth = 30.dp, minHeight = 30.dp) {
                             Icon(
                                 imageVector = Icons.Rounded.Edit,
-                                contentDescription = "编辑角色回复",
+                                contentDescription = stringResource(R.string.roleplay_edit_reply_action),
                                 modifier = Modifier.size(15.dp),
                                 tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.75f),
                             )
@@ -891,7 +887,7 @@ private fun AgentMessageBlock(
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.ChevronLeft,
-                                    contentDescription = "上一条候选回复",
+                                    contentDescription = stringResource(R.string.roleplay_previous_candidate_action),
                                     modifier = Modifier.size(16.dp),
                                     tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                                 )
@@ -910,7 +906,7 @@ private fun AgentMessageBlock(
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.ChevronRight,
-                                    contentDescription = "下一条候选回复",
+                                    contentDescription = stringResource(R.string.roleplay_next_candidate_action),
                                     modifier = Modifier.size(16.dp),
                                     tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                                 )
@@ -1223,33 +1219,33 @@ private enum class ChatMarkdownTone {
 @Composable
 private fun chatMarkdownTypography(tone: ChatMarkdownTone) = markdownTypography(
     h1 = chatMarkdownBodyStyle(tone).copy(
-        fontSize = if (tone == ChatMarkdownTone.Answer) 21.sp else 17.sp,
-        lineHeight = if (tone == ChatMarkdownTone.Answer) 29.sp else 25.sp,
+        fontSize = if (tone == ChatMarkdownTone.Answer) 21.sp else 16.sp,
+        lineHeight = if (tone == ChatMarkdownTone.Answer) 29.sp else 22.sp,
         fontWeight = FontWeight.Bold,
     ),
     h2 = chatMarkdownBodyStyle(tone).copy(
-        fontSize = if (tone == ChatMarkdownTone.Answer) 19.sp else 16.sp,
-        lineHeight = if (tone == ChatMarkdownTone.Answer) 27.sp else 24.sp,
+        fontSize = if (tone == ChatMarkdownTone.Answer) 19.sp else 15.sp,
+        lineHeight = if (tone == ChatMarkdownTone.Answer) 27.sp else 21.sp,
         fontWeight = FontWeight.Bold,
     ),
     h3 = chatMarkdownBodyStyle(tone).copy(
-        fontSize = if (tone == ChatMarkdownTone.Answer) 18.sp else 15.sp,
-        lineHeight = if (tone == ChatMarkdownTone.Answer) 26.sp else 23.sp,
+        fontSize = if (tone == ChatMarkdownTone.Answer) 18.sp else 14.sp,
+        lineHeight = if (tone == ChatMarkdownTone.Answer) 26.sp else 20.sp,
         fontWeight = FontWeight.SemiBold,
     ),
     h4 = chatMarkdownBodyStyle(tone).copy(
-        fontSize = if (tone == ChatMarkdownTone.Answer) 17.sp else 14.sp,
-        lineHeight = if (tone == ChatMarkdownTone.Answer) 25.sp else 22.sp,
+        fontSize = if (tone == ChatMarkdownTone.Answer) 17.sp else 13.sp,
+        lineHeight = if (tone == ChatMarkdownTone.Answer) 25.sp else 19.sp,
         fontWeight = FontWeight.SemiBold,
     ),
     h5 = chatMarkdownBodyStyle(tone).copy(
-        fontSize = if (tone == ChatMarkdownTone.Answer) 16.sp else 14.sp,
-        lineHeight = if (tone == ChatMarkdownTone.Answer) 24.sp else 22.sp,
+        fontSize = if (tone == ChatMarkdownTone.Answer) 16.sp else 13.sp,
+        lineHeight = if (tone == ChatMarkdownTone.Answer) 24.sp else 19.sp,
         fontWeight = FontWeight.SemiBold,
     ),
     h6 = chatMarkdownBodyStyle(tone).copy(
-        fontSize = if (tone == ChatMarkdownTone.Answer) 15.sp else 14.sp,
-        lineHeight = if (tone == ChatMarkdownTone.Answer) 23.sp else 22.sp,
+        fontSize = if (tone == ChatMarkdownTone.Answer) 15.sp else 13.sp,
+        lineHeight = if (tone == ChatMarkdownTone.Answer) 23.sp else 18.sp,
         fontWeight = FontWeight.SemiBold,
     ),
     text = chatMarkdownBodyStyle(tone),
@@ -1258,23 +1254,23 @@ private fun chatMarkdownTypography(tone: ChatMarkdownTone) = markdownTypography(
     bullet = chatMarkdownBodyStyle(tone),
     list = chatMarkdownBodyStyle(tone),
     quote = MiuixTheme.textStyles.body2.copy(
-        fontSize = if (tone == ChatMarkdownTone.Answer) 15.sp else 14.sp,
-        lineHeight = if (tone == ChatMarkdownTone.Answer) 24.sp else 22.sp,
+        fontSize = if (tone == ChatMarkdownTone.Answer) 15.sp else 13.sp,
+        lineHeight = if (tone == ChatMarkdownTone.Answer) 24.sp else 18.sp,
         color = chatMarkdownTextColor(ChatMarkdownTone.Thinking),
     ),
     code = TextStyle(
-        fontSize = 13.sp,
-        lineHeight = 20.sp,
+        fontSize = 12.sp,
+        lineHeight = 18.sp,
         fontFamily = FontFamily.Monospace,
         color = chatMarkdownTextColor(tone),
     ),
     inlineCode = chatMarkdownBodyStyle(tone).copy(
-        fontSize = if (tone == ChatMarkdownTone.Answer) 14.sp else 13.sp,
+        fontSize = if (tone == ChatMarkdownTone.Answer) 14.sp else 12.sp,
         fontFamily = FontFamily.Monospace,
     ),
     table = MiuixTheme.textStyles.body2.copy(
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
         color = chatMarkdownTextColor(tone),
     ),
     textLink = TextLinkStyles(
@@ -1295,8 +1291,8 @@ private fun chatMarkdownBodyStyle(tone: ChatMarkdownTone) =
         )
     } else {
         MiuixTheme.textStyles.body2.copy(
-            fontSize = 14.sp,
-            lineHeight = 22.sp,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
             color = chatMarkdownTextColor(tone),
         )
     }
@@ -2130,8 +2126,9 @@ private fun ThinkingRow(
     modifier: Modifier = Modifier,
     compact: Boolean = false,
 ) {
-    var expanded by rememberSaveable(message.id) { mutableStateOf(!message.collapsed) }
-    var manuallyExpanded by rememberSaveable(message.id) { mutableStateOf(false) }
+    // 思考默认折叠：作为独立元素块由用户点击展开，不再随流式状态自动撑开，
+    // 避免长文本实时排版造成的列表卡顿。
+    var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
     val keepStreamingMarkdown = remember(message.id) { message.isStreaming }
     val streamingState = if (keepStreamingMarkdown) {
         retainedStreamingState ?: remember(message.id) { StreamingMarkdownState() }
@@ -2140,10 +2137,6 @@ private fun ThinkingRow(
     }
     val completedMarkdownState = (streamingState ?: retainedStreamingState)
         ?.snapshot?.completedStateFor(message.content)
-    LaunchedEffect(message.isStreaming) {
-        if (message.isStreaming && !manuallyExpanded) expanded = true
-    }
-
     // Markdown 状态在行级提前创建：行进入组合（工作过程展开或滚动到可视区）时就开始
     // 后台解析，而不是等到首次点击展开。否则首帧只能测量 loading fallback 的纯文本高度，
     // 解析完成后正文高度会再次变化；状态挂在行级还能在收起/展开循环中存活，
@@ -2187,10 +2180,7 @@ private fun ThinkingRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .clickable {
-                    manuallyExpanded = true
-                    expanded = !expanded
-                }
+                .clickable { expanded = !expanded }
                 .padding(horizontal = if (compact) 4.dp else 13.dp, vertical = if (compact) 6.dp else 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -2249,31 +2239,40 @@ private fun ThinkingRow(
                             .background(MiuixTheme.colorScheme.outline.copy(alpha = 0.45f)),
                     )
                 }
-                val contentModifier = Modifier
-                    .fillMaxWidth()
-                    .padding(
-                        start = if (compact) 27.dp else 13.dp,
-                        end = 13.dp,
-                        top = if (compact) 2.dp else 8.dp,
-                        bottom = if (compact) 8.dp else 12.dp,
-                    )
-                if (streamingState != null && (message.isStreaming || completedMarkdownState == null)) {
-                    StreamingMarkdown(
-                        state = streamingState,
-                        content = message.content,
-                        isStreaming = message.isStreaming,
-                        onRevealCompleteChange = {},
-                        tone = ChatMarkdownTone.Thinking,
-                        modifier = contentModifier,
-                    )
-                } else {
-                    StableMarkdown(
-                        content = message.content,
-                        tone = ChatMarkdownTone.Thinking,
-                        markdownState = stableMarkdownState,
-                        parsedState = completedMarkdownState,
-                        modifier = contentModifier,
-                    )
+                // 思考内容限高并允许内部滚动：展开时也保持独立元素块，不占满整屏，
+                // 避免长思考全屏渲染造成的卡顿。
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 280.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    val contentModifier = Modifier
+                        .fillMaxWidth()
+                        .padding(
+                            start = if (compact) 27.dp else 13.dp,
+                            end = 13.dp,
+                            top = if (compact) 2.dp else 8.dp,
+                            bottom = if (compact) 8.dp else 12.dp,
+                        )
+                    if (streamingState != null && (message.isStreaming || completedMarkdownState == null)) {
+                        StreamingMarkdown(
+                            state = streamingState,
+                            content = message.content,
+                            isStreaming = message.isStreaming,
+                            onRevealCompleteChange = {},
+                            tone = ChatMarkdownTone.Thinking,
+                            modifier = contentModifier,
+                        )
+                    } else {
+                        StableMarkdown(
+                            content = message.content,
+                            tone = ChatMarkdownTone.Thinking,
+                            markdownState = stableMarkdownState,
+                            parsedState = completedMarkdownState,
+                            modifier = contentModifier,
+                        )
+                    }
                 }
             }
         }
@@ -2291,6 +2290,9 @@ private fun ToolActivityInline(
     compact: Boolean = false,
 ) {
     var isExpanded by rememberSaveable(message.id) { mutableStateOf(false) }
+    // 子代理行点击直接打开独立详情窗口；普通工具行展开内联详情。
+    val isSubagentRow = message.toolName == SUBAGENT_TOOL_NAME
+    var showSubagentDetail by rememberSaveable(message.id) { mutableStateOf(false) }
     // 只有「当前浏览器」卡片订阅实时会话快照，避免每个工具行都跟随快照重组
     val browserSnapshot = if (showBrowserShortcut) {
         AgentBrowserSession.snapshots.collectAsState().value
@@ -2324,12 +2326,28 @@ private fun ToolActivityInline(
     } else {
         null
     }
+    // 子代理行折叠态展示最新一条步骤/终态文案，打开详情窗口查看完整过程。
+    val subagentSubtitle = if (isSubagentRow) {
+        message.resultSummary
+            ?.lineSequence()
+            ?.map(String::trim)
+            ?.lastOrNull { it.isNotBlank() }
+            ?.take(120)
+    } else {
+        null
+    }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .clickable { isExpanded = !isExpanded }
+            .clickable {
+                if (isSubagentRow) {
+                    showSubagentDetail = true
+                } else {
+                    isExpanded = !isExpanded
+                }
+            }
             .padding(horizontal = if (compact) 10.dp else 20.dp, vertical = 3.dp)
     ) {
         Row(
@@ -2366,12 +2384,14 @@ private fun ToolActivityInline(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                val subtitle = failureSubtitle ?: browserSubtitle
+                val subtitle = if (isSubagentRow) subagentSubtitle else failureSubtitle ?: browserSubtitle
                 if (subtitle != null) {
+                    val subtitleIsError = (!isSubagentRow && failureSubtitle != null) ||
+                        (isSubagentRow && message.status == ToolActivityStatusUi.Failed)
                     Text(
                         text = subtitle,
                         style = MiuixTheme.textStyles.footnote2,
-                        color = if (failureSubtitle != null) {
+                        color = if (subtitleIsError) {
                             StatusError
                         } else {
                             MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.8f)
@@ -2427,9 +2447,16 @@ private fun ToolActivityInline(
                     }
                 }
                 Icon(
-                    imageVector = if (isExpanded) Icons.Rounded.ExpandMore
-                        else Icons.Rounded.ChevronRight,
-                    contentDescription = null,
+                    imageVector = when {
+                        isSubagentRow -> Icons.AutoMirrored.Rounded.OpenInNew
+                        isExpanded -> Icons.Rounded.ExpandMore
+                        else -> Icons.Rounded.ChevronRight
+                    },
+                    contentDescription = if (isSubagentRow) {
+                        stringResource(R.string.subagent_detail_title)
+                    } else {
+                        null
+                    },
                     modifier = Modifier.size(13.dp),
                     tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.5f),
                 )
@@ -2452,11 +2479,32 @@ private fun ToolActivityInline(
                         command = message.command,
                         context = message.argumentsSummary,
                         modifier = Modifier.padding(
-                            bottom = if (message.resultSummary.isNullOrBlank()) 0.dp else 10.dp,
+                            bottom = if (message.resultSummary.isNullOrBlank() &&
+                                message.detail.isNullOrBlank()
+                            ) {
+                                0.dp
+                            } else {
+                                10.dp
+                            },
                         ),
                     )
                 }
-                if (message.resultSummary != null && message.resultSummary.isNotBlank()) {
+                val detailText = message.detail?.takeIf(String::isNotBlank)
+                if (detailText != null && !isSubagentRow) {
+                    Text(
+                        text = stringResource(R.string.tool_detail_label),
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.padding(bottom = 2.dp)
+                    )
+                    Text(
+                        text = detailText,
+                        style = MiuixTheme.textStyles.footnote2.copy(fontFamily = FontFamily.Monospace),
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        maxLines = 80,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else if (message.resultSummary != null && message.resultSummary.isNotBlank()) {
                     Text(
                         text = stringResource(R.string.ui_result_0a2c91),
                         style = MiuixTheme.textStyles.footnote1,
@@ -2496,6 +2544,13 @@ private fun ToolActivityInline(
             }
         }
     }
+
+    if (isSubagentRow && showSubagentDetail) {
+        SubagentDetailDialog(
+            message = message,
+            onDismiss = { showSubagentDetail = false },
+        )
+    }
 }
 
 /**
@@ -2510,10 +2565,19 @@ private fun BrowserPagePreview(
     modifier: Modifier = Modifier,
 ) {
     var preview by remember(snapshot.url) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(snapshot.url, snapshot.isLoading) {
+    // 预览轮询只在界面处于前台时进行：退到后台立即停表，避免持续抓屏与解码。
+    var resumed by remember { mutableStateOf(false) }
+    LifecycleResumeEffect(Unit) {
+        resumed = true
+        onPauseOrDispose { resumed = false }
+    }
+    LaunchedEffect(snapshot.url, snapshot.isLoading, resumed) {
+        if (!resumed) return@LaunchedEffect
         while (true) {
             val image = withContext(Dispatchers.IO) {
-                AgentBrowserSession.capturePreview()?.let { decodeDataUrlBitmap(it.dataUrl) }
+                runCatching {
+                    AgentBrowserSession.capturePreview()?.let { decodeDataUrlBitmap(it.dataUrl) }
+                }.getOrNull()
             }
             if (image != null) preview = image
             delay(if (snapshot.isLoading) 1_200L else 4_000L)
@@ -2822,7 +2886,7 @@ private fun SuggestionChipsRow(
 // ── 辅助 ──────────────────────────────────────────────────────────────
 
 @Composable
-private fun ToolActivityStatusUi.statusColor() = when (this) {
+internal fun ToolActivityStatusUi.statusColor() = when (this) {
     ToolActivityStatusUi.Running -> StatusRunning
     ToolActivityStatusUi.Success -> StatusSuccess
     ToolActivityStatusUi.Failed -> StatusError
@@ -2830,7 +2894,7 @@ private fun ToolActivityStatusUi.statusColor() = when (this) {
 }
 
 @Composable
-private fun ToolActivityStatusUi.statusLabel(): String = when (this) {
+internal fun ToolActivityStatusUi.statusLabel(): String = when (this) {
     ToolActivityStatusUi.Running -> stringResource(R.string.tool_status_running)
     ToolActivityStatusUi.Success -> stringResource(R.string.tool_status_success)
     ToolActivityStatusUi.Failed -> stringResource(R.string.tool_status_failed)

@@ -21,6 +21,7 @@ import io.github.mangi.eta.ui.model.SystemNoticeMessageUi
 import io.github.mangi.eta.ui.model.TokenUsageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityStatusUi
+import io.github.mangi.eta.ui.model.ToolStepUi
 import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +32,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.json.JSONArray
+import org.json.JSONObject
 
 internal object AgentConversationStore {
     private val json = Json {
@@ -70,6 +72,10 @@ internal object AgentConversationStore {
                     ?.takeIf { it in storedIds }
                     ?: sorted.firstOrNull()?.key
                 val now = System.currentTimeMillis()
+                val dao = EtaDatabase.get(appContext).conversationDao()
+                // 保存前只查一次现有 created_at 映射：已存在的会话沿用数据库中的原始创建时间，避免反复保存时漂移。
+                val existingCreatedAt = dao.conversationMetadataRows()
+                    .associate { row -> row.id to row.createdAt }
                 val conversations = sorted.map { (id, state) ->
                     ConversationEntity(
                         id = id,
@@ -79,7 +85,7 @@ internal object AgentConversationStore {
                         appliedRuntimeRunIdsJson = json.encodeToString(state.appliedRuntimeRunIds),
                         roleplayJson = state.roleplay?.let { json.encodeToString(it) }.orEmpty(),
                         revisionsJson = if (state.roleplay == null) "" else json.encodeToString(state.roleplayMessages),
-                        createdAt = updatedAt[id] ?: now,
+                        createdAt = existingCreatedAt[id] ?: updatedAt[id] ?: now,
                         updatedAt = updatedAt[id] ?: now,
                     )
                 }
@@ -96,14 +102,12 @@ internal object AgentConversationStore {
                         journalJson = AgentConversationCodec.encodeTranscriptForStorage(state.journal.ifEmpty { state.history }),
                     )
                 }
-                EtaDatabase.get(appContext)
-                    .conversationDao()
-                    .replaceAll(
-                        conversations = conversations,
-                        messages = messages,
-                        contextCheckpoints = contextCheckpoints,
-                        state = selected?.let { ConversationStateEntity(selectedConversationId = it) },
-                    )
+                dao.replaceAll(
+                    conversations = conversations,
+                    messages = messages,
+                    contextCheckpoints = contextCheckpoints,
+                    state = selected?.let { ConversationStateEntity(selectedConversationId = it) },
+                )
             }
         }
     }
@@ -250,6 +254,8 @@ internal object AgentConversationStore {
                 toolStatus = status.name,
                 argumentsSummary = argumentsSummary,
                 resultSummary = resultSummary,
+                detail = detail,
+                stepsJson = steps.toStepsJson(),
                 imageCount = imageCount,
             )
 
@@ -312,6 +318,8 @@ internal object AgentConversationStore {
                 argumentsSummary = argumentsSummary.orEmpty(),
                 command = content.takeIf(String::isNotBlank),
                 resultSummary = resultSummary,
+                detail = detail,
+                steps = stepsJson.toToolSteps(),
                 imageCount = imageCount,
             )
 
@@ -322,6 +330,39 @@ internal object AgentConversationStore {
 
             else -> null
         }
+
+    private fun List<ToolStepUi>.toStepsJson(): String = JSONArray().also { array ->
+        forEach { step ->
+            array.put(
+                JSONObject()
+                    .put("id", step.id)
+                    .put("tool", step.toolName)
+                    .put("status", step.status.name)
+                    .put("summary", step.summary)
+                    .put("detail", step.detail)
+            )
+        }
+    }.toString()
+
+    private fun String.toToolSteps(): List<ToolStepUi> = runCatching {
+        val array = JSONArray(this)
+        buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val toolName = item.optString("tool")
+                if (toolName.isBlank()) continue
+                add(
+                    ToolStepUi(
+                        id = item.optString("id"),
+                        toolName = toolName,
+                        status = item.optString("status").toToolStatus(),
+                        summary = item.optString("summary"),
+                        detail = item.optString("detail"),
+                    )
+                )
+            }
+        }
+    }.getOrDefault(emptyList())
 
     private fun String.toToolStatus(): ToolActivityStatusUi =
         runCatching { ToolActivityStatusUi.valueOf(this) }.getOrNull()

@@ -5,6 +5,7 @@ import androidx.room.Entity
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import io.github.mangi.eta.core.AndroidAgentLogger
 
 /** 每行有界，文档总长不限；避免完整历史占用单个 CursorWindow 行。 */
 @Entity(tableName = "agent_text_chunks", primaryKeys = ["owner_table", "owner_id", "field", "chunk_index"])
@@ -43,23 +44,36 @@ internal interface ChunkedTextDao {
     }
 
     suspend fun restoreText(table: String, owner: String, field: String, stored: String): String {
-        if (!stored.startsWith(REFERENCE_PREFIX)) return stored
-        val parts = stored.removePrefix(REFERENCE_PREFIX).split(':')
-        check(parts.size == 2) { "Invalid history payload reference" }
-        val count = parts[0].toInt()
-        val length = parts[1].toInt()
-        check(count > 0 && length > 0) { "Invalid history payload size" }
+        // 只有严格等于 "@eta:chunks:v1:<count>:<length>"（两段非负整数、无多余冒号或空白）才按分块引用恢复；
+        // 其余以 REFERENCE_PREFIX 开头的历史文本一律原样返回，避免 ≤16 KiB 的遗留正文被误判为引用。
+        val match = REFERENCE_TEXT_PATTERN.matchEntire(stored) ?: return stored
+        val count = match.groupValues[1].toIntOrNull()
+        val length = match.groupValues[2].toIntOrNull()
+        if (count == null || length == null) {
+            warnChunkRestoreFailure(table, owner, field, "引用数字超出 Int 范围")
+            return ""
+        }
         val result = StringBuilder()
         var offset = 0
         while (offset < count) {
             val page = textChunks(table, owner, field, minOf(32, count - offset), offset)
-            check(page.isNotEmpty()) { "History payload chunk missing" }
-            page.forEach { chunk ->
-                check(chunk.chunkIndex == offset++) { "History payload chunk out of order" }
+            if (page.isEmpty()) {
+                warnChunkRestoreFailure(table, owner, field, "分块缺失")
+                return ""
+            }
+            for (chunk in page) {
+                if (chunk.chunkIndex != offset) {
+                    warnChunkRestoreFailure(table, owner, field, "分块顺序异常")
+                    return ""
+                }
+                offset++
                 result.append(chunk.content)
             }
         }
-        check(result.length == length) { "History payload length mismatch" }
+        if (result.length != length) {
+            warnChunkRestoreFailure(table, owner, field, "恢复长度不符")
+            return ""
+        }
         return result.toString()
     }
 
@@ -68,3 +82,16 @@ internal interface ChunkedTextDao {
         const val REFERENCE_PREFIX = "@eta:chunks:v1:"
     }
 }
+
+/**
+ * 分块引用已损坏时降级为空串：宁可少显示正文，也不抛出硬异常导致整个历史页面加载失败；
+ * 同时留一条限流日志作为诊断线索。
+ */
+private fun warnChunkRestoreFailure(table: String, owner: String, field: String, reason: String) {
+    AndroidAgentLogger.warnThrottled("chunked_text_restore_failed") {
+        "文本分块恢复失败（$reason）：table=$table, owner=$owner, field=$field"
+    }
+}
+
+/** 只匹配写侧 storeText 生成的引用形态；matchEntire 要求整串匹配，禁止多余冒号或空白。 */
+private val REFERENCE_TEXT_PATTERN = Regex("${Regex.escape(ChunkedTextDao.REFERENCE_PREFIX)}(\\d+):(\\d+)")

@@ -168,6 +168,8 @@ internal sealed interface AgentEvent {
         val imageBytes: Int,
         /** 可选：旧版本 Runtime 不发送，消费端缺省时回退到摘要文本判断。 */
         val success: Boolean? = null,
+        /** 可选：文件/终端工具的展开详情；旧版本事件缺省为空串。 */
+        val detail: String = "",
     ) : AgentEvent {
         override fun toLogLine(): String =
             "tool_finished round=$round, name=${name.toSafeLogToken()}, " +
@@ -230,6 +232,78 @@ internal sealed interface AgentEvent {
     ) : AgentEvent {
         override fun toLogLine(): String =
             "subagents_finished round=$round, total=$total, succeeded=$succeeded"
+    }
+
+    /**
+     * 任务清单（Plan）更新：total/completed 用于进度展示，current 为进行中的条目（空串表示无）。
+     */
+    data class TodoUpdated(
+        val round: Int,
+        val toolCallId: String,
+        val total: Int,
+        val completed: Int,
+        val current: String = "",
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "todo_updated round=$round, total=$total, completed=$completed"
+    }
+
+    /**
+     * 单个子代理的生命周期事件。round/toolCallId 复用父 spawn_agents 调用的值，
+     * subIndex 与 labels/subTasks 下标一一对应，用于 UI 按子代理分别展示。
+     */
+    data class SubagentStarted(
+        val round: Int,
+        val toolCallId: String,
+        val subIndex: Int,
+        val label: String,
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "subagent_started round=$round, sub=$subIndex"
+    }
+
+    data class SubagentToolStarted(
+        val round: Int,
+        val toolCallId: String,
+        val subIndex: Int,
+        val label: String,
+        val innerToolName: String,
+        val innerToolCallId: String,
+        val argsPreview: String,
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "subagent_tool_started round=$round, sub=$subIndex"
+    }
+
+    data class SubagentToolFinished(
+        val round: Int,
+        val toolCallId: String,
+        val subIndex: Int,
+        val label: String,
+        val innerToolName: String,
+        val innerToolCallId: String,
+        val resultSummary: String,
+        val success: Boolean? = null,
+        /** 可选：文件/终端工具的展开详情；旧版本事件缺省为空串。 */
+        val detail: String = "",
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "subagent_tool_finished round=$round, sub=$subIndex"
+    }
+
+    data class SubagentFinished(
+        val round: Int,
+        val toolCallId: String,
+        val subIndex: Int,
+        val label: String,
+        val ok: Boolean,
+        val content: String,
+        val durationMs: Long = -1,
+        val code: String? = null,
+        val changedFiles: List<String> = emptyList(),
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "subagent_finished round=$round, sub=$subIndex, ok=$ok"
     }
 
     data class RunFailed(

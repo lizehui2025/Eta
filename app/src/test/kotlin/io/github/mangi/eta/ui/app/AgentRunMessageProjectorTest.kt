@@ -223,6 +223,7 @@ class AgentRunMessageProjectorTest {
                 resultSummary = "ok=true, chars=10",
                 imageCount = 1,
                 imageBytes = 200,
+                detail = "观察详情",
             ),
             messages
         )
@@ -259,15 +260,93 @@ class AgentRunMessageProjectorTest {
         val firstTool = messages[2] as ToolActivityMessageUi
         assertEquals(ToolActivityStatusUi.Success, firstTool.status)
         assertEquals(1, firstTool.imageCount)
+        assertEquals("观察详情", firstTool.detail)
 
         val secondTool = messages[4] as ToolActivityMessageUi
         assertEquals(ToolActivityStatusUi.Running, secondTool.status)
         assertEquals("执行命令 · Android · root", secondTool.argumentsSummary)
         assertEquals("pm list packages | head", secondTool.command)
+        assertEquals(null, secondTool.detail)
+    }
+
+    @Test
+    fun subagentsRenderAsIndependentExpandableRows() {
+        val projector = AgentRunMessageProjector(nowElapsedRealtime = { 1_000L })
+        val runId = "run-sub"
+        var messages: List<AgentChatMessageUi> = emptyList()
+        messages = projector.startSubagents(
+            runId,
+            AgentEvent.SubagentsStarted(round = 2, toolCallId = "call_spawn", count = 2, labels = listOf("查相册", "查日历")),
+            messages,
+        )
+        assertEquals(2, messages.filterIsInstance<ToolActivityMessageUi>().size)
+        // 每个子代理独立一行，标题取 label，可展开查看步骤。
+        val ids = messages.map { it.id }
+        assertTrue(ids.contains("$runId-subagent-2-call_spawn-0"))
+        assertTrue(ids.contains("$runId-subagent-2-call_spawn-1"))
+        messages = projector.startSubagentTool(
+            runId,
+            AgentEvent.SubagentToolStarted(2, "call_spawn", 0, "查相册", "search_media", "c1", "最近7天"),
+            messages,
+        )
+        messages = projector.finishSubagentTool(
+            runId,
+            AgentEvent.SubagentToolFinished(
+                2, "call_spawn", 0, "查相册", "search_media", "c1", "找到3张", true,
+                detail = "找到 3 张照片",
+            ),
+            messages,
+        )
+        messages = projector.finishSubagent(
+            runId,
+            AgentEvent.SubagentFinished(
+                2, "call_spawn", 0, "查相册", true, "相册3张", 1200, null,
+                changedFiles = listOf("app/src/Main.kt"),
+            ),
+            messages,
+        )
+        val first = messages.first { it.id == "$runId-subagent-2-call_spawn-0" } as ToolActivityMessageUi
+        assertEquals(ToolActivityStatusUi.Success, first.status)
+        assertEquals("查相册", first.argumentsSummary)
+        assertTrue(first.resultSummary!!.contains("search_media"))
+        assertTrue(first.resultSummary.contains("已改 1 个文件"))
+        // 子代理步骤独立结构化存储：详情窗口按步骤展开。
+        assertEquals(1, first.steps.size)
+        val step = first.steps.single()
+        assertEquals("c1", step.id)
+        assertEquals("search_media", step.toolName)
+        assertEquals(ToolActivityStatusUi.Success, step.status)
+        assertEquals("最近7天", step.summary)
+        assertEquals("找到 3 张照片", step.detail)
+        assertTrue(first.detail!!.contains("相册3张"))
+        assertTrue(first.detail.contains("已修改 1 个文件"))
+        // 另一子代理不受影响，仍在运行。
+        val second = messages.first { it.id == "$runId-subagent-2-call_spawn-1" } as ToolActivityMessageUi
+        assertEquals(ToolActivityStatusUi.Running, second.status)
+        // 汇总兜底：未终态的子行置 Unknown，避免永久 Running。
+        messages = projector.finishSubagents(
+            runId,
+            AgentEvent.SubagentsFinished(round = 2, toolCallId = "call_spawn", total = 2, succeeded = 1),
+            messages,
+        )
+        val secondAfter = messages.first { it.id == "$runId-subagent-2-call_spawn-1" } as ToolActivityMessageUi
+        assertEquals(ToolActivityStatusUi.Unknown, secondAfter.status)
+        // finalizeRun 同样收敛子代理行，且不影响其他 run。
+        val stale = projector.startSubagent(
+            "run-other",
+            AgentEvent.SubagentStarted(round = 1, toolCallId = "c", subIndex = 0, label = "x"),
+            emptyList(),
+        )
+        val finalized = projector.finalizeRun("run-other", messages + stale)
+        val other = finalized.first { it.id == "run-other-subagent-1-c-0" } as ToolActivityMessageUi
+        assertEquals(ToolActivityStatusUi.Unknown, other.status)
+        // replay 清理包含子代理行。
+        assertTrue(projector.resetForReplay(runId, messages).none { it.id.startsWith("$runId-subagent-") })
     }
 
     @Test
     fun keepsAssistantTextSeparatedByRound() {
+
         val projector = AgentRunMessageProjector(nowElapsedRealtime = { 1_000L })
         val runId = "run-text"
         var messages: List<AgentChatMessageUi> = listOf(

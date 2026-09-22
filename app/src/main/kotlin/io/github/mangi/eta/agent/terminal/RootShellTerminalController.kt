@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.agent.model.AgentTextDiff
 import io.github.mangi.eta.core.AgentLogger
 
 import java.io.File
@@ -33,6 +34,7 @@ internal class RootShellTerminalController(
         const val MAX_READ_BYTES = 256 * 1024
         const val MAX_WRITE_BYTES = 512 * 1024
         const val MAX_LIST_ENTRIES = 200
+        const val MAX_LIST_SCAN = 5_000
         const val MAX_ASYNC_OUTPUT_CHARS = 64_000
     }
 
@@ -776,9 +778,13 @@ internal class RootShellTerminalController(
         val safePath = normalizePath(path)
         val offset = offsetBytes.coerceAtLeast(0)
         val limit = maxBytes.coerceIn(1, MAX_READ_BYTES)
-        val command = "dd if=${shellQuote(safePath)} bs=1 skip=$offset count=$limit 2>/dev/null"
+        // 性能：用 tail/head 大块读取替代 dd bs=1；管道退出码来自 head，
+        // 以 test -f 兜底文件不存在，并用“无输出但 stderr 非空”识别读取失败。
+        val command = "test -f ${shellQuote(safePath)} && " +
+            "tail -c +${offset + 1} ${shellQuote(safePath)} | head -c $limit"
         val result = runSuBytes(command, timeoutSeconds = 20)
-        if (result.exitCode != 0) {
+        val readFailed = result.exitCode != 0 || (result.output.isEmpty() && result.stderr.isNotBlank())
+        if (readFailed) {
             logger.warn(
                 "Agent terminal action=read_file outcome=failed offsetBytes=$offset " +
                     "maxBytes=$limit exitCode=${result.exitCode} errorChars=${result.stderr.length}"
@@ -790,7 +796,8 @@ internal class RootShellTerminalController(
                 "maxBytes=$limit bytesRead=${result.output.size} exitCode=${result.exitCode}"
         )
         val text = result.output.decodeToString()
-        val truncated = result.output.size >= limit
+        // truncated 统一口径：读满 limit（可能还有后续）或内容被 16000 字符上限截断，都视为用户可见内容被截断。
+        val truncated = result.output.size >= limit || text.length > MAX_OUTPUT_CHARS
         return JSONObject()
             .put("ok", true)
             .put("tool", "read_file")
@@ -807,8 +814,36 @@ internal class RootShellTerminalController(
         val safePath = normalizePath(path)
         val bytes = content.toByteArray(Charsets.UTF_8)
         require(bytes.size <= MAX_WRITE_BYTES) { "写入内容过大：${bytes.size} bytes" }
-        val mode = if (append) ">>" else ">"
-        val command = "mkdir -p ${shellQuote(File(safePath).parent ?: "/")} && cat $mode ${shellQuote(safePath)}"
+        // 覆盖已存在的文本文件前先读取旧内容，供 UI 展示具体的变更摘要。
+        // 超过 MAX_WRITE_BYTES 的文件按截断处理并跳过差异计算。
+        val previousBytes = if (!append) {
+            val previousRead = runSuBytes(
+                "dd if=${shellQuote(safePath)} bs=65536 count=${MAX_WRITE_BYTES / 65_536} 2>/dev/null",
+                timeoutSeconds = 20,
+            )
+            if (previousRead.exitCode == 0 && previousRead.output.size < MAX_WRITE_BYTES) {
+                previousRead.output
+            } else {
+                null
+            }
+        } else {
+            null
+        }
+        val diff = previousBytes
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { previous ->
+                runCatching {
+                    AgentTextDiff.summarize(previous.decodeToString(), content)
+                }.getOrNull()
+            }
+        val parent = shellQuote(File(safePath).parent ?: "/")
+        val command = if (append) {
+            "mkdir -p $parent && cat >> ${shellQuote(safePath)}"
+        } else {
+            // 临时文件名带随机后缀，避免并发写入相互覆盖；失败时清理残留临时文件。
+            val temp = shellQuote("$safePath.eta-write-tmp-${UUID.randomUUID().toString().take(8)}")
+            "mkdir -p $parent && cat > $temp && mv -f $temp ${shellQuote(safePath)} || { rm -f $temp; false; }"
+        }
         val result = runSuTextWithStdin(command, bytes, timeoutSeconds = 20)
         return if (result.exitCode == 0) {
             logger.info(
@@ -821,6 +856,10 @@ internal class RootShellTerminalController(
                 .put("path", safePath)
                 .put("mode", if (append) "append" else "overwrite")
                 .put("bytes_written", bytes.size)
+                .also { json ->
+                    if (previousBytes != null) json.put("previous_bytes", previousBytes.size)
+                    if (!diff.isNullOrEmpty()) json.put("diff", diff)
+                }
                 .toString()
         } else {
             logger.warn(
@@ -832,30 +871,221 @@ internal class RootShellTerminalController(
         }
     }
 
-    fun listDirectory(path: String, showHidden: Boolean, limit: Int): String {
-        if (!rootAvailable()) return UserFileAccess.list(path, showHidden, limit)
+    fun listDirectory(
+        path: String,
+        showHidden: Boolean,
+        limit: Int,
+        offset: Int = 0,
+        glob: String = "",
+        recursive: Boolean = false,
+    ): String {
+        if (!rootAvailable()) return UserFileAccess.list(path, showHidden, limit, offset, glob, recursive)
         val safePath = normalizePath(path.ifBlank { DEFAULT_CWD })
         val maxEntries = limit.coerceIn(1, MAX_LIST_ENTRIES)
-        val flags = if (showHidden) "-la" else "-l"
-        val command = "cd ${shellQuote(safePath)} && ls $flags | head -n $maxEntries"
+        val skip = offset.coerceAtLeast(0)
+        // Shell 只负责“全部列出+排序”，过滤/翻页/截断标记统一在 Kotlin 侧处理，
+        // 与免 Root 实现保持同一口径；find 天然包含隐藏文件（含 . 开头），不含 . 和 ..。
+        val depth = if (recursive) "" else "-maxdepth 1 "
+        val command = "cd ${shellQuote(safePath)} && find . -mindepth 1 ${depth}-print 2>/dev/null" +
+            " | sort | head -n $MAX_LIST_SCAN" +
+            " | while IFS= read -r n; do name=\"\${n#./}\";" +
+            " if [ -d \"\$n\" ]; then printf 'd %s\\n' \"\$name\";" +
+            " else printf -- '- %s\\n' \"\$name\"; fi; done"
         val result = runSuText(command, timeoutSeconds = 15)
         val logMessage =
             "Agent terminal action=list_directory " +
                 "outcome=${if (result.exitCode == 0) "succeeded" else "failed"} " +
-                "showHidden=$showHidden limit=$maxEntries exitCode=${result.exitCode} " +
+                "showHidden=$showHidden limit=$maxEntries offset=$skip recursive=$recursive " +
+                "exitCode=${result.exitCode} " +
                 "outputChars=${result.output.length} errorChars=${result.stderr.length}"
         if (result.exitCode == 0) {
             logger.info(logMessage)
         } else {
             logger.warn(logMessage)
         }
+        if (result.exitCode != 0) {
+            return JSONObject()
+                .put("ok", false)
+                .put("tool", "list_directory")
+                .put("path", safePath)
+                .put("exit_code", result.exitCode)
+                .put("entries_text", "")
+                .put("stderr", result.stderr.truncateForJson())
+                .toString()
+        }
+        val globs = AgentCodeSearch.compileGlobs(glob)
+        val filtered = result.output.lineSequence()
+            .filter { it.isNotBlank() }
+            .filter { line ->
+                val name = if (line.length > 2) line.substring(2) else ""
+                val base = name.substringAfterLast('/')
+                (showHidden || !base.startsWith('.')) &&
+                    AgentCodeSearch.matchesGlobs(globs, base)
+            }.toList()
+        val total = filtered.size
+        val page = filtered.drop(skip).take(maxEntries)
+        val text = page.joinToString("\n")
+        val truncated = skip + page.size < total || text.length > MAX_OUTPUT_CHARS
         return JSONObject()
-            .put("ok", result.exitCode == 0)
+            .put("ok", true)
             .put("tool", "list_directory")
             .put("path", safePath)
-            .put("exit_code", result.exitCode)
-            .put("entries_text", result.output.truncateForJson())
-            .put("stderr", result.stderr.truncateForJson())
+            .put("exit_code", 0)
+            .put("total", total)
+            .put("offset", skip)
+            .put("count", page.size)
+            .put("truncated", truncated)
+            .put("entries_text", text.truncateForJson())
+            .put("stderr", "")
+            .toString()
+    }
+
+    fun editFile(path: String, oldText: String, newText: String, replaceAll: Boolean): String {
+        if (!rootAvailable()) return UserFileAccess.edit(path, oldText, newText, replaceAll)
+        val safePath = normalizePath(path)
+        // 性能：用 head 大块读取替代 dd bs=1，并多读 1 字节以区分“恰好 512KB”与“超过 512KB”。
+        val read = runSuBytes(
+            "test -f ${shellQuote(safePath)} && head -c ${MAX_WRITE_BYTES + 1} ${shellQuote(safePath)}",
+            timeoutSeconds = 20,
+        )
+        if (read.exitCode != 0) {
+            logger.warn("Agent terminal action=edit_file outcome=read_failed exitCode=${read.exitCode}")
+            return errorJson("READ_FAILED", read.stderr.ifBlank { "exit=${read.exitCode}" })
+        }
+        if (read.output.size > MAX_WRITE_BYTES) {
+            return errorJson("FILE_TOO_LARGE", "文件超过 $MAX_WRITE_BYTES 字节，请拆分后编辑或改用终端命令")
+        }
+        val outcome = AgentFileEdit.apply(read.output.decodeToString(), oldText, newText, replaceAll)
+        return when (outcome) {
+            is AgentFileEdit.Outcome.Rejected -> {
+                logger.info("Agent terminal action=edit_file outcome=rejected code=${outcome.code}")
+                JSONObject()
+                    .put("ok", false)
+                    .put("tool", "edit_file")
+                    .put("code", outcome.code)
+                    .put("message", outcome.message)
+                    .toString()
+            }
+            is AgentFileEdit.Outcome.Applied -> {
+                val bytes = outcome.content.toByteArray(Charsets.UTF_8)
+                if (bytes.size > MAX_WRITE_BYTES) {
+                    return errorJson("FILE_TOO_LARGE", "编辑结果超过 $MAX_WRITE_BYTES 字节")
+                }
+                val parent = shellQuote(File(safePath).parent ?: "/")
+                // 临时文件名带随机后缀，避免并发编辑相互覆盖；失败时清理残留临时文件。
+                val temp = shellQuote("$safePath.eta-edit-tmp-${UUID.randomUUID().toString().take(8)}")
+                val write = runSuTextWithStdin(
+                    "mkdir -p $parent && cat > $temp && mv -f $temp ${shellQuote(safePath)} || { rm -f $temp; false; }",
+                    bytes,
+                    timeoutSeconds = 20,
+                )
+                if (write.exitCode == 0) {
+                    logger.info(
+                        "Agent terminal action=edit_file outcome=succeeded replacements=${outcome.replacements} " +
+                            "bytesWritten=${bytes.size}"
+                    )
+                    JSONObject()
+                        .put("ok", true)
+                        .put("tool", "edit_file")
+                        .put("path", safePath)
+                        .put("replacements", outcome.replacements)
+                        .put("bytes_written", bytes.size)
+                        .toString()
+                } else {
+                    logger.warn(
+                        "Agent terminal action=edit_file outcome=failed replacements=${outcome.replacements} " +
+                            "inputBytes=${bytes.size} exitCode=${write.exitCode} errorChars=${write.stderr.length}"
+                    )
+                    errorJson("WRITE_FAILED", write.stderr.ifBlank { write.output.ifBlank { "exit=${write.exitCode}" } })
+                }
+            }
+        }
+    }
+
+    fun searchCode(rootPath: String, pattern: String, glob: String, maxResults: Int): String {
+        if (!rootAvailable()) return UserFileAccess.search(rootPath, pattern, glob, maxResults)
+        val trimmedPattern = pattern.trim()
+        if (trimmedPattern.isEmpty()) {
+            return JSONObject()
+                .put("ok", false).put("code", "INVALID_PATTERN").put("message", "pattern 不能为空")
+                .toString()
+        }
+        if (trimmedPattern.length > AgentCodeSearch.MAX_PATTERN_CHARS) {
+            return JSONObject()
+                .put("ok", false).put("code", "INVALID_PATTERN")
+                .put("message", "pattern 过长（最多 ${AgentCodeSearch.MAX_PATTERN_CHARS} 字符）")
+                .toString()
+        }
+        // 先用本机正则做一次语法校验：非法直接报 INVALID_PATTERN，避免把 grep 原生报错透给模型。
+        try {
+            Regex(trimmedPattern)
+        } catch (_: Exception) {
+            return JSONObject()
+                .put("ok", false).put("code", "INVALID_PATTERN").put("message", "pattern 不是合法正则")
+                .toString()
+        }
+        val safeRoot = normalizePath(rootPath.ifBlank { DEFAULT_CWD })
+        val max = maxResults.coerceIn(1, AgentCodeSearch.MAX_RESULTS)
+        val globTokens = glob.orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        val globExpr = if (globTokens.isEmpty()) {
+            ""
+        } else {
+            " '(' " + globTokens.joinToString(" -o ") { "-name ${shellQuote(it)}" } + " ')'"
+        }
+        val command = "cd ${shellQuote(safeRoot)} && find . '(' -name .git -o -name node_modules " +
+            "-o -name build -o -name .gradle -o -name .idea ')' -prune -o -type f$globExpr -print " +
+            "2>/dev/null | head -n ${AgentCodeSearch.MAX_SCAN_FILES} | " +
+            "while IFS= read -r f; do grep -InHE -e ${shellQuote(trimmedPattern)} \"\$f\" 2>/dev/null; done | head -n $max"
+        val result = runSuText(command, timeoutSeconds = 30)
+        val rawLines = result.output.lineSequence().filter { it.isNotBlank() }.toList()
+        if (result.exitCode != 0 && rawLines.isEmpty()) {
+            logger.warn(
+                "Agent terminal action=search_code outcome=failed patternChars=${trimmedPattern.length} " +
+                    "exitCode=${result.exitCode} errorChars=${result.stderr.length}"
+            )
+            // grep ERE 与本机正则存在方言差异：本机能编译但 grep 拒绝（如前瞻断言）时，
+            // 报 INVALID_PATTERN 而不是 SEARCH_FAILED，方便模型修正 pattern。
+            val stderr = result.stderr
+            val looksLikeRegexError = stderr.contains("nvalid", ignoreCase = true) ||
+                stderr.contains("ad regex", ignoreCase = true) ||
+                stderr.contains("regex", ignoreCase = true) ||
+                stderr.contains("regular expression", ignoreCase = true) ||
+                stderr.contains("error", ignoreCase = true)
+            return errorJson(
+                if (looksLikeRegexError) "INVALID_PATTERN" else "SEARCH_FAILED",
+                stderr.ifBlank { "exit=${result.exitCode}" }
+            )
+        }
+        var budget = AgentCodeSearch.MAX_ENTRIES_TEXT_CHARS
+        val entries = mutableListOf<String>()
+        val prefix = safeRoot.trimEnd('/')
+        for (line in rawLines) {
+            val parsed = AgentCodeSearch.parseGrepLine(line)
+            val entry = if (parsed != null) {
+                // 与免 Root 实现统一：entries 一律使用绝对路径，避免模型拿到 ./ 开头的相对路径后猜基址。
+                val relative = parsed.first.removePrefix("./")
+                val absolute = if (parsed.first.startsWith("./")) "$prefix/$relative" else parsed.first
+                AgentCodeSearch.entry(absolute, parsed.second, parsed.third)
+            } else {
+                line.truncateByCodePoints(AgentCodeSearch.MAX_LINE_CHARS)
+            }
+            if (entry.length + 1 > budget) break
+            entries += entry
+            budget -= entry.length + 1
+        }
+        logger.info(
+            "Agent terminal action=search_code outcome=succeeded patternChars=${trimmedPattern.length} " +
+                "results=${entries.size} truncated=${entries.size < rawLines.size} exitCode=${result.exitCode}"
+        )
+        return JSONObject()
+            .put("ok", true)
+            .put("tool", "search_code")
+            .put("path", safeRoot)
+            .put("pattern", trimmedPattern)
+            .put("glob", glob.orEmpty())
+            .put("count", entries.size)
+            .put("truncated", entries.size < rawLines.size)
+            .put("results", JSONArray(entries))
             .toString()
     }
 
@@ -1032,13 +1262,13 @@ internal class RootShellTerminalController(
         )
 
     private fun String.truncateForJson(): String =
-        if (length <= MAX_OUTPUT_CHARS) this else take(MAX_OUTPUT_CHARS) + "\n...[truncated]"
+        if (length <= MAX_OUTPUT_CHARS) this else truncateByCodePoints(MAX_OUTPUT_CHARS) + "\n...[truncated]"
 
     private fun errorJson(code: String, message: String): String =
         JSONObject()
             .put("ok", false)
             .put("code", code)
-            .put("message", message.take(300))
+            .put("message", message.truncateByCodePoints(300))
             .toString()
 
     private data class ShellTextResult(val exitCode: Int, val output: String, val stderr: String)

@@ -26,6 +26,7 @@ internal sealed interface AgentOverlayStatus {
     data class HostedToolRunning(val name: String) : AgentOverlayStatus
     data class HostedToolFinished(val name: String, val success: Boolean) : AgentOverlayStatus
     data class ImagesRead(val count: Int) : AgentOverlayStatus
+    data class TodoProgress(val completed: Int, val total: Int) : AgentOverlayStatus
     data object ResultReady : AgentOverlayStatus
     data object RunFailed : AgentOverlayStatus
     data object GeneratingAnswer : AgentOverlayStatus
@@ -66,6 +67,7 @@ internal fun AgentOverlayStatus.localizedText(): String = when (this) {
         name,
     )
     is AgentOverlayStatus.ImagesRead -> pluralStringResource(R.plurals.overlay_images_read, count, count)
+    is AgentOverlayStatus.TodoProgress -> stringResource(R.string.overlay_todo_progress, completed, total)
     AgentOverlayStatus.ResultReady -> stringResource(R.string.overlay_result_ready)
     AgentOverlayStatus.RunFailed -> stringResource(R.string.overlay_run_failed)
     AgentOverlayStatus.GeneratingAnswer -> stringResource(R.string.overlay_generating_answer)
@@ -115,6 +117,11 @@ internal fun toolDisplayNameResource(name: String): Int? = when (name) {
     "read_file" -> R.string.tool_read_file
     "write_file" -> R.string.tool_write_file
     "list_directory" -> R.string.tool_list_directory
+    "edit_file" -> R.string.tool_edit_file
+    "search_code" -> R.string.tool_search_code
+    "spawn_agents" -> R.string.tool_spawn_agents
+    "subagent" -> R.string.tool_subagent
+    "todo_write" -> R.string.tool_todo_write
     "memory_get" -> R.string.tool_memory_get
     "memory_write" -> R.string.tool_memory_write
     "set_alarm" -> R.string.tool_set_alarm

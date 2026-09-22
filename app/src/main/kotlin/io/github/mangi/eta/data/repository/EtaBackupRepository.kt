@@ -149,28 +149,45 @@ internal object EtaBackupRepository {
     private suspend fun snapshot(context: Context): EtaBackupDocument {
         val appContext = context.applicationContext
         val database = EtaDatabase.get(appContext)
-        val providers = database.providerDao().providers().map { provider ->
-            EtaBackupProvider(
-                provider = provider.provider,
-                models = provider.models,
+        val settings = SettingsDataStore.settings()
+        // 快照的数据库读取放进同一事务：避免与并发 save（整库替换）交错时生成校验不过的备份。
+        val rows = database.withTransaction {
+            val conversations = database.conversationDao()
+            BackupSnapshotRows(
+                providers = database.providerDao().providers().map { provider ->
+                    EtaBackupProvider(
+                        provider = provider.provider,
+                        models = provider.models,
+                    )
+                },
+                conversations = conversations.conversationEntities(),
+                messages = conversations.messages(),
+                contextCheckpoints = conversations.contextCheckpoints(),
+                conversationState = conversations.state(),
             )
         }
-        val conversations = database.conversationDao()
-        val settings = SettingsDataStore.settings()
-        val conversationRows = conversations.conversationEntities()
         return EtaBackupDocument(
             exportedAt = System.currentTimeMillis(),
-            providers = providers,
+            providers = rows.providers,
             selectedProviderId = settings.selectedProviderId,
             selectedModelId = settings.selectedModelId,
-            conversations = conversationRows,
-            messages = conversations.messages(),
-            contextCheckpoints = conversations.contextCheckpoints(),
-            conversationState = conversations.state(),
+            conversations = rows.conversations,
+            messages = rows.messages,
+            contextCheckpoints = rows.contextCheckpoints,
+            conversationState = rows.conversationState,
             memoryMd = AgentMemoryRepository.snapshot().content,
-            roleplay = CharacterBackupTransfer.snapshot(appContext, conversationRows),
+            roleplay = CharacterBackupTransfer.snapshot(appContext, rows.conversations),
         )
     }
+
+    /** 导出快照在单事务内读出的行集合。 */
+    private data class BackupSnapshotRows(
+        val providers: List<EtaBackupProvider>,
+        val conversations: List<ConversationEntity>,
+        val messages: List<ConversationMessageEntity>,
+        val contextCheckpoints: List<ConversationContextCheckpointEntity>,
+        val conversationState: ConversationStateEntity?,
+    )
 
     private fun readDocument(input: InputStream): EtaBackupDocument {
         val bytes = input.readBytesLimited(MAX_BACKUP_BYTES)

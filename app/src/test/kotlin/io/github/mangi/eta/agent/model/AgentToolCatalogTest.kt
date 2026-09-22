@@ -29,7 +29,9 @@ class AgentToolCatalogTest {
         assertEquals(base.size, baseTools.size)
         assertTrue(
             base.containsAll(
-                setOf("observe_screen", "skills_list", "skills_read", "skills_read_resource"),
+                setOf(
+                    "observe_screen", "skills_list", "skills_read", "skills_read_resource", "todo_write",
+                ),
             ),
         )
         assertFalse("browser_use" in base)
@@ -200,6 +202,67 @@ class AgentToolCatalogTest {
         )
     }
 
+    @Test
+    fun planToolDeclaresBoundedTodoListReplacement() {
+        val function = AgentToolCatalog.build(
+            terminalTools = false,
+            browserTools = false,
+        ).function("todo_write")
+        val parameters = function.getJSONObject("parameters")
+        val todos = parameters.getJSONObject("properties").getJSONObject("todos")
+
+        assertEquals(listOf("todos"), parameters.getJSONArray("required").stringValues())
+        assertEquals(1, todos.getInt("minItems"))
+        assertEquals(50, todos.getInt("maxItems"))
+        assertTrue(function.getString("description").contains("整体替换"))
+        assertEquals(
+            listOf("pending", "in_progress", "completed"),
+            todos.getJSONObject("items").getJSONObject("properties")
+                .getJSONObject("status").getJSONArray("enum").stringValues(),
+        )
+    }
+
+    @Test
+    fun spawnAgentsDeclaresNoQuotaCaps() {
+        val function = AgentToolCatalog.build(terminalTools = false, browserTools = false).function("spawn_agents")
+        val properties = function.getJSONObject("parameters").getJSONObject("properties")
+
+        // 默认不再限制子代理开销：任务数/工具数不设 maxItems，轮数/超时不设 maximum。
+        assertFalse(properties.getJSONObject("tasks").has("maxItems"))
+        assertFalse(properties.getJSONObject("allowed_tools").has("maxItems"))
+        assertFalse(properties.getJSONObject("max_rounds").has("maximum"))
+        assertFalse(properties.getJSONObject("timeout_ms").has("maximum"))
+    }
+
+    @Test
+    fun directoryToolDeclaresPaginationFilteringAndRecursion() {
+        val function = AgentToolCatalog.build(
+            terminalTools = true,
+            browserTools = false,
+        ).function("list_directory")
+        val properties = function
+            .getJSONObject("parameters")
+            .getJSONObject("properties")
+
+        assertTrue(properties.has("offset"))
+        assertTrue(properties.has("glob"))
+        assertTrue(properties.has("recursive"))
+        assertTrue(function.getString("description").contains("翻页"))
+        assertTrue(function.getString("description").contains("search_code"))
+        assertTrue(function.getString("description").contains("search_files"))
+    }
+
+    @Test
+    fun codeSearchDeclaresAbsolutePathsAndPatternErrors() {
+        val function = AgentToolCatalog.build(
+            terminalTools = true,
+            browserTools = false,
+        ).function("search_code")
+
+        assertTrue(function.getString("description").contains("绝对路径"))
+        assertTrue(function.getString("description").contains("INVALID_PATTERN"))
+    }
+
     private fun JSONArray.toolNames(): List<String> =
         (0 until length()).map { index ->
             getJSONObject(index).getJSONObject("function").getString("name")
@@ -238,6 +301,8 @@ class AgentToolCatalogTest {
             "run_command",
             "read_file",
             "write_file",
+            "edit_file",
+            "search_code",
             "list_directory",
         )
     }

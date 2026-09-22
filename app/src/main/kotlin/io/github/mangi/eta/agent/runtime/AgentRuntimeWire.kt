@@ -585,6 +585,21 @@ internal object AgentRuntimeWire {
     private fun String.boundedText(maxChars: Int): String =
         if (length <= maxChars) this else take((maxChars - TRUNCATED_SUFFIX.length).coerceAtLeast(0)) + TRUNCATED_SUFFIX
 
+    /** detail 防御性截断上限（含省略号）：detail 可能承载工具原始输出，避免单个事件撑爆 Binder 事务预算。 */
+    private const val MAX_WIRE_DETAIL_CHARS = 4_000
+    private const val WIRE_DETAIL_ELLIPSIS = "…"
+
+    /**
+     * 写 Bundle 前把 detail clamp 到 [MAX_WIRE_DETAIL_CHARS] 以内（超出时以省略号收尾，总长不超过上限）。
+     * 解码端不感知截断；旧数据缺省 detail 仍还原为空串，既有往返语义不变。
+     */
+    private fun String.clampedWireDetail(): String =
+        if (length <= MAX_WIRE_DETAIL_CHARS) {
+            this
+        } else {
+            take((MAX_WIRE_DETAIL_CHARS - WIRE_DETAIL_ELLIPSIS.length).coerceAtLeast(0)) + WIRE_DETAIL_ELLIPSIS
+        }
+
     private fun requireStartRequestWithinBinderBudget(bundle: Bundle) {
         val parcel = Parcel.obtain()
         val sizeBytes = try {
@@ -711,6 +726,7 @@ internal object AgentRuntimeWire {
                 putInt("image_count", event.imageCount)
                 putInt("image_bytes", event.imageBytes)
                 event.success?.let { putBoolean("success", it) }
+                if (event.detail.isNotEmpty()) putString("detail", event.detail.clampedWireDetail())
             }
 
             is AgentEvent.HostedToolStarted -> {
@@ -750,6 +766,60 @@ internal object AgentRuntimeWire {
                 putString("tool_call_id", event.toolCallId)
                 putInt("total", event.total)
                 putInt("succeeded", event.succeeded)
+            }
+
+            is AgentEvent.SubagentStarted -> {
+                putString(KEY_TYPE, "subagent_started")
+                putInt("round", event.round)
+                putString("tool_call_id", event.toolCallId)
+                putInt("sub_index", event.subIndex)
+                putString("label", event.label)
+            }
+
+            is AgentEvent.SubagentToolStarted -> {
+                putString(KEY_TYPE, "subagent_tool_started")
+                putInt("round", event.round)
+                putString("tool_call_id", event.toolCallId)
+                putInt("sub_index", event.subIndex)
+                putString("label", event.label)
+                putString("inner_tool_name", event.innerToolName)
+                putString("inner_tool_call_id", event.innerToolCallId)
+                putString("args_preview", event.argsPreview)
+            }
+
+            is AgentEvent.SubagentToolFinished -> {
+                putString(KEY_TYPE, "subagent_tool_finished")
+                putInt("round", event.round)
+                putString("tool_call_id", event.toolCallId)
+                putInt("sub_index", event.subIndex)
+                putString("label", event.label)
+                putString("inner_tool_name", event.innerToolName)
+                putString("inner_tool_call_id", event.innerToolCallId)
+                putString("result_summary", event.resultSummary)
+                event.success?.let { putBoolean("success", it) }
+                if (event.detail.isNotEmpty()) putString("detail", event.detail.clampedWireDetail())
+            }
+
+            is AgentEvent.SubagentFinished -> {
+                putString(KEY_TYPE, "subagent_finished")
+                putInt("round", event.round)
+                putString("tool_call_id", event.toolCallId)
+                putInt("sub_index", event.subIndex)
+                putString("label", event.label)
+                putBoolean("ok", event.ok)
+                putString("content", event.content)
+                putLong("duration_ms", event.durationMs)
+                event.code?.let { putString("code", it) }
+                if (event.changedFiles.isNotEmpty()) putStringArrayList("changed_files", ArrayList(event.changedFiles))
+            }
+
+            is AgentEvent.TodoUpdated -> {
+                putString(KEY_TYPE, "todo_updated")
+                putInt("round", event.round)
+                putString("tool_call_id", event.toolCallId)
+                putInt("total", event.total)
+                putInt("completed", event.completed)
+                putString("current", event.current)
             }
 
             is AgentEvent.RunFinished -> {
@@ -869,6 +939,7 @@ internal object AgentRuntimeWire {
             imageBytes = bundle.getInt("image_bytes"),
             // 旧版本 Runtime 不发送 success，缺省为 null 由消费端回退判断
             success = if (bundle.containsKey("success")) bundle.getBoolean("success") else null,
+            detail = bundle.getString("detail").orEmpty(),
         )
 
         "hosted_tool_started" -> AgentEvent.HostedToolStarted(
@@ -903,6 +974,55 @@ internal object AgentRuntimeWire {
             toolCallId = bundle.getString("tool_call_id").orEmpty(),
             total = bundle.getInt("total"),
             succeeded = bundle.getInt("succeeded"),
+        )
+
+        "subagent_started" -> AgentEvent.SubagentStarted(
+            round = bundle.getInt("round"),
+            toolCallId = bundle.getString("tool_call_id").orEmpty(),
+            subIndex = bundle.getInt("sub_index"),
+            label = bundle.getString("label").orEmpty(),
+        )
+
+        "subagent_tool_started" -> AgentEvent.SubagentToolStarted(
+            round = bundle.getInt("round"),
+            toolCallId = bundle.getString("tool_call_id").orEmpty(),
+            subIndex = bundle.getInt("sub_index"),
+            label = bundle.getString("label").orEmpty(),
+            innerToolName = bundle.getString("inner_tool_name").orEmpty(),
+            innerToolCallId = bundle.getString("inner_tool_call_id").orEmpty(),
+            argsPreview = bundle.getString("args_preview").orEmpty(),
+        )
+
+        "subagent_tool_finished" -> AgentEvent.SubagentToolFinished(
+            round = bundle.getInt("round"),
+            toolCallId = bundle.getString("tool_call_id").orEmpty(),
+            subIndex = bundle.getInt("sub_index"),
+            label = bundle.getString("label").orEmpty(),
+            innerToolName = bundle.getString("inner_tool_name").orEmpty(),
+            innerToolCallId = bundle.getString("inner_tool_call_id").orEmpty(),
+            resultSummary = bundle.getString("result_summary").orEmpty(),
+            success = if (bundle.containsKey("success")) bundle.getBoolean("success") else null,
+            detail = bundle.getString("detail").orEmpty(),
+        )
+
+        "subagent_finished" -> AgentEvent.SubagentFinished(
+            round = bundle.getInt("round"),
+            toolCallId = bundle.getString("tool_call_id").orEmpty(),
+            subIndex = bundle.getInt("sub_index"),
+            label = bundle.getString("label").orEmpty(),
+            ok = bundle.getBoolean("ok"),
+            content = bundle.getString("content").orEmpty(),
+            durationMs = bundle.getLong("duration_ms", -1),
+            code = bundle.getString("code"),
+            changedFiles = bundle.getStringArrayList("changed_files").orEmpty(),
+        )
+
+        "todo_updated" -> AgentEvent.TodoUpdated(
+            round = bundle.getInt("round"),
+            toolCallId = bundle.getString("tool_call_id").orEmpty(),
+            total = bundle.getInt("total"),
+            completed = bundle.getInt("completed"),
+            current = bundle.getString("current").orEmpty(),
         )
 
         "run_finished" -> AgentEvent.RunFinished(

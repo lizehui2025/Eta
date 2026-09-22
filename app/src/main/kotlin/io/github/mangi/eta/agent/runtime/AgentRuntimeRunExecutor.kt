@@ -387,7 +387,7 @@ internal class AgentRuntimeRunExecutor(
     ) {
         checkpointRecorder?.accept(event)
         if (!session.emit(event)) return
-        archivedEvents += event
+        synchronized(archivedEvents) { archivedEvents += event }
         if (event is AgentEvent.ModelRetryScheduled) {
             AndroidAgentLogger.warn("Agent runtime event: ${event.toLogLine()}")
         } else if (event !is AgentEvent.AssistantBlockDelta) {

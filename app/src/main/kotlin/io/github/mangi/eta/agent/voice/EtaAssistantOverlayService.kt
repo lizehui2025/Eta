@@ -632,12 +632,37 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
                 status = EtaVoiceStatus.Reasoning
             }
             is AgentEvent.ProviderRequestStarted -> status = EtaVoiceStatus.Reasoning
+            is AgentEvent.SubagentsStarted -> {
+                messages = runMessageProjector.startSubagents(runId, event, messages)
+            }
+
+            is AgentEvent.SubagentStarted -> {
+                status = EtaVoiceStatus.RunningTool("subagent")
+                messages = runMessageProjector.startSubagent(runId, event, messages)
+            }
+
+            is AgentEvent.SubagentToolStarted -> {
+                status = EtaVoiceStatus.RunningTool(event.innerToolName)
+                messages = runMessageProjector.startSubagentTool(runId, event, messages)
+            }
+
+            is AgentEvent.SubagentToolFinished -> {
+                messages = runMessageProjector.finishSubagentTool(runId, event, messages)
+            }
+
+            is AgentEvent.SubagentFinished -> {
+                messages = runMessageProjector.finishSubagent(runId, event, messages)
+            }
+
+            is AgentEvent.SubagentsFinished -> {
+                messages = runMessageProjector.finishSubagents(runId, event, messages)
+            }
+
             is AgentEvent.RunStarted,
             is AgentEvent.ProviderResponseStarted,
             is AgentEvent.ToolImagesAttached,
             is AgentEvent.RoundStarted,
-            is AgentEvent.SubagentsStarted,
-            is AgentEvent.SubagentsFinished,
+            is AgentEvent.TodoUpdated,
             -> Unit
         }
         return state.copy(messages = messages, phase = phase, status = status)

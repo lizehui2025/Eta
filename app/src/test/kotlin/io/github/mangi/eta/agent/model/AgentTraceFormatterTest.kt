@@ -30,7 +30,7 @@ class AgentTraceFormatterTest {
                 toolName = "write_file",
                 argumentsJson =
                     """{"path":"/data/local/tmp/secret.txt","content":"api-key-value"}""",
-                expectedParts = listOf("写入文件", "字符"),
+                expectedParts = listOf("写入文件", "secret.txt", "字符"),
                 sensitiveParts = listOf("/data/local/tmp/secret.txt", "api-key-value"),
             ),
             RedactionCase(
@@ -42,8 +42,8 @@ class AgentTraceFormatterTest {
             RedactionCase(
                 toolName = "read_file",
                 argumentsJson = """{"path":"/data/user/0/example/private.xml"}""",
-                expectedParts = listOf("读取文件"),
-                sensitiveParts = listOf("/data/user/0/example/private.xml", "private.xml"),
+                expectedParts = listOf("读取文件", "private.xml"),
+                sensitiveParts = listOf("/data/user/0/example/private.xml"),
             ),
             RedactionCase(
                 toolName = "list_directory",
@@ -358,6 +358,41 @@ class AgentTraceFormatterTest {
     }
 
     @Test
+    fun todoListSummaryShowsProgressAndItems() {
+        val args = formatter.summarizeArguments(
+            AgentModelClient.ToolCall(
+                id = "todo-1",
+                name = "todo_write",
+                argumentsJson = """
+                    {"todos":[
+                      {"content":"梳理现状","status":"completed"},
+                      {"content":"实现提醒","status":"in_progress"},
+                      {"content":"回归验证","status":"pending"}
+                    ]}
+                """.trimIndent(),
+            ),
+        )
+        assertTrue(args.contains("任务清单"))
+        assertTrue(args.contains("已完成 1/3"))
+        assertTrue(args.contains("进行中：实现提醒"))
+
+        val result = formatter.summarizeResult(
+            "todo_write",
+            AgentModelClient.ToolResult(
+                content = """{"ok":true,"tool":"todo_write","total":3,"completed":1,"items":[
+                  {"content":"梳理现状","status":"completed"},
+                  {"content":"实现提醒","status":"in_progress"},
+                  {"content":"回归验证","status":"pending"}
+                ]}""",
+            ),
+        )
+        assertTrue(result.startsWith("进度 1/3"))
+        assertTrue(result.contains("✓ 梳理现状"))
+        assertTrue(result.contains("◐ 实现提醒"))
+        assertTrue(result.contains("○ 回归验证"))
+    }
+
+    @Test
     fun terminalResultShowsExitCodeAndOutputPreview() {
         val success = formatter.summarizeResult(
             "run_command",
@@ -433,6 +468,130 @@ class AgentTraceFormatterTest {
     }
 
     @Test
+    fun fileReadDetailShowsNameAndLineRange() {
+        val call = AgentModelClient.ToolCall(
+            id = "call-read",
+            name = "read_file",
+            argumentsJson =
+                """{"path":"/data/user/0/example/Main.kt","offset_bytes":0,"max_bytes":4096}""",
+        )
+        val content = (1..88).joinToString("\n") { "line-$it" }
+        val result = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("tool", "read_file")
+                .put("path", "/data/user/0/example/Main.kt")
+                .put("offset_bytes", 0)
+                .put("bytes_read", 4096)
+                .put("truncated", false)
+                .put("content", content)
+                .toString(),
+        )
+
+        val detail = formatter.summarizeDetail("read_file", call.argumentsJson, result)
+
+        assertTrue(detail.contains("文件：Main.kt"))
+        assertTrue(detail.contains("第 1–88 行"))
+        assertTrue(detail.contains("4096 字节"))
+        assertFalse(detail.contains("/data/user/0"))
+
+        val offsetRead = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("tool", "read_file")
+                .put("path", "/data/x/a.txt")
+                .put("offset_bytes", 4096)
+                .put("bytes_read", 10)
+                .put("truncated", true)
+                .put("content", "a\nb")
+                .toString(),
+        )
+        val offsetDetail = formatter.summarizeDetail("read_file", call.argumentsJson, offsetRead)
+        assertTrue(offsetDetail.contains("自字节 4096 起"))
+        assertTrue(offsetDetail.contains("已截断"))
+    }
+
+    @Test
+    fun fileWriteDetailShowsDiffOrPreview() {
+        val call = AgentModelClient.ToolCall(
+            id = "call-write",
+            name = "write_file",
+            argumentsJson =
+                """{"path":"/data/x/Config.kt","content":"val a = 1\nval b = 2"}""",
+        )
+        val withDiff = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("tool", "write_file")
+                .put("path", "/data/x/Config.kt")
+                .put("mode", "overwrite")
+                .put("bytes_written", 20)
+                .put("diff", "第 1 行起：旧 2 行 → 新 2 行\n- val a = 0\n+ val a = 1")
+                .toString(),
+        )
+        val detail = formatter.summarizeDetail("write_file", call.argumentsJson, withDiff)
+        assertTrue(detail.contains("文件：Config.kt"))
+        assertTrue(detail.contains("旧内容对比"))
+        assertTrue(detail.contains("- val a = 0"))
+
+        val newFile = AgentModelClient.ToolResult(
+            content = """{"ok":true,"tool":"write_file","mode":"overwrite","bytes_written":20}""",
+        )
+        val previewDetail = formatter.summarizeDetail("write_file", call.argumentsJson, newFile)
+        assertTrue(previewDetail.contains("新内容预览"))
+        assertTrue(previewDetail.contains("val a = 1"))
+        assertTrue(previewDetail.contains("覆盖写入"))
+    }
+
+    @Test
+    fun fileEditDetailShowsReplacementSnippet() {
+        val call = AgentModelClient.ToolCall(
+            id = "call-edit",
+            name = "edit_file",
+            argumentsJson = JSONObject()
+                .put("path", "/repo/app/Main.kt")
+                .put("old_string", "val a = 0")
+                .put("new_string", "val a = 1\nval b = 2")
+                .toString(),
+        )
+        val result = AgentModelClient.ToolResult(
+            content = """{"ok":true,"tool":"edit_file","replacements":1,"bytes_written":30}""",
+        )
+
+        val detail = formatter.summarizeDetail("edit_file", call.argumentsJson, result)
+
+        assertTrue(detail.contains("文件：Main.kt"))
+        assertTrue(detail.contains("替换 1 处"))
+        assertTrue(detail.contains("- val a = 0"))
+        assertTrue(detail.contains("+ val a = 1"))
+    }
+
+    @Test
+    fun terminalDetailShowsLongerBoundedOutput() {
+        val longStdout = (1..30).joinToString("\n") { "line-$it" }
+        val result = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("tool", "run_command")
+                .put("exit_code", 0)
+                .put("stdout", longStdout)
+                .put("stderr", "warn: careful")
+                .put("stdout_truncated", true)
+                .toString(),
+        )
+
+        val detail = formatter.summarizeDetail("run_command", "{}", result)
+
+        assertTrue(detail.contains("退出码 0"))
+        assertTrue(detail.contains("输出（stdout）"))
+        assertTrue(detail.contains("line-14"))
+        assertFalse(detail.contains("line-15"))
+        assertTrue(detail.contains("输出已截断"))
+        assertTrue(detail.contains("错误输出（stderr）"))
+        assertTrue(detail.contains("warn: careful"))
+    }
+
+    @Test
     fun terminalResultPreviewIsBounded() {
         val longOutput = (1..10).joinToString("\n") { "line-$it-${"x".repeat(100)}" }
         val summary = formatter.summarizeResult(
@@ -453,6 +612,123 @@ class AgentTraceFormatterTest {
         assertTrue(previewLines.size <= 5)
         assertTrue(summary.endsWith("…"))
         assertTrue(summary.length < longOutput.length)
+    }
+
+    @Test
+    fun listDirectoryResultAndDetailShowCountsAndPaging() {
+        val result = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("tool", "list_directory")
+                .put("path", "/data/x/repo")
+                .put("exit_code", 0)
+                .put("total", 5)
+                .put("offset", 0)
+                .put("count", 2)
+                .put("truncated", true)
+                .put("entries_text", "d app\n- settings.gradle")
+                .put("stderr", "")
+                .toString(),
+        )
+
+        val summary = formatter.summarizeResult("list_directory", result)
+        assertTrue(summary.contains("共 5 项"))
+        assertTrue(summary.contains("显示 2 项"))
+        assertTrue(summary.contains("已截断"))
+
+        val detail = formatter.summarizeDetail("list_directory", """{"path":"/data/x/repo"}""", result)
+        assertTrue(detail.contains("共 5 项 · 本页 2 项"))
+        assertTrue(detail.contains("offset=2"))
+        assertTrue(detail.contains("d app"))
+        assertFalse(detail.contains("/data/x/repo"))
+
+        val empty = AgentModelClient.ToolResult(
+            content = """{"ok":true,"tool":"list_directory","total":0,"offset":0,"count":0,"truncated":false,"entries_text":""}""",
+        )
+        assertEquals("空目录", formatter.summarizeResult("list_directory", empty))
+    }
+
+    @Test
+    fun subagentResultShowsTimeoutAndFilteredTools() {
+        val results = org.json.JSONArray()
+            .put(
+                JSONObject()
+                    .put("label", "调研 A")
+                    .put("ok", true)
+                    .put("duration_ms", 1200)
+                    .put("content", "done")
+                    .put("changed_files", org.json.JSONArray()),
+            )
+            .put(
+                JSONObject()
+                    .put("label", "改码 B")
+                    .put("ok", false)
+                    .put("code", "SUBAGENT_TIMEOUT")
+                    .put("duration_ms", 180000)
+                    .put("content", "子代理超时未完成")
+                    .put("verify_hint", "先读 changed_files 核实")
+                    .put("timeout_ms", 180000)
+                    .put("still_running", true)
+                    .put("changed_files", org.json.JSONArray().put("/repo/a.kt")),
+            )
+        val result = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("mode", "research")
+                .put("total", 2)
+                .put("succeeded", 1)
+                .put("timed_out", 1)
+                .put("fanout_elapsed_ms", 181000)
+                .put("max_rounds", 12)
+                .put("timeout_ms", 180000)
+                .put("results", results)
+                .put("filtered_tools", org.json.JSONArray().put("terminal"))
+                .toString(),
+        )
+
+        val summary = formatter.summarizeResult("spawn_agents", result)
+        assertTrue(summary.contains("1/2 成功"))
+        assertTrue(summary.contains("超时 1"))
+        assertTrue(summary.contains("已过滤 1 个工具"))
+
+        val detail = formatter.summarizeDetail("spawn_agents", """{"tasks":[{"label":"x"}]}""", result)
+        assertTrue(detail.contains("共 2 项 · 成功 1 项 · 超时 1 项"))
+        assertTrue(detail.contains("被模式过滤的工具"))
+        assertTrue(detail.contains("terminal"))
+        assertTrue(detail.contains("✓ 调研 A"))
+        assertTrue(detail.contains("✗ 改码 B"))
+        assertTrue(detail.contains("先读 changed_files 核实"))
+        assertTrue(detail.contains("线程仍在收尾"))
+    }
+
+    @Test
+    fun codeSearchDetailShowsHitsAndGlobHint() {
+        val result = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("tool", "search_code")
+                .put("path", "/repo")
+                .put("pattern", "Foo")
+                .put("glob", "")
+                .put("count", 3)
+                .put("truncated", true)
+                .put(
+                    "results",
+                    org.json.JSONArray()
+                        .put("/repo/a.kt:1:class Foo")
+                        .put("/repo/b.kt:7:fun foo()"),
+                )
+                .toString(),
+        )
+
+        val summary = formatter.summarizeResult("search_code", result)
+        assertTrue(summary.contains("命中 3 条"))
+        assertTrue(summary.contains("已截断"))
+
+        val detail = formatter.summarizeDetail("search_code", """{"pattern":"Foo"}""", result)
+        assertTrue(detail.contains("命中 3 条"))
+        assertTrue(detail.contains("glob"))
+        assertTrue(detail.contains("/repo/a.kt:1:class Foo"))
     }
 
     private data class RedactionCase(

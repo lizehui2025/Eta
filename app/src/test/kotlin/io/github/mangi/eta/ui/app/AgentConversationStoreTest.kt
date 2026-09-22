@@ -20,6 +20,7 @@ import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.TokenUsageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityStatusUi
+import io.github.mangi.eta.ui.model.ToolStepUi
 import io.github.mangi.eta.ui.model.UserMessageUi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -115,6 +116,24 @@ class AgentConversationStoreTest {
                     command = "pm list packages | head",
                     resultSummary = "ok=true, chars=100",
                     imageCount = 1,
+                    detail = "退出码 0\n\n输出（前 1 行）\ncom.android.settings",
+                ),
+                ToolActivityMessageUi(
+                    id = "subagent-1",
+                    toolName = SUBAGENT_TOOL_NAME,
+                    status = ToolActivityStatusUi.Success,
+                    argumentsSummary = "查相册",
+                    resultSummary = "相册 3 张",
+                    detail = "相册 3 张 · 已修改 1 个文件",
+                    steps = listOf(
+                        ToolStepUi(
+                            id = "step-1",
+                            toolName = "search_media",
+                            status = ToolActivityStatusUi.Success,
+                            summary = "最近 7 天",
+                            detail = "找到 3 张照片",
+                        ),
+                    ),
                 ),
                 AgentMessageUi(
                     id = "assistant-1",
@@ -472,5 +491,49 @@ class AgentConversationStoreTest {
         val snapshot = AgentConversationStore.load(context)
         assertTrue(snapshot.conversationsById.isEmpty())
         assertEquals(null, snapshot.selectedConversationId)
+    }
+
+    @Test
+    fun repeatedSaveKeepsOriginalCreatedAt() {
+        // 多次保存同一会话时 created_at 必须保持首次写入值，不能随 updated_at 漂移。
+        runBlocking {
+            AgentConversationStore.save(
+                context = context,
+                selectedConversationId = "conv-created",
+                conversationsById = mapOf(
+                    "conv-created" to AgentChatHomeUiState(
+                        messages = listOf(UserMessageUi(id = "created-user", content = "第一次保存")),
+                        input = "",
+                        isStreaming = false,
+                        thinkingEnabled = false,
+                    )
+                ),
+                titles = mapOf("conv-created" to "创建时间"),
+                updatedAt = mapOf("conv-created" to 1_000L),
+            )
+            val first = EtaDatabase.get(context).conversationDao().conversationMetadataRows()
+                .single { it.id == "conv-created" }
+
+            AgentConversationStore.save(
+                context = context,
+                selectedConversationId = "conv-created",
+                conversationsById = mapOf(
+                    "conv-created" to AgentChatHomeUiState(
+                        messages = listOf(UserMessageUi(id = "created-user", content = "第二次保存")),
+                        input = "",
+                        isStreaming = false,
+                        thinkingEnabled = false,
+                    )
+                ),
+                titles = mapOf("conv-created" to "创建时间"),
+                updatedAt = mapOf("conv-created" to 2_000L),
+            )
+            val second = EtaDatabase.get(context).conversationDao().conversationMetadataRows()
+                .single { it.id == "conv-created" }
+
+            assertEquals(1_000L, first.createdAt)
+            assertEquals(1_000L, second.createdAt)
+            assertEquals(2_000L, second.updatedAt)
+        }
     }
 }

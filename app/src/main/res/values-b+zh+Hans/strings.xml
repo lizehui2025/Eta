@@ -202,6 +202,7 @@
     <item quantity="other">准备工具：%d 个</item>
   </plurals>
   <string name="overlay_reasoning_round">第 %1$d 轮思考</string>
+  <string name="overlay_todo_progress">任务清单 · 已完成 %1$d/%2$d</string>
   <string name="overlay_requesting_model">请求模型中</string>
   <string name="overlay_model_responded">模型已响应</string>
   <string name="overlay_generating_tool_arguments">生成工具参数中</string>
@@ -251,7 +252,12 @@
   <string name="tool_run_command">执行命令</string>
   <string name="tool_read_file">读取文件</string>
   <string name="tool_write_file">写入文件</string>
+  <string name="tool_spawn_agents">并行子代理</string>
+  <string name="tool_todo_write">任务清单</string>
+  <string name="tool_subagent">子代理</string>
   <string name="tool_list_directory">列出目录</string>
+  <string name="tool_edit_file">编辑文件</string>
+  <string name="tool_search_code">搜索代码</string>
   <string name="system_notice_stopped">已停止</string>
   <string name="system_notice_empty_result">运行已完成，但没有返回文字。</string>
   <string name="system_notice_runtime_failed">Runtime 运行失败</string>
@@ -802,6 +808,10 @@
   <string name="tool_ui_read_the_contents_of_mobile_phone_files_bf3066">读取手机文件内容</string>
   <string name="tool_ui_read_the_specified_settings_key_496975">读取指定 Settings 键</string>
   <string name="tool_ui_read_file_dc995c">读取文件</string>
+  <string name="tool_ui_edit_file_3c7a1e">编辑文件</string>
+  <string name="tool_ui_exact_text_replacement_in_a_file_atomic_write_8d5b42">在文件内精确替换文本，默认要求唯一匹配，写入为原子替换。</string>
+  <string name="tool_ui_search_code_5e2f90">搜索代码</string>
+  <string name="tool_ui_regex_search_in_a_directory_returns_path_line_text_a17c64">按正则在目录内搜索文本，返回 path:line:text，支持文件名通配。</string>
   <string name="tool_ui_read_the_alarm_clock_that_has_been_created_in_th_2320d6">读取时钟中已创建的闹钟</string>
   <string name="tool_ui_read_running_or_paused_timers_3437c8">读取正在运行或暂停的计时器</string>
   <string name="tool_ui_read_power_memory_storage_and_system_version_c501d5">读取电量、内存、存储与系统版本</string>
@@ -1164,4 +1174,12 @@
   <string name="data_backup_imported">已导入 %1$d 个对话和 %2$d 个模型提供商</string>
   <string name="data_backup_failed">备份操作失败</string>
   <string name="data_backup_file_open_failed">无法打开所选文件</string>
+  <string name="tool_detail_label">详情</string>
+  <string name="subagent_detail_title">子代理详情</string>
+  <string name="subagent_detail_steps">执行步骤</string>
+  <string name="subagent_detail_result">最终结果</string>
+  <string name="subagent_detail_no_steps">暂无步骤记录</string>
+  <string name="roleplay_edit_reply_action">编辑角色回复</string>
+  <string name="roleplay_previous_candidate_action">上一条候选回复</string>
+  <string name="roleplay_next_candidate_action">下一条候选回复</string>
 </resources>

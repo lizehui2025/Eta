@@ -190,6 +190,7 @@
     <item quantity="other">準備工具：%d 個</item>
   </plurals>
   <string name="overlay_reasoning_round">第 %1$d 輪思考</string>
+  <string name="overlay_todo_progress">任務清單 · 已完成 %1$d/%2$d</string>
   <string name="overlay_requesting_model">請求模型中</string>
   <string name="overlay_model_responded">模型已回應</string>
   <string name="overlay_generating_tool_arguments">產生工具參數中</string>
@@ -239,7 +240,12 @@
   <string name="tool_run_command">執行指令</string>
   <string name="tool_read_file">讀取檔案</string>
   <string name="tool_write_file">寫入檔案</string>
+  <string name="tool_spawn_agents">並行子代理</string>
+  <string name="tool_todo_write">任務清單</string>
+  <string name="tool_subagent">子代理</string>
   <string name="tool_list_directory">列出目錄</string>
+  <string name="tool_edit_file">編輯檔案</string>
+  <string name="tool_search_code">搜尋程式碼</string>
   <string name="system_notice_stopped">已停止</string>
   <string name="system_notice_empty_result">執行已完成，但沒有文字回覆。</string>
   <string name="system_notice_runtime_failed">Runtime 執行失敗</string>
@@ -790,6 +796,10 @@
   <string name="tool_ui_read_the_contents_of_mobile_phone_files_bf3066">讀取手機檔案內容</string>
   <string name="tool_ui_read_the_specified_settings_key_496975">讀取指定 Settings 鍵</string>
   <string name="tool_ui_read_file_dc995c">讀取檔案</string>
+  <string name="tool_ui_edit_file_3c7a1e">編輯檔案</string>
+  <string name="tool_ui_exact_text_replacement_in_a_file_atomic_write_8d5b42">在檔案內精確取代文字，預設要求唯一符合，寫入為原子替換。</string>
+  <string name="tool_ui_search_code_5e2f90">搜尋程式碼</string>
+  <string name="tool_ui_regex_search_in_a_directory_returns_path_line_text_a17c64">按正則在目錄內搜尋文字，回傳 path:line:text，支援檔名萬用字元。</string>
   <string name="tool_ui_read_the_alarm_clock_that_has_been_created_in_th_2320d6">讀取時鐘中已建立的鬧鐘</string>
   <string name="tool_ui_read_running_or_paused_timers_3437c8">讀取正在運作或暫停的計時器</string>
   <string name="tool_ui_read_power_memory_storage_and_system_version_c501d5">讀取電量、記憶體、儲存與系統版本</string>
@@ -1152,4 +1162,12 @@
   <string name="data_backup_imported">已匯入 %1$d 個對話與 %2$d 個模型供應商</string>
   <string name="data_backup_failed">備份操作失敗</string>
   <string name="data_backup_file_open_failed">無法開啟所選檔案</string>
+  <string name="tool_detail_label">詳情</string>
+  <string name="subagent_detail_title">子代理詳情</string>
+  <string name="subagent_detail_steps">執行步驟</string>
+  <string name="subagent_detail_result">最終結果</string>
+  <string name="subagent_detail_no_steps">暫無步驟記錄</string>
+  <string name="roleplay_edit_reply_action">編輯角色回覆</string>
+  <string name="roleplay_previous_candidate_action">上一條候選回覆</string>
+  <string name="roleplay_next_candidate_action">下一條候選回覆</string>
 </resources>

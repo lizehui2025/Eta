@@ -35,11 +35,14 @@ internal class AgentLoop(
     private val roleplayContext: RoleplayRunContext? = null,
     initialSupplementIndex: Int = 0,
     private val subagentHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
+    private val todoHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
+    private val maxRounds: Int? = null,
 ) {
     data class Result(
         val content: String,
         val reasoningContent: String,
         val sensitiveToolCallIds: Set<String>,
+        val roundLimited: Boolean = false,
     )
 
     private data class ToolOutcome(
@@ -84,9 +87,29 @@ internal class AgentLoop(
 
     fun run(): Result {
         var round = 1
+        // 轮数触顶时用于回填部分结果：最近一次非空 assistant 文本。
+        var lastAssistantText = ""
 
         while (true) {
             runController.throwIfCancelled()
+            if (maxRounds != null && round > maxRounds) {
+                publishTranscript()
+                // 触顶截断：携带最近一次非空 assistant 文本作为部分结果，正常返回路径不受影响。
+                val partial = lastAssistantText.take(ROUND_LIMIT_PARTIAL_CHARS)
+                val limitNote = buildString {
+                    append(ROUND_LIMIT_MARKER_PREFIX).append(maxRounds)
+                    if (partial.isNotEmpty()) {
+                        append("\n\n").append(partial)
+                    }
+                }
+                onEvent(AgentEvent.RunFinished(round = round - 1, contentChars = limitNote.length))
+                return Result(
+                    content = limitNote,
+                    reasoningContent = reasoningSnapshot(),
+                    sensitiveToolCallIds = sensitiveToolCallIds.toSet(),
+                    roundLimited = true,
+                )
+            }
             if (purpose.allowsTools) appendPendingSteeringMessage()
 
             val roundTools = if (purpose.allowsTools) toolsForRound?.invoke() ?: tools else JSONArray()
@@ -168,6 +191,12 @@ internal class AgentLoop(
                 accumulatedReasoning.append(assistantReasoning)
             }
 
+            // 记录最近一次非空 assistant 文本；轮数触顶时作为截断前的部分结果带回。
+            val assistantText = assistantMessage.optString("content").trim()
+            if (assistantText.isNotBlank() && assistantText != "null") {
+                lastAssistantText = assistantText
+            }
+
             appendMessage(
                 AgentConversationCodec.assistantHistoryMessage(
                     source = assistantMessage,
@@ -197,9 +226,11 @@ internal class AgentLoop(
                         )
                     }
                     appendMessage(AgentConversationCodec.toolResultMessage(outcome.call, outcome.result))
-                    publishTranscript()
                     outcome
                 }
+                // 同批工具结果一次发布：transcript() 每次全量转换，随轮数增长；
+                // 逐工具发布会把 N 次全量转换放大为 O(N^2)，UI 按批次刷新即可。
+                publishTranscript()
                 appendToolImages(round, outcomes)
                 publishTranscript()
                 round += 1
@@ -267,13 +298,44 @@ internal class AgentLoop(
                     command = traceFormatter.displayCommand(toolCall),
                 ),
             )
-            val subResult = subagentHandler.invoke(round, toolCall)
+            val subResult = try {
+                subagentHandler.invoke(round, toolCall)
+            } catch (throwable: Throwable) {
+                // 取消必须继续向上传递；其他异常收敛为工具错误，避免整轮莫名失败并留下悬空批次。
+                runController.throwIfCancelled()
+                AgentModelClient.ToolResult(
+                    content = JSONObject()
+                        .put("ok", false)
+                        .put("code", "SUBAGENT_FANOUT_FAILED")
+                        .put("message", throwable.message ?: throwable.javaClass.simpleName)
+                        .toString(),
+                )
+            }
             if (subResult != null) {
                 if (subResult.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
                     sensitiveToolCallIds += toolCall.id
                 }
                 emitToolFinished(round, toolCall, subResult)
                 return ToolOutcome(toolCall, subResult)
+            }
+        }
+        if (toolCall.name == AgentTodoList.TOOL_NAME && todoHandler != null) {
+            onEvent(
+                AgentEvent.ToolStarted(
+                    round = round,
+                    toolCallId = toolCall.id,
+                    name = toolCall.name,
+                    argsPreview = traceFormatter.summarizeArguments(toolCall),
+                    command = traceFormatter.displayCommand(toolCall),
+                ),
+            )
+            val todoResult = todoHandler.invoke(round, toolCall)
+            if (todoResult != null) {
+                if (todoResult.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
+                    sensitiveToolCallIds += toolCall.id
+                }
+                emitToolFinished(round, toolCall, todoResult)
+                return ToolOutcome(toolCall, todoResult)
             }
         }
         toolCallValidator.validate(toolCall)?.let { validationError ->
@@ -356,6 +418,7 @@ internal class AgentLoop(
                 imageCount = result.images.size,
                 imageBytes = result.images.sumOf { it.bytes },
                 success = traceFormatter.isSuccessResult(result),
+                detail = traceFormatter.summarizeDetail(toolCall.name, toolCall.argumentsJson, result),
             )
         )
     }
@@ -454,4 +517,11 @@ internal class AgentLoop(
             AssistantBlockKind.TOOL_CALL -> AgentEvent.AssistantBlockKind.TOOL_CALL
         }
 
+    companion object {
+        /** 轮数触顶标记前缀；AgentSubagentExecutor 据此从 Result.content 中剥出部分结果。 */
+        const val ROUND_LIMIT_MARKER_PREFIX = "ROUND_LIMIT_TRUNCATED: maxRounds="
+
+        /** 触顶时保留的部分结果字符上限。 */
+        const val ROUND_LIMIT_PARTIAL_CHARS = 1500
+    }
 }

@@ -23,8 +23,8 @@ internal class AgentToolCallValidator(tools: JSONArray) {
     fun validate(call: AgentModelClient.ToolCall): String? {
         val toolSchema = schemasByName[call.name]
             ?: return "工具未在本次运行的能力目录中声明"
-        val arguments = runCatching { JSONObject(call.argumentsJson.ifBlank { "{}" }) }
-            .getOrElse { return "参数不是有效的 JSON object" }
+        val arguments = call.parsedArgs().getOrNull()
+            ?: return "参数不是有效的 JSON object"
         return validateValue(
             value = arguments,
             schema = toolSchema.parameters,

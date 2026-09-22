@@ -32,6 +32,7 @@ internal object AgentPromptBuilder {
         memoryContext: AgentMemoryContext,
         rootAvailable: Boolean,
         roleplayContext: RoleplayRunContext? = null,
+        planGuidance: Boolean = true,
     ): JSONArray {
         val messages = JSONArray()
         if (roleplayContext == null && config.systemPrompt.isNotBlank()) {
@@ -55,6 +56,14 @@ internal object AgentPromptBuilder {
                     "用户目标明确且已经具备可靠执行参数时，立即调用工具，不要先输出计划、解释或中间进度；" +
                     "可以根据上下文合理确定的细节自行处理；缺少会影响执行结果的关键信息时，再简短询问，不猜测关键参数；" +
                     "不依赖中间界面变化的连续操作可以在同一轮一并调用，不要为了展示思考而拆成多个回合；" +
+                    (if (planGuidance && roleplayContext == null) {
+                        "需要多步完成的任务先调用 todo_write 建立任务清单（3 步以上或需要多个工具轮次时），" +
+                            "开始某一步时标为 in_progress、完成时标为 completed，并随进度更新清单；" +
+                            "这属于工具调用，不必先向用户输出计划说明；简单任务不要建清单。" +
+                            "需要并行调研或分片改码时用 spawn_agents 扇出子代理，避免把大量中间结果拖进主上下文。"
+                    } else {
+                        ""
+                    }) +
                     "工具已向你公开表示对应能力已由用户开启。用户要求‘了解我’、分析最近状态或活动、总结习惯与偏好、判断工作生活情况，" +
                     "或请求个性化建议时，应主动选择相册、日历、联系人、通话、短信、便签、录音、系统记忆、文件、通知和聊天图片等当前可用来源。" +
                     "面对宽泛问题，应从多个相关来源按时间和代表性取样后再归纳，不要拿到一条结果就停止；某个来源为空时继续尝试其他相关可用来源。" +
@@ -100,8 +109,13 @@ internal object AgentPromptBuilder {
         if (config.terminalTools) {
             messages.put(
                 systemMessage(
-                    "任务需要在手机上执行命令、查看 Linux/Android 系统信息、读取/写入文件、查询包名或使用 shell 时，" +
-                        "必须调用 terminal 或 run_command/read_file/write_file/list_directory 工具。" +
+                    "任务需要在手机上执行命令、查看 Linux/Android 系统信息、读取或修改文件、查询包名或使用 shell 时，" +
+                        "必须调用 terminal 或本轮公开的文件工具；文件内容的读取、写入、修改与搜索优先使用 read_file、write_file、edit_file、search_code、list_directory 结构化工具，" +
+                        "不要用 terminal/run_command 执行 cat、echo、sed、awk、grep、perl 等命令来读写或修改文件内容，" +
+                        "目录浏览优先用 list_directory（支持 limit/offset 翻页、glob 按名过滤、recursive 递归），内容定位优先用 search_code，" +
+                        "手机文档/下载检索用 search_files，不要用 ls/find/grep 手工重复分页或在多个工具间来回试探，" +
+                        "shell 只用于构建、测试、包管理、版本控制、权限、进程与文件系统操作等结构化工具覆盖不了的场景，" +
+                        "文件工具因体积、格式或路径限制无法覆盖时才回退 shell，并尽量缩小操作范围。" +
                         "Android 应用与当前身份可访问的设备文件使用 terminal 的 environment=android；" +
                         "用户选择的 Alpine 或 Debian 工具环境统一使用 environment=linux；不要自行改用另一发行版。" +
                         "如果返回 LINUX_ENVIRONMENT_NOT_READY，" +
@@ -159,7 +173,8 @@ internal object AgentPromptBuilder {
             if (context.coreContent.isNotBlank()) {
                 appendLine()
                 appendLine("<memory_core>")
-                appendLine(context.coreContent)
+                // 把正文里的 "<" 替换为 "&lt;"，防止其中的 </memory_core> 提前闭合注入块
+                appendLine(context.coreContent.replace("<", "&lt;"))
                 if (context.coreTruncated) {
                     appendLine("[核心记忆超出自动注入预算，按需调用 memory_get 读取其余内容]")
                 }
@@ -187,13 +202,17 @@ internal object AgentPromptBuilder {
                     if (skill.hasAssets) add("assets")
                     if (skill.hasEvals) add("evals")
                 }.joinToString(", ").ifBlank { "metadata-only" }
+                // 索引字段单行化：控制字符与连续空白折叠为单个空格
+                val id = skill.id.toSingleLine()
+                val name = skill.name.toSingleLine()
+                val path = skill.skillFilePath.toSingleLine()
                 val description = skill.description
-                    .replace(Regex("\\s+"), " ")
+                    .toSingleLine()
                     .trim()
-                    .let { if (it.length <= 180) it else it.take(180) + "..." }
+                    .let { if (it.length <= 180) it else it.takeSafely(180) + "..." }
                     .ifBlank { "无描述" }
                 appendLine(
-                    "- id=${skill.id} | name=${skill.name} | path=${skill.skillFilePath} | " +
+                    "- id=$id | name=$name | path=$path | " +
                         "capabilities=$capabilities | description=$description"
                 )
             }
@@ -204,6 +223,29 @@ internal object AgentPromptBuilder {
             )
         }
         return systemMessage(body)
+    }
+
+    /** 将文本折叠为单行：控制字符与连续空白折叠为单个空格，并去掉首尾空白。 */
+    private fun String.toSingleLine(): String {
+        val builder = StringBuilder(length)
+        var pendingSpace = false
+        for (ch in this) {
+            if (ch.isWhitespace() || ch < ' ' || ch in '\u007F'..'\u009F') {
+                pendingSpace = builder.isNotEmpty()
+            } else {
+                if (pendingSpace) builder.append(' ')
+                pendingSpace = false
+                builder.append(ch)
+            }
+        }
+        return builder.toString()
+    }
+
+    /** 从开头截取至多 maxChars 个 UTF-16 码元；截断点落在高代理位时回退一位，避免产生孤立代理码元。 */
+    private fun String.takeSafely(maxChars: Int): String {
+        if (length <= maxChars) return this
+        val end = if (maxChars > 0 && this[maxChars - 1].isHighSurrogate()) maxChars - 1 else maxChars
+        return substring(0, end)
     }
 
     private fun systemMessage(content: String): JSONObject =

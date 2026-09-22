@@ -40,7 +40,9 @@ pending steering
 - 工具参数在执行前按本轮实际下发的 JSON Schema 校验，支持本地 `$ref`、组合 Schema、条件 Schema 与常用对象、数组、字符串、数值约束；这只检查调用合同，不承担权限确认或额外安全策略。
 - transcript 只返回本次 run 新增的 assistant、tool 和运行中 steering 消息，不重复旧 history 或本轮初始用户消息。
 - GUI/终端工具保持串行。Android 前台状态和会话式 Shell 都不具备可安全并行的通用语义。
-- 例外：`spawn_agents` 可在一次调用内扇出最多 4 个只读子代理（实际并行度上限 3），各自独立 messages/loop 并发搜集，只读工具结果汇总后作为单条 tool result 返回主循环。子代理禁 GUI/浏览器/写操作与 `spawn_agents` 自身（违例返回 `EXCLUSIVE_TOOL_BUSY`，嵌套派生返回 `NESTED_SPAWN_NOT_ALLOWED`），整体超时默认 120s（10s–180s），父取消会联动取消全部子代理。
+- 例外：`spawn_agents` 可在一次调用内并行扇出子代理（任务数与并行度不设上限），每个任务独立 messages/loop 并发执行，结果汇总为单条 tool result 返回主循环。子代理有两种模式：`research`（默认，只读搜集）与 `code`（在任务声明的 `write_paths` 范围内用 `write_file` / `edit_file` 编辑，同一 canonical 文件由 fanout 级注册表互斥）；mode 可省略：任务声明 write_paths 或点名写工具时自动按 code 处理，否则默认 research；`allowed_tools` 只收窄工具集、不设数量上限，显式空数组视为未提供；显式声明的 mode 必须与 write_paths 自洽（research 禁写范围、code 必须带写范围），在调用级校验。两种模式都禁 GUI/浏览器、终端 shell（`terminal`、`run_command`）、敏感写、安装类与 `spawn_agents` 自身：违例返回 `EXCLUSIVE_TOOL_BUSY`，嵌套派生返回 `NESTED_SPAWN_NOT_ALLOWED`，越界写入返回 `WRITE_NOT_DECLARED`，文件写入冲突返回 `FILE_BUSY`，声明范围互相重叠在派生前返回 `WRITE_CONFLICT`。`max_rounds` 与 `timeout_ms` 均可省略，省略时不设轮数与整体超时；显式超时到点以 `SUBAGENT_TIMEOUT` 收尾并保留已记录的 `changed_files`，取消后最多再等 2 秒让收尾线程记完写入，线程仍存活时结果 JSON 含 `still_running: true`；显式 `max_rounds` 触顶以 `SUBAGENT_ROUND_LIMIT` 收尾，结果保留截断前最后一次非空 assistant 文本（最多 1500 字符）作为部分成果；子代理执行本身不限输出，但进入主循环的单任务副本按模式加界（research 4000 / code 12000 字符，超限截断并附 `content_truncated` 与恢复指引），完整结果仍保留在子代理详情事件中——否则单次扇出的全量输出会直接撑满有限的模型窗口，反而被迫触发整轮上下文压缩；改动文件列表进入主循环的部分最多保留 100 项（超限附 `changed_files_truncated`），详情事件保留完整列表。汇总结果带 `mode` 与各任务 `changed_files`，子代理行尾展示“已改 N 个文件”。父取消会联动取消全部子代理；每个子代理终态只上报一次（AtomicBoolean CAS），迟到事件不覆盖已上报的语义。每个子代理的工具调用经 `SubagentToolStarted` / `SubagentToolFinished` 事件（含 `detail`）转写为消息行的独立步骤：折叠行展示最新步骤摘要，点击打开独立详情窗口按步骤查看，结果区展示最终答复、耗时与改动文件。
+- 主代理可用 `todo_write` 维护任务清单（Plan）：整体替换语义，1–50 条、单条 ≤500 字符，状态仅 `pending`/`in_progress`/`completed`；校验通过后广播 `TodoUpdated` 进度事件（overlay 与工具卡片共用），tool result 回填 total/completed 供后续轮次复用。子代理不可调用该工具；系统提示只对非角色会话注入自动 Plan 引导，子代理快照不注入。
+- 工具行默认折叠：`read_file` 折叠行显示文件名，展开显示行范围（“第 1–N 行”）与字节数，schema 注明读取上限（有 Root 时 262144 字节、无 Root 时 16000），`truncated` 统一表示用户可见内容被截断（读满 limit 或触达 16000 字符上限）；`write_file` / `edit_file` 展开显示目标文件与修改对比（`AgentTextDiff` 裁剪公共前后缀），`terminal` / `run_command` 展开显示更长的 stdout/stderr 与截断标记。详情由 `ToolFinished.detail` / `SubagentToolFinished.detail` 携带，经 runtime wire 与归档 JSON 往返，不进入模型上下文；写入 wire 前 detail 统一 clamp 到 4000 字符（超出以省略号收尾）。
 - 单次 run 不设置固定回合数或总时限，由模型自然结束、用户取消或不可恢复错误终止。
 - cancel 是终止信号；pause 是检查点阻塞；steering 是下一回合输入。三者不能互相模拟。
 - cancel 的主线程路径只做原子终态与资源关闭：共享浏览器按 runId 校验归属；终端立即封闭新的进程接纳，并在后台按独立进程组终止同步命令、会话和 async job，再完成线程与流回收。Android 上 `setsid` 或 PID/PGID ownership 握手不可用时会 fail closed；非 Android 测试环境才允许父子树快照回退。终止前还会核验随机 ownership token，避免陈旧 PGID 复用后误杀无关进程。
@@ -75,7 +77,7 @@ Responses 请求固定使用 `stream:true`、`store:false`，不发送 `previous
 
 推理界面展示 Provider 返回的可见推理内容，不由 Eta 生成或补写。Responses 支持 `reasoning_summary_text.delta` 和 `reasoning_text.delta`；终态读取 reasoning item 的 `summary[]` 与 `content[].reasoning_text`，并兼容旧接口的单字段 `reasoning_text`。标准内容与旧字段同时存在时不重复追加，终态仍按 item 和内容块身份校准流式结果。Responses 只对精确命中官方目录且未被远端显式标记为 `reasoning:false` 的模型补齐推理能力，不会因 Endpoint 类型而假定所有模型支持推理。
 
-Chat Completions 消费 `reasoning_content`，并兼容 `reasoning` 和 `reasoning_details` 中的可见文本或摘要；同一分片同时包含多种表示时只显示一次。Anthropic 消费 `content_block_start` 中已有的文字及后续 `thinking_delta` / `text_delta`，思考签名和加密内容不作为文字展示。三种协议共用 SSE 分帧，支持多行 `data:`、注释心跳和 UTF-8；正文、思考、工具的解释仍由各自 Provider 负责。Chat 在 `finish_reason` 到达时结束可见块，再接收用量与 `[DONE]`；Responses 和 Anthropic 收到各自终态事件后立即收尾，不等待连接关闭。缺少合法终态或 Anthropic 可见/工具块未闭合时返回未完成错误。
+Chat Completions 消费 `reasoning_content`，并兼容 `reasoning` 和 `reasoning_details` 中的可见文本或摘要；同一分片同时包含多种表示时只显示一次。Anthropic 消费 `content_block_start` 中已有的文字及后续 `thinking_delta` / `text_delta`，思考签名和加密内容不作为文字展示。三种协议共用 SSE 分帧，支持多行 `data:`、注释心跳和 UTF-8，流首剥离 UTF-8 BOM 并容忍字段行前缀空白；正文、思考、工具的解释仍由各自 Provider 负责。Chat 在 `finish_reason` 到达时结束可见块，再接收用量与 `[DONE]`；Responses 和 Anthropic 收到各自终态事件后立即收尾，不等待连接关闭。缺少合法终态或 Anthropic 可见/工具块未闭合时返回未完成错误。
 
 Chat Completions、Responses 与 Anthropic Messages 在 Provider 边界统一投影为带 `round + block index` 身份的正文、思考和工具块。Responses 额外使用 `item_id/output_index/content_index` 区分同一轮中的多个 output item；Chat Completions 在 delta 类型切换时创建新块；Anthropic 直接保留 `content_block.index`。正文、思考或工具类型一旦切换，上一段可见块立即定稿，后续同类型内容也不会跨过工具卡片回填到旧块。终态只在 Provider 的权威内容与已流式内容不一致时携带一次替换，不用整轮聚合正文覆盖最后一个块。
 
@@ -147,7 +149,7 @@ App 在发起请求前已经把当前用户消息写入会话 history，因此 R
 
 图片只在需要它的当前模型回合中传递；持久 transcript 会删除图片正文并写入稳定的省略说明。外部入口归档可另外保存小预览用于还原用户消息 UI，预览不会重新进入模型历史。敏感工具及 MCP 的原始参数、结果仍只在当前运行内存中使用；普通用户文本、模型回复、工具调用与结果不因长度被截断。
 
-完整脱敏历史 `journal`、可替换的模型上下文 `history` 和展示消息分别保存。Room 的大文本按小行分块存储，主记录仅保存分块引用；DAO 在同一事务中更新主记录与分块，读取时验证顺序与完整长度，删除所属记录时清理分块。分块大小限制单行，不限制会话总长度。数据库迁移完整搬迁现存历史，不能恢复已被旧版本丢弃的内容。
+完整脱敏历史 `journal`、可替换的模型上下文 `history` 和展示消息分别保存。Room 的大文本按小行分块存储，主记录仅保存分块引用；DAO 在同一事务中更新主记录与分块，读取时验证顺序与完整长度，删除所属记录时清理分块；分块引用只在严格匹配 `@eta:chunks:v1:<count>:<length>` 时按引用恢复，其余形态原样返回，损坏引用降级为空串并写节流日志。分块大小限制单行，不限制会话总长度。数据库迁移完整搬迁现存历史，不能恢复已被旧版本丢弃的内容。消息行还保存折叠展示所需的 `detail` 与子代理 `steps_json`（同一分块存储）；21→22 迁移只新增这两列与默认值。已存在会话保存时 `created_at` 沿用库中原值，避免反复保存漂移；设置备份导出在单事务内读取快照行集合，避免与并发保存交错。
 
 新客户端通过只读文件描述符传递大段请求历史及完整结果，在后台校验并物化；临时文件打开后取消目录链接，发送端与接收端分别管理描述符所有权。同进程 Messenger 也显式复制描述符，不能依赖跨进程 Parcel 的自动复制。Binder 保留实际 Parcel 预算，文件传输另有单次内存预算；超限或传输不完整时明确失败，不能截断后冒充成功。完整结果仍在持久存储中。旧协议内联字段仅提供带缺失提示的兼容投影，新客户端优先读取完整载荷。
 
@@ -189,7 +191,7 @@ Skill 安装工具始终向模型提供，不再根据顶层用户输入的固�
 
 App 恢复时以 `checkpoint + outbox + active session` 统一对账，不再用进程是否变化推断 run 状态。有 outbox 时先恢复工具轨迹，再用终态结果定稿；Runtime 仍 active 时，新 UI 会先整体恢复内存中的安全事件，再订阅实时事件与最终结果；只有既无终态又不 active 的 run 才标记为中断。恢复不会自动重放任何工具，也不会把半截助手回复加入后续模型 history。
 
-重新订阅沿用已有的 attach 响应作为历史回放结束边界：Runtime 在同一会话锁内依次发送安全历史、成功响应，再加入实时订阅，实时事件与终态不能越过此边界。App 客户端在响应前缓冲历史并一次性交付 UI，UI 在一个状态快照中重建该 run 的消息投影；只有边界后的新增内容进入实时更新。旧服务若先发送终态，客户端先交付已缓冲历史再交付结果。恢复前清理可重建的旧投影，保留原始用户请求和没有对应回放事件的补充内容，避免重复追加或丢失用户输入。任务终态独立于文字显现状态，最终结果会收口尚未结束的文字标记；缺少结果的工具记录显示未知状态，不伪造成功。
+重新订阅沿用已有的 attach 响应作为历史回放结束边界：Runtime 在同一会话锁内依次发送安全历史、成功响应，再加入实时订阅，实时事件与终态不能越过此边界。App 客户端在响应前缓冲历史并一次性交付 UI，UI 在一个状态快照中重建该 run 的消息投影；只有边界后的新增内容进入实时更新。旧服务若先发送终态，客户端先交付已缓冲历史再交付结果。恢复前清理可重建的旧投影，保留原始用户请求和没有对应回放事件的补充内容，避免重复追加或丢失用户输入。任务终态独立于文字显现状态，最终结果会收口尚未结束的文字标记；缺少结果的工具记录显示未知状态，不伪造成功。内存回放对连续 assistant 文本增量做有界合并，单事件上限 64000 字符，超出后另起事件，拼接后的文本不变。
 
 ## 验证
 
@@ -204,6 +206,8 @@ App 恢复时以 `checkpoint + outbox + active session` 统一对账，不再用
 - `AgentRunCheckpointStoreTest`
 - `AgentRunMessageProjectorTest`
 - `AgentToolCatalogTest`
+- `AgentTodoListTest`
+- `AgentSubagentPolicyTest`
 - `McpProtocolValidationTest`
 - `McpRunContextTest`
 - `AgentMemoryStoreTest`

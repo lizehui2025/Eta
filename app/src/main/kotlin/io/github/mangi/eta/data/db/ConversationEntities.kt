@@ -101,6 +101,8 @@ internal data class ConversationMessageEntity(
     @ColumnInfo(name = "tool_status") val toolStatus: String? = null,
     @ColumnInfo(name = "arguments_summary") val argumentsSummary: String? = null,
     @ColumnInfo(name = "result_summary") val resultSummary: String? = null,
+    @ColumnInfo(name = "detail") val detail: String? = null,
+    @ColumnInfo(name = "steps_json", defaultValue = "'[]'") val stepsJson: String = "[]",
     @ColumnInfo(name = "image_count") val imageCount: Int = 0,
     @ColumnInfo(name = "tools_json") val toolsJson: String = "[]",
 )

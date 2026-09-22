@@ -2163,12 +2163,47 @@ internal class AgentAppState(
                     AgentRuntimeClient(appContext, AndroidAgentLogger).cancelRun(runId)
                 }
             }
+            is AgentEvent.SubagentsStarted -> {
+                updateRunTrace(runId) { messages ->
+                    runMessageProjector.startSubagents(runId, event, messages)
+                }
+            }
+
+            is AgentEvent.SubagentStarted -> {
+                updateRunTrace(runId) { messages ->
+                    runMessageProjector.startSubagent(runId, event, messages)
+                }
+            }
+
+            is AgentEvent.SubagentToolStarted -> {
+                updateRunTrace(runId) { messages ->
+                    runMessageProjector.startSubagentTool(runId, event, messages)
+                }
+            }
+
+            is AgentEvent.SubagentToolFinished -> {
+                updateRunTrace(runId) { messages ->
+                    runMessageProjector.finishSubagentTool(runId, event, messages)
+                }
+            }
+
+            is AgentEvent.SubagentFinished -> {
+                updateRunTrace(runId) { messages ->
+                    runMessageProjector.finishSubagent(runId, event, messages)
+                }
+            }
+
+            is AgentEvent.SubagentsFinished -> {
+                updateRunTrace(runId) { messages ->
+                    runMessageProjector.finishSubagents(runId, event, messages)
+                }
+            }
+
             is AgentEvent.ProviderRequestStarted,
             is AgentEvent.ProviderResponseStarted,
             is AgentEvent.ToolImagesAttached,
             is AgentEvent.RoundStarted,
-            is AgentEvent.SubagentsStarted,
-            is AgentEvent.SubagentsFinished,
+            is AgentEvent.TodoUpdated,
             -> Unit
         }
     }
@@ -2570,7 +2605,7 @@ internal class AgentAppState(
         const val SYNTHETIC_STATUS_STOPPED = "eta_status:stopped"
         // 数据状态以较粗粒度发布，文字显现由独立的帧时钟连续推进。
         // 这与 Kimi 将流式数据和视觉动画分层的做法一致。
-        const val STREAM_UI_UPDATE_INTERVAL_MS = 80L
+        const val STREAM_UI_UPDATE_INTERVAL_MS = 40L
 
         fun emptyChatState(thinkingEnabled: Boolean): AgentChatHomeUiState =
             AgentChatHomeUiState(
@@ -2752,6 +2787,8 @@ internal fun buildToolsState(context: Context): AgentToolsUiState =
                     ToolItemUi("read_file", context.getString(R.string.tool_ui_read_file_dc995c), context.getString(R.string.tool_ui_read_the_contents_of_mobile_phone_files_bf3066)),
                     ToolItemUi("write_file", context.getString(R.string.tool_ui_write_file_e620fd), context.getString(R.string.tool_ui_write_or_overwrite_mobile_files_29fae4)),
                     ToolItemUi("list_directory", context.getString(R.string.tool_ui_list_directory_96e765), context.getString(R.string.tool_ui_list_directory_contents_feff30)),
+                    ToolItemUi("edit_file", context.getString(R.string.tool_ui_edit_file_3c7a1e), context.getString(R.string.tool_ui_exact_text_replacement_in_a_file_atomic_write_8d5b42)),
+                    ToolItemUi("search_code", context.getString(R.string.tool_ui_search_code_5e2f90), context.getString(R.string.tool_ui_regex_search_in_a_directory_returns_path_line_text_a17c64)),
                 ),
             ),
         )

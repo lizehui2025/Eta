@@ -173,8 +173,17 @@ class AgentContextCompactionTest {
         assertEquals(2, AgentContextBudget.textTokens("abcdef"))
         val messages = JSONArray().put(AgentConversationCodec.userTextMessage("文本"))
         val base = budget.estimate(messages, JSONArray())
+        // 平滑校准：单次 2 倍采样只吸收 1/3（(1*2+2)/3 = 4/3），避免单轮口径差异直接让估算翻倍、
+        // 提前触发本不该发生的压缩；同一口径持续多轮后收敛到真实比例。
         budget.observe(AgentTokenUsage(inputTokens = base * 2), base)
-        assertEquals(base * 2, budget.estimate(messages, JSONArray()))
+        assertEquals(kotlin.math.ceil(base * 4.0 / 3).toInt(), budget.estimate(messages, JSONArray()))
+        repeat(12) { budget.observe(AgentTokenUsage(inputTokens = base * 2), base) }
+        val converged = budget.estimate(messages, JSONArray())
+        assertTrue("收敛后应接近 2 倍，实际=$converged 基准=$base", converged in (base * 2 - 2)..(base * 2))
+        // 单次 8 倍异常采样也不会直接把估算打到 8 倍。
+        val outlier = AgentContextBudget(10_000)
+        outlier.observe(AgentTokenUsage(inputTokens = base * 8), base)
+        assertTrue(outlier.estimate(messages, JSONArray()) < base * 4)
         assertTrue(AgentContextBudget.rawEstimate(messages, JSONArray().put("tool".repeat(100))) > base)
         fun image(bytes: Int) = JSONArray().put(AgentConversationCodec.userMessage("图片", listOf(
             AgentModelClient.ModelImage("data:image/png;base64," + "A".repeat(bytes), "image/png", bytes),

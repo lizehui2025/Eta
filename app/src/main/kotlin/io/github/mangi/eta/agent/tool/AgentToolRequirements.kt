@@ -36,13 +36,13 @@ internal object AgentToolRequirements {
             "get_current_location", "get_device_environment", "memory_get", "memory_write",
             "character_memory_get", "character_memory_write",
             "skills_list", "skills_read", "skills_read_resource", "skills_list_curated",
-            "skills_inspect_github", "skills_install_from_github", "spawn_agents",
+            "skills_inspect_github", "skills_install_from_github", "spawn_agents", "todo_write",
         )
         register(
             RootRequirement.PARTIAL,
             "press_key", "network_info", "get_setting", "recent_notifications",
             "search_personal_orders", "terminal", "run_command", "read_file",
-            "write_file", "list_directory", "read_image",
+            "write_file", "edit_file", "search_code", "list_directory", "read_image",
         )
         register(
             RootRequirement.REQUIRED,
@@ -132,7 +132,7 @@ internal object AgentToolRequirements {
                 properties?.getJSONObject("cwd")?.put("description", "工作目录，默认使用 Eta 私有工作区。")
             }
             "list_directory" -> {
-                function.put("description", "列出当前应用有权访问的目录，默认使用 Eta 私有工作区。")
+                function.put("description", "列出当前应用有权访问的目录（按名排序，支持 limit/offset 翻页、glob 过滤、recursive 递归），默认使用 Eta 私有工作区。")
                 properties?.optJSONObject("path")?.apply {
                     put("description", "目录路径；未提供时使用 Eta 私有工作区。")
                     remove("default")

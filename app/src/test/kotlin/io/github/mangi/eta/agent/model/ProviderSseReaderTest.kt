@@ -59,6 +59,39 @@ class ProviderSseReaderTest {
         assertTrue(stream.closed)
     }
 
+    @Test
+    fun streamHeadBomIsStrippedBeforeFirstFrame() {
+        val source = "\uFEFFevent: delta\r\ndata: 首帧\r\n\r\ndata: 次帧\r\n\r\n"
+        val events = mutableListOf<Pair<String, String>>()
+        readProviderSse(source.byteInputStream(), AgentRunController()) { name, data ->
+            events += name to data
+            true
+        }
+        assertEquals(listOf("delta" to "首帧", "" to "次帧"), events)
+    }
+
+    @Test
+    fun crlfFramesAndMultilineDataAreParsed() {
+        val source = "event: delta\r\ndata: 甲\r\ndata: 乙\r\n\r\nevent: done\r\ndata: 完\r\n"
+        val events = mutableListOf<Pair<String, String>>()
+        readProviderSse(source.byteInputStream(), AgentRunController()) { name, data ->
+            events += name to data
+            true
+        }
+        assertEquals(listOf("delta" to "甲\n乙", "done" to "完"), events)
+    }
+
+    @Test
+    fun fieldLinesWithLeadingWhitespaceAreStillRecognized() {
+        val source = "  event: delta\n\t data: 甲\n \tdata: 乙\n\n"
+        val events = mutableListOf<Pair<String, String>>()
+        readProviderSse(source.byteInputStream(), AgentRunController()) { name, data ->
+            events += name to data
+            true
+        }
+        assertEquals(listOf("delta" to "甲\n乙"), events)
+    }
+
     private class TrackedStream(
         content: String,
         private val rejectEofRead: Boolean = false,

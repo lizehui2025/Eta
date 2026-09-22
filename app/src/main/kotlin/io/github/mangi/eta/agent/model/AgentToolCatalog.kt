@@ -16,6 +16,7 @@ internal object AgentToolCatalog {
         memoryTools: Boolean = false,
         memoryWritable: Boolean = true,
         subagentTools: Boolean = true,
+        planTools: Boolean = true,
         capabilities: AgentToolCapabilities = AgentToolCapabilities(rootAvailable = true),
     ): JSONArray =
         capabilities.project(JSONArray().also { tools ->
@@ -39,6 +40,7 @@ internal object AgentToolCatalog {
                 AgentFileVisionToolCatalog.appendTo(tools)
                 AgentTerminalToolCatalog.appendTo(tools)
             }
+            if (planTools) AgentPlanToolCatalog.appendTo(tools)
             if (subagentTools) AgentSubagentToolCatalog.appendTo(tools)
         })
 }

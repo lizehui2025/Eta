@@ -119,6 +119,7 @@ internal interface ConversationDao : ChunkedTextDao {
             insertMessageRow(row.copy(
                 content = storeText("conversation_messages", row.id, "content", row.content),
                 imagesJson = storeText("conversation_messages", row.id, "images", row.imagesJson),
+                stepsJson = storeText("conversation_messages", row.id, "steps", row.stepsJson),
             ))
         }
     }
@@ -126,6 +127,7 @@ internal interface ConversationDao : ChunkedTextDao {
     suspend fun restoreMessage(row: ConversationMessageEntity) = row.copy(
         content = restoreText("conversation_messages", row.id, "content", row.content),
         imagesJson = restoreText("conversation_messages", row.id, "images", row.imagesJson),
+        stepsJson = restoreText("conversation_messages", row.id, "steps", row.stepsJson),
     )
 
     @Upsert

@@ -12,7 +12,11 @@ internal class AgentContextBudget(private val window: Int?) {
     fun observe(usage: AgentTokenUsage?, requestEstimate: Int) {
         val input = usage?.inputTokens ?: usage?.contextTokens ?: return
         if (input > 0 && requestEstimate > 0) {
-            calibration = (input.toDouble() / requestEstimate).coerceIn(1.0, 8.0)
+            val sample = (input.toDouble() / requestEstimate).coerceIn(1.0, 8.0)
+            // 平滑校准：单轮异常值只按 1/3 权重吸收，并封顶 4 倍。
+            // 此前单次采样直接覆盖（最高 8 倍），一轮 provider 计数口径差异就会让后续估算虚高、
+            // 提前触发本不该发生的上下文压缩；多轮后仍会收敛到真实比例。
+            calibration = ((calibration * 2 + sample) / 3).coerceIn(1.0, 4.0)
         }
     }
 

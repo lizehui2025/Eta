@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.model
 
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -24,7 +25,14 @@ internal object AgentHttpClient {
     }
 
     val client: OkHttpClient by lazy {
+        // 并发子代理不设并行度上限：网络层不再为扇出设卡（此前 32/16 会让大规模扇出排队）。
+        // 请求并发仍受连接池复用与系统资源约束；如需收敛请在 spawn_agents 调用中显式声明参数。
+        val dispatcher = Dispatcher().apply {
+            maxRequests = Int.MAX_VALUE
+            maxRequestsPerHost = Int.MAX_VALUE
+        }
         OkHttpClient.Builder()
+            .dispatcher(dispatcher)
             .connectTimeout(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .readTimeout(READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .writeTimeout(WRITE_TIMEOUT_MS, TimeUnit.MILLISECONDS)

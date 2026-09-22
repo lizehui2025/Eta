@@ -59,6 +59,67 @@ class RootlessTerminalAccessTest {
         } finally { file.delete() }
     }
 
+    @Test fun ordinaryListSupportsPaginationAndGlobFiltering() {
+        val dir = File(TerminalRuntime.userWorkspacePath, "test-list-${System.nanoTime()}").apply { mkdirs() }
+        try {
+            File(dir, "a.kt").writeText("x")
+            File(dir, "b.md").writeText("y")
+            File(dir, ".hidden").writeText("z")
+            val first = JSONObject(UserFileAccess.list(dir.path, false, 1, 0, "", false))
+            assertTrue(first.toString(), first.getBoolean("ok"))
+            assertEquals(2, first.getInt("total"))
+            assertEquals(1, first.getInt("count"))
+            assertEquals(0, first.getInt("offset"))
+            assertTrue(first.getBoolean("truncated"))
+            val second = JSONObject(UserFileAccess.list(dir.path, false, 1, 1, "", false))
+            assertTrue(second.getBoolean("ok"))
+            assertFalse(second.getBoolean("truncated"))
+            assertEquals(2, second.getInt("total"))
+            val filtered = JSONObject(UserFileAccess.list(dir.path, false, 200, 0, "*.kt", false))
+            assertTrue(filtered.getBoolean("ok"))
+            assertEquals(1, filtered.getInt("total"))
+            assertTrue(filtered.getString("entries_text"), filtered.getString("entries_text").contains("a.kt"))
+            val withHidden = JSONObject(UserFileAccess.list(dir.path, true, 200, 0, "", false))
+            assertTrue(withHidden.getBoolean("ok"))
+            assertEquals(3, withHidden.getInt("total"))
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun ordinaryListSupportsRecursiveRelativePaths() {
+        val dir = File(TerminalRuntime.userWorkspacePath, "test-list-r-${System.nanoTime()}").apply { mkdirs() }
+        try {
+            File(dir, "top.txt").writeText("t")
+            val sub = File(dir, "sub").apply { mkdirs() }
+            File(sub, "nested.kt").writeText("n")
+            val flat = JSONObject(UserFileAccess.list(dir.path, false, 200, 0, "", false))
+            assertEquals(2, flat.getInt("total"))
+            val recursive = JSONObject(UserFileAccess.list(dir.path, false, 200, 0, "", true))
+            assertTrue(recursive.toString(), recursive.getBoolean("ok"))
+            assertEquals(3, recursive.getInt("total"))
+            assertTrue(
+                recursive.getString("entries_text"),
+                recursive.getString("entries_text").contains("sub/nested.kt")
+            )
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun ordinarySearchRejectsBadPatternSkipsBinaryAndReturnsAbsolutePaths() {
+        val dir = File(TerminalRuntime.userWorkspacePath, "test-search-${System.nanoTime()}").apply { mkdirs() }
+        try {
+            File(dir, "ok.txt").writeText("hello world")
+            val binary = File(dir, "bin.dat")
+            binary.writeBytes("hello".toByteArray() + byteArrayOf(0) + "hello".toByteArray())
+            val bad = JSONObject(UserFileAccess.search(dir.path, "[unclosed", "", 200))
+            assertFalse(bad.getBoolean("ok"))
+            assertEquals("INVALID_PATTERN", bad.getString("code"))
+            val good = JSONObject(UserFileAccess.search(dir.path, "hello", "", 200))
+            assertTrue(good.toString(), good.getBoolean("ok"))
+            assertEquals(1, good.getInt("count"))
+            val entry = good.getJSONArray("results").getString(0)
+            assertTrue(entry, entry.startsWith("/") && entry.contains("ok.txt"))
+        } finally { dir.deleteRecursively() }
+    }
+
     private object NoopLogger : AgentLogger {
         override fun debug(message: () -> String) = Unit
         override fun info(message: String) = Unit
