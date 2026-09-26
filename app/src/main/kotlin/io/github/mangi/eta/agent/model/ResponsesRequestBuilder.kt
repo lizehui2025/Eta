@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.model
 
+import io.github.mangi.eta.data.model.ModelRequestOptions
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -8,12 +9,17 @@ internal object ResponsesRequestBuilder {
         config: AgentModelClient.ModelConfig,
         messages: JSONArray,
         tools: JSONArray,
+        promptCacheKey: String? = null,
+        options: ModelRequestOptions? = null,
+        codingMode: Boolean = false,
     ): JSONObject {
         val input = buildInput(messages)
         val responseTools = buildTools(tools, config.hostedWebSearchEnabled)
         val instructions = OpenAiRequestMessages.responsesInstructions(messages)
             .ifBlank { config.systemPrompt }
         val request = JSONObject()
+        // typed 请求参数最先写入；extraBody/customBody 随后合并，用户原始覆盖优先。
+        RequestOptionsApplicator.applyResponses(request, options, codingMode)
         mergeExtraBody(request, config.extraBodyJson)
         RequestBodyMerge.mergeCustomBody(request, config.customBody)
 
@@ -23,6 +29,9 @@ internal object ResponsesRequestBuilder {
         request.put("input", input)
         request.put("stream", true)
         request.put("store", false)
+        if (promptCacheKey != null && !request.has(ProviderPromptCache.PROMPT_CACHE_KEY_FIELD)) {
+            request.put(ProviderPromptCache.PROMPT_CACHE_KEY_FIELD, promptCacheKey)
+        }
         if (responseTools.length() > 0) {
             request.put("tools", responseTools)
             request.put("tool_choice", "auto")
@@ -40,7 +49,7 @@ internal object ResponsesRequestBuilder {
         for (index in 0 until messages.length()) {
             val message = messages.optJSONObject(index) ?: continue
             ResponsesEphemeralState.outputItems(message)?.let { items ->
-                for (itemIndex in 0 until items.length()) input.put(deepCopy(items.opt(itemIndex)))
+                for (itemIndex in 0 until items.length()) input.put(copyJsonValue(items.opt(itemIndex)))
                 continue
             }
             when (message.optString("role")) {
@@ -117,7 +126,7 @@ internal object ResponsesRequestBuilder {
                         .put("type", "function")
                         .put("name", function.optString("name"))
                         .put("description", function.optString("description"))
-                        .put("parameters", deepCopy(function.opt("parameters") ?: JSONObject()))
+                        .put("parameters", copyJsonValue(function.opt("parameters") ?: JSONObject()))
                         .put("strict", false),
                 )
             }
@@ -130,10 +139,36 @@ internal object ResponsesRequestBuilder {
         extra.keys().forEach { key -> request.put(key, extra.get(key)) }
     }
 
-    private fun deepCopy(value: Any?): Any = when (value) {
-        is JSONObject -> JSONObject(value.toString())
-        is JSONArray -> JSONArray(value.toString())
+    /**
+     * 顶层浅拷贝：新对象/新数组、新键表/新元素表，值沿用原引用。
+     *
+     * 旧实现用 `JSONObject(value.toString())` / `JSONArray(value.toString())` 序列化再解析，
+     * 每次构建请求都要把 output items 或整份工具 parameters 重写一遍字符串。调用点只把结果
+     * 放进请求体（随后立刻 `toString()` 成 HTTP body），请求体内没有对嵌套节点的就地
+     * put/remove，因此只需保证容器独立：装配期的顶层写入不会回写会话里的 tool schema 与
+     * items。key/元素遍历顺序即原容器顺序，序列化结果逐字节一致。
+     */
+    private fun copyJsonValue(value: Any?): Any = when (value) {
+        is JSONObject -> shallowCopyObject(value)
+        is JSONArray -> shallowCopyArray(value)
         null -> JSONObject.NULL
         else -> JSONObject.wrap(value) ?: JSONObject.NULL
+    }
+
+    private fun shallowCopyObject(source: JSONObject): JSONObject {
+        val copy = JSONObject()
+        val keys = source.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            // Java null 经旧的 toString/解析路径会变成 JSONObject.NULL（序列化同为 null），保持等价。
+            copy.put(key, source.opt(key) ?: JSONObject.NULL)
+        }
+        return copy
+    }
+
+    private fun shallowCopyArray(source: JSONArray): JSONArray {
+        val copy = JSONArray()
+        for (index in 0 until source.length()) copy.put(source.opt(index) ?: JSONObject.NULL)
+        return copy
     }
 }

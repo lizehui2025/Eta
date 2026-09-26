@@ -28,6 +28,7 @@ import io.github.mangi.eta.agent.model.AgentFileReferenceKind
 import io.github.mangi.eta.agent.model.AgentFileReferencePolicy
 import io.github.mangi.eta.agent.model.AgentFileReferencePromptCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.AgentMode
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
 import io.github.mangi.eta.agent.roleplay.CharacterMacros
 import io.github.mangi.eta.agent.roleplay.CharacterCardCodec
@@ -89,6 +90,7 @@ import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
@@ -120,21 +122,24 @@ internal class AgentAppState(
     private var persistenceJob: Job? = null
     private val runtimeRecoveryInProgress = AtomicBoolean(false)
     private val defaultThinkingEnabled = agentBooleanForUi(Prefs.Keys.AGENT_THINKING_ENABLED)
-    private val initialConversations = AgentConversationStore.load(appContext)
+    /** 初始会话快照异步加载的完成门控；加载完成或失败降级后都会 complete，等待方不会永挂。 */
+    private val loadCompletion = CompletableDeferred<Unit>()
     private var skillNoticeSequence = 0L
     private var pendingSkillZipUri: Uri? = null
     private var pendingSkillZipSha256: String? = null
     private var currentReasoningCapabilities: ModelReasoningCapabilities? = null
     private var fileAttachmentOwnerVersion = 0L
 
-    private var selectedConversationId: String? = initialConversations.selectedConversationId
-    private var conversationsById: Map<String, AgentChatHomeUiState> = initialConversations.conversationsById
-    private var conversationTitles: Map<String, String> = initialConversations.titles
-    private var conversationUpdatedAt: Map<String, Long> = initialConversations.updatedAt
+    private var selectedConversationId: String? = null
+    private var conversationsById: Map<String, AgentChatHomeUiState> = emptyMap()
+    private var conversationTitles: Map<String, String> = emptyMap()
+    private var conversationUpdatedAt: Map<String, Long> = emptyMap()
 
-    var homeState by mutableStateOf(
-        selectedConversationId?.let(conversationsById::get) ?: emptyChatState(defaultThinkingEnabled)
-    )
+    var homeState by mutableStateOf(emptyChatState(defaultThinkingEnabled))
+        private set
+
+    /** 初始会话快照是否仍在异步加载；加载期间 UI 显示占位，写盘与恢复流程等待 [loadCompletion]。 */
+    var conversationsLoading by mutableStateOf(true)
         private set
 
     var modelPickerState by mutableStateOf(AgentModelPickerUiState())
@@ -161,7 +166,28 @@ internal class AgentAppState(
     var memoryState by mutableStateOf(AgentMemoryUiState())
         private set
 
+    /** 顶栏的聊天/编码模式；编码模式不主动保存记忆。 */
+    var agentMode by mutableStateOf(AgentMode.current())
+        private set
+
     init {
+        scope.launch {
+            val snapshot = try {
+                withContext(Dispatchers.IO) { AgentConversationStore.load(appContext) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (throwable: Throwable) {
+                AndroidAgentLogger.error(
+                    "Agent conversation initial load failed: type=${throwable.safeLogType()}"
+                )
+                null
+            }
+            withContext(Dispatchers.Main.immediate) {
+                if (snapshot != null) applyConversationSnapshot(snapshot)
+                conversationsLoading = false
+                loadCompletion.complete(Unit)
+            }
+        }
         refreshConversationSummaries()
         observeRuntimeSelection()
         scope.launch {
@@ -177,6 +203,9 @@ internal class AgentAppState(
             }
         }
     }
+
+    /** 等待初始会话加载（或失败降级）完成；供测试与外部流程使用。 */
+    internal suspend fun awaitInitialLoad() = loadCompletion.await()
 
     private fun observeRuntimeSelection() {
         scope.launch(Dispatchers.IO) {
@@ -228,6 +257,7 @@ internal class AgentAppState(
         if (!runtimeRecoveryInProgress.compareAndSet(false, true)) return
         scope.launch(Dispatchers.IO) {
             try {
+                loadCompletion.await()
                 recoverRuntimeRuns()
                 importArchivedExternalRuns()
             } finally {
@@ -374,10 +404,21 @@ internal class AgentAppState(
         memoryState = memoryState.copy(notice = null)
     }
 
+    /**
+     * 切换聊天/编码模式并持久化。切换立即生效（下一次 run 使用新模式）；
+     * 记忆写入许可在执行期动态复查，因此进行中的 run 也会立即停止保存。
+     */
+    fun updateAgentMode(mode: AgentMode) {
+        if (agentMode == mode) return
+        agentMode = mode
+        Prefs.setAgentMode(mode.wireValue)
+    }
+
     suspend fun exportBackup(output: OutputStream): EtaBackupSummary =
         EtaBackupRepository.export(appContext, output)
 
     suspend fun importBackup(input: InputStream): EtaBackupSummary {
+        loadCompletion.await()
         val locallyBusy = withContext(Dispatchers.Main.immediate) {
             currentRunId != null || conversationsById.values.any { it.isStreaming }
         }
@@ -411,25 +452,31 @@ internal class AgentAppState(
             AgentConversationStore.load(appContext)
         }
         withContext(Dispatchers.Main.immediate) {
-            selectedConversationId = snapshot.selectedConversationId
-            conversationsById = snapshot.conversationsById
-            conversationTitles = snapshot.titles
-            conversationUpdatedAt = snapshot.updatedAt
-            fileAttachmentOwnerVersion += 1
-            homeState = selectedConversationId
-                ?.let(conversationsById::get)
-                ?.withCurrentReasoningCapabilities()
-                ?: emptyChatState(defaultThinkingEnabled).withCurrentReasoningCapabilities()
-            conversationPaneState = conversationPaneState.copy(
-                selectedConversationId = selectedConversationId,
-                searchQuery = "",
-            )
-            refreshConversationSummaries()
+            applyConversationSnapshot(snapshot)
         }
+    }
+
+    /** 把磁盘快照应用到内存状态；必须在主线程调用，初始加载与备份导入共用这条路径。 */
+    private fun applyConversationSnapshot(snapshot: AgentConversationStore.Snapshot) {
+        selectedConversationId = snapshot.selectedConversationId
+        conversationsById = snapshot.conversationsById
+        conversationTitles = snapshot.titles
+        conversationUpdatedAt = snapshot.updatedAt
+        fileAttachmentOwnerVersion += 1
+        homeState = selectedConversationId
+            ?.let(conversationsById::get)
+            ?.withCurrentReasoningCapabilities()
+            ?: emptyChatState(defaultThinkingEnabled).withCurrentReasoningCapabilities()
+        conversationPaneState = conversationPaneState.copy(
+            selectedConversationId = selectedConversationId,
+            searchQuery = "",
+        )
+        refreshConversationSummaries()
     }
 
     /** 用 checkpoint、终态 outbox 与 active session 一次性对账，避免用进程存活推断 run 状态。 */
     private suspend fun recoverRuntimeRuns() {
+        loadCompletion.await()
         val client = AgentRuntimeClient(appContext, AndroidAgentLogger)
         val checkpoints = withContext(Dispatchers.IO) {
             AgentRunCheckpointStore.list(appContext)
@@ -672,6 +719,7 @@ internal class AgentAppState(
     }
 
     private suspend fun importArchivedExternalRuns() {
+        loadCompletion.await()
         val archivedRuns = withContext(Dispatchers.IO) {
             AgentRunArchiveStore.list(appContext)
                 .filter { AgentExternalArchivePayload.from(it.handoff.payload) != null }
@@ -692,6 +740,7 @@ internal class AgentAppState(
     }
 
     suspend fun openAssistantConversation(conversationKey: String): Boolean {
+        loadCompletion.await()
         if (conversationKey.isBlank()) return false
         importArchivedExternalRuns()
         return withContext(Dispatchers.Main.immediate) {
@@ -2568,21 +2617,27 @@ internal class AgentAppState(
     }
 
     private fun persistConversations(onSaved: (() -> Unit)? = null): Deferred<Boolean> {
-        val selected = selectedConversationId
-        val conversations = conversationsById
-        val titles = conversationTitles
-        val timestamps = conversationUpdatedAt
         return synchronized(persistenceLock) {
             val previous = persistenceJob
             scope.async(Dispatchers.IO) {
                 try {
+                    // 初始快照应用前禁止捕获状态：空快照会把磁盘上的全部会话删除。
+                    loadCompletion.await()
                     previous?.join()
+                    val captured = withContext(Dispatchers.Main) {
+                        AgentConversationStore.Snapshot(
+                            selectedConversationId = selectedConversationId,
+                            conversationsById = conversationsById,
+                            titles = conversationTitles,
+                            updatedAt = conversationUpdatedAt,
+                        )
+                    }
                     AgentConversationStore.save(
                         context = appContext,
-                        selectedConversationId = selected,
-                        conversationsById = conversations,
-                        titles = titles,
-                        updatedAt = timestamps,
+                        selectedConversationId = captured.selectedConversationId,
+                        conversationsById = captured.conversationsById,
+                        titles = captured.titles,
+                        updatedAt = captured.updatedAt,
                     )
                     onSaved?.invoke()
                     true

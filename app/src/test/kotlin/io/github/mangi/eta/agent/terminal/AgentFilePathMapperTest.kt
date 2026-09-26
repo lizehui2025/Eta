@@ -6,6 +6,7 @@ import org.junit.Test
 class AgentFilePathMapperTest {
     private val mounts = listOf("root" to "/data/local/chroot-distro/ubuntu/root")
     private val workspace = "/data/user/0/io.github.mangi.eta.subagents/files/terminal-user/workspace"
+    private val hostWorkspace = "/data/local/tmp/eta"
 
     @Test
     fun sharedMountViewMapsToAndroidSource() {
@@ -56,6 +57,23 @@ class AgentFilePathMapperTest {
     }
 
     @Test
+    fun chrootBackendWorkspaceMapsToHostWorkspace() {
+        assertEquals(
+            "$hostWorkspace/und.txt",
+            AgentFilePathMapper.toAndroidPath("/workspace/und.txt", mounts, hostWorkspace),
+        )
+        assertEquals(hostWorkspace, AgentFilePathMapper.toAndroidPath("/workspace", mounts, hostWorkspace))
+        assertEquals(
+            "$hostWorkspace/src/Main.kt",
+            AgentFilePathMapper.toAndroidPath("workspace/src/Main.kt", mounts, hostWorkspace),
+        )
+        assertEquals(
+            "$hostWorkspace/daemon/dm_1234.log",
+            AgentFilePathMapper.toAndroidPath("/workspace/daemon/dm_1234.log", mounts, hostWorkspace),
+        )
+    }
+
+    @Test
     fun unrelatedPathsPassThrough() {
         assertEquals(
             "/storage/emulated/0/Download/a.txt",
@@ -70,5 +88,46 @@ class AgentFilePathMapperTest {
             AgentFilePathMapper.toAndroidPath("relative/path", mounts, workspace),
         )
         assertEquals("", AgentFilePathMapper.toAndroidPath("  ", mounts, workspace))
+    }
+
+    @Test
+    fun translationRootFollowsBackendAndReadiness() {
+        // chroot / proot / 无配置三态：解析函数决定 `/workspace` 的翻译根。
+        assertEquals(
+            hostWorkspace,
+            TerminalRuntime.resolveLinuxWorkspaceRoot(
+                backend = LinuxExecutionBackend.CHROOT,
+                environmentReady = true,
+                rootGranted = true,
+                userWorkspace = workspace,
+            ),
+        )
+        assertEquals(
+            workspace,
+            TerminalRuntime.resolveLinuxWorkspaceRoot(
+                backend = LinuxExecutionBackend.PROOT,
+                environmentReady = true,
+                rootGranted = true,
+                userWorkspace = workspace,
+            ),
+        )
+        assertEquals(
+            workspace,
+            TerminalRuntime.resolveLinuxWorkspaceRoot(
+                backend = LinuxExecutionBackend.CHROOT,
+                environmentReady = false,
+                rootGranted = true,
+                userWorkspace = workspace,
+            ),
+        )
+        assertEquals(
+            workspace,
+            TerminalRuntime.resolveLinuxWorkspaceRoot(
+                backend = LinuxExecutionBackend.CHROOT,
+                environmentReady = true,
+                rootGranted = false,
+                userWorkspace = workspace,
+            ),
+        )
     }
 }

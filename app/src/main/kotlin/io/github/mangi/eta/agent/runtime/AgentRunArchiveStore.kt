@@ -4,6 +4,8 @@ import android.content.Context
 import io.github.mangi.eta.agent.model.AgentContextSnapshot
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.core.AndroidAgentLogger
+import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.db.EtaDatabase
 import io.github.mangi.eta.data.db.RuntimeArchiveEventEntity
 import io.github.mangi.eta.data.db.RuntimeArchiveRunEntity
@@ -43,12 +45,21 @@ internal object AgentRunArchiveStore {
                 events = compacted.toEventEntities(archiveRunId),
             )
             runCatching {
-                val rows = dao.archivedRunRows().sortedBy { it.run.createdAt }
-                if (rows.size > MAX_RETAINED_ARCHIVES) {
-                    rows.take(rows.size - MAX_RETAINED_ARCHIVES).forEach {
-                        runCatching { dao.deleteArchivedRunByArchiveId(it.run.archiveRunId) }
-                        runCatching { dao.deleteArchivedEvents(it.run.archiveRunId) }
+                // 旧实现在这里加载全部归档（含事件 JSON）只为裁掉最旧的溢出项；现在只做一次计数。
+                val deleteCount = dao.archivedRunCount() - MAX_RETAINED_ARCHIVES
+                if (deleteCount > 0) {
+                    // 上限常量与“淘汰最旧”的语义不变：仍按 created_at 升序取溢出的 archiveId，再批量删主记录与事件。
+                    val archiveRunIds = dao.oldestArchivedRunIds(deleteCount)
+                    if (archiveRunIds.isNotEmpty()) {
+                        dao.deleteArchivedRunsByArchiveIds(archiveRunIds)
                     }
+                }
+            }.onFailure { throwable ->
+                // 裁剪失败保持原有语义（异常不外抛、归档写入结果不变），但必须可见：
+                // 失败意味着 MAX_RETAINED_ARCHIVES 上限可能暂时失效，归档会继续堆积。
+                AndroidAgentLogger.warnThrottled("runtime_archive_prune_failed") {
+                    "Agent run archive prune failed; retained archives may exceed " +
+                        "MAX_RETAINED_ARCHIVES=$MAX_RETAINED_ARCHIVES: type=${throwable.safeLogType()}"
                 }
             }
         }
@@ -149,38 +160,66 @@ internal object AgentRunArchiveStore {
             )
         }.getOrNull()
 
+    /**
+     * 归档合并段：文本增量写入 [StringBuilder]，段落结束时才物化一次，
+     * 避免 `previous.delta + event.delta` 的逐次拼接（整段合并是 O(n²) 字符拷贝）。
+     */
+    private class DeltaGroup(
+        private val head: AgentEvent.AssistantBlockDelta,
+    ) {
+        private val text = StringBuilder(head.delta)
+
+        private var deltaChars: Int = head.deltaChars
+
+        fun matches(other: AgentEvent.AssistantBlockDelta): Boolean =
+            head.round == other.round &&
+                head.kind == other.kind &&
+                head.index == other.index
+
+        fun append(other: AgentEvent.AssistantBlockDelta) {
+            text.append(other.delta)
+            deltaChars += other.deltaChars
+        }
+
+        fun toEvent(): AgentEvent.AssistantBlockDelta =
+            head.copy(delta = text.toString(), deltaChars = deltaChars)
+    }
+
     private fun compactEvents(events: List<AgentEvent>): List<AgentEvent> {
         val compacted = mutableListOf<AgentEvent>()
+        var group: DeltaGroup? = null
+
+        fun flushGroup() {
+            group?.let { compacted += it.toEvent() }
+            group = null
+        }
+
         events.forEach { event ->
             if (
                 event is AgentEvent.AssistantBlockDelta &&
                 event.kind == AgentEvent.AssistantBlockKind.TOOL_CALL
             ) {
+                // 与旧实现一致：tool_call 增量整条丢弃，且不影响正在合并的段落。
                 return@forEach
             }
-            val previous = compacted.lastOrNull()
-            val merged = when {
-                previous is AgentEvent.AssistantBlockDelta &&
-                    event is AgentEvent.AssistantBlockDelta &&
-                    previous.round == event.round -> {
-                    if (previous.kind == event.kind && previous.index == event.index) {
-                        previous.copy(
-                            delta = previous.delta + event.delta,
-                            deltaChars = previous.deltaChars + event.deltaChars,
-                        )
-                    } else {
-                        null
-                    }
-                }
-
-                else -> null
+            val current = group
+            if (
+                current != null &&
+                event is AgentEvent.AssistantBlockDelta &&
+                current.matches(event)
+            ) {
+                current.append(event)
+                return@forEach
             }
-            if (merged != null) {
-                compacted[compacted.lastIndex] = merged
+            // 段落边界：先把上一段落成一条事件（位置顺序与旧实现相同），再开启新段。
+            flushGroup()
+            if (event is AgentEvent.AssistantBlockDelta) {
+                group = DeltaGroup(event)
             } else {
                 compacted += event
             }
         }
+        flushGroup()
         return compacted
     }
 }

@@ -14,6 +14,9 @@ private const val MAX_REPLAY_MERGED_DELTA_CHARS = 64_000
  *
  * Service 替换、用户取消和正常完成都必须经过此对象，避免旧 run 向新 reply channel 发消息，
  * 也避免同一 run 发送两个最终结果。
+ *
+ * 订阅者只在 run 运行期有效：attach 会清理失效绑定并让同一客户端标识的旧条目被取代，
+ * 终态投递也跳过失效订阅者，重复 attach 不再无界累积。
  */
 internal class AgentRuntimeSession(
     val runId: String,
@@ -21,6 +24,7 @@ internal class AgentRuntimeSession(
     eventSink: ((AgentEvent) -> Unit)? = null,
     resultSink: ((AgentRuntimeWire.RunResult) -> Unit)? = null,
     private val operation: String = AgentRuntimeWire.OP_CHAT,
+    initialClientAlive: (() -> Boolean)? = null,
 ) {
     private enum class State {
         RUNNING,
@@ -45,12 +49,18 @@ internal class AgentRuntimeSession(
         if (state == State.RUNNING) latestContext = snapshot
     }
     private var state = State.RUNNING
-    private val replayEvents = mutableListOf<AgentEvent>()
+    private val replayEvents = mutableListOf<ReplayEntry>()
     private val subscribers = mutableListOf<Subscriber>()
 
+    /**
+     * [clientKey] 为客户端标识（attach 时传入，如 sender uid）：同标识的旧条目会被取代；
+     * [isAlive] 探测绑定是否仍可用，失效订阅者不再长期持有 eventSink/resultSink/Messenger。
+     */
     private data class Subscriber(
         val eventSink: (AgentEvent) -> Unit,
         val resultSink: (AgentRuntimeWire.RunResult) -> Unit,
+        val clientKey: Any? = null,
+        val isAlive: () -> Boolean = { true },
     )
 
     init {
@@ -58,6 +68,7 @@ internal class AgentRuntimeSession(
             subscribers += Subscriber(
                 eventSink = eventSink ?: {},
                 resultSink = resultSink ?: {},
+                isAlive = initialClientAlive ?: { true },
             )
         }
     }
@@ -85,18 +96,34 @@ internal class AgentRuntimeSession(
     /**
      * Activity 被移出任务栈后 Runtime 仍可能继续执行。安全历史回放、完成确认和实时订阅
      * 共用同一把锁，保证客户端收到确认前的事件都是历史，新增事件与终态不会越过边界。
+     *
+     * [clientKey] 标识发起 attach 的客户端：同标识旧条目会被取代；[isClientAlive] 判定存量
+     * 订阅者绑定是否仍可用，失效条目在本次 attach 一并清除。
      */
     fun attach(
         eventSink: (AgentEvent) -> Unit,
         resultSink: (AgentRuntimeWire.RunResult) -> Unit,
         onReplayComplete: () -> Unit = {},
+        clientKey: Any? = null,
+        isClientAlive: (() -> Boolean)? = null,
     ): Boolean = lock.withLock {
         if (state == State.TERMINAL) return false
         // åæ¾ãç¡®è®¤ãè®¢éä¸èå¨åä¸æéååå­å®æï¼å¹¶å emit/complete ä¸å¾è¶è¿åæ¾è¾¹çã
         // attach æ¯ä½é¢éç»ï¼æéåæ¾å¯æ¥åï¼é«é¢ emit ä»å¨éå¤ååï¼è§ emit æ³¨éï¼ã
-        replayEvents.toList().forEach(eventSink)
+        // 先清理失效绑定与同客户端标识的旧订阅者（attach 为低频操作），再回放、登记新订阅者，
+        // 重复 attach/重连不再累积旧 eventSink/resultSink/Messenger。
+        subscribers.removeAll { !it.isAlive() }
+        if (clientKey != null) {
+            subscribers.removeAll { it.clientKey == clientKey }
+        }
+        replayEvents.toList().forEach { entry -> eventSink(entry.materialize()) }
         runCatching { onReplayComplete() }
-        subscribers += Subscriber(eventSink, resultSink)
+        subscribers += Subscriber(
+            eventSink = eventSink,
+            resultSink = resultSink,
+            clientKey = clientKey,
+            isAlive = isClientAlive ?: { true },
+        )
         true
     }
 
@@ -124,26 +151,65 @@ internal class AgentRuntimeSession(
 
     private fun recordForReplay(event: AgentEvent) {
         val projected = event.recoveryProjection() ?: return
-        if (projected !is AgentEvent.AssistantBlockDelta) {
-            replayEvents += projected
+        val previous = replayEvents.lastOrNull()
+        if (
+            previous is ReplayDeltaGroup &&
+            projected is AgentEvent.AssistantBlockDelta &&
+            previous.canMerge(projected)
+        ) {
+            previous.append(projected)
             return
         }
-        val previous = replayEvents.lastOrNull() as? AgentEvent.AssistantBlockDelta
-        if (
-            previous != null &&
-            previous.round == projected.round &&
-            previous.kind == projected.kind &&
-            previous.index == projected.index &&
-            // 合并上限：避免单个回放事件无限增长、超出 Binder 事务预算；达到上限后改为新起事件，
-            // attach 客户端按序拼接所有 delta，最终文本与不设上限时一致。
-            previous.delta.length + projected.delta.length <= MAX_REPLAY_MERGED_DELTA_CHARS
-        ) {
-            replayEvents[replayEvents.lastIndex] = previous.copy(
-                deltaChars = previous.deltaChars + projected.deltaChars,
-                delta = previous.delta + projected.delta,
-            )
+        val entry: ReplayEntry = if (projected is AgentEvent.AssistantBlockDelta) {
+            ReplayDeltaGroup(projected)
         } else {
-            replayEvents += projected
+            ReplaySingle(projected)
+        }
+        replayEvents += entry
+    }
+
+    /**
+     * 回放缓冲条目：普通事件直接持有；连续 delta 合并段用 [StringBuilder] 增量累积，
+     * 只有 attach 回放时才物化成字符串，避免每次合并都复制已累积的全部文本（O(n²) 字符拷贝）。
+     */
+    private interface ReplayEntry {
+        fun materialize(): AgentEvent
+    }
+
+    private class ReplaySingle(private val event: AgentEvent) : ReplayEntry {
+        override fun materialize(): AgentEvent = event
+    }
+
+    /**
+     * 一段可继续合并的 delta：其余字段沿用该合并段首条事件（与旧实现 `previous.copy(...)` 一致），
+     * 文本与 `deltaChars` 增量累加；[materialize] 结果缓存，未再合并时多次 attach 复用同一实例。
+     */
+    private class ReplayDeltaGroup(
+        private val head: AgentEvent.AssistantBlockDelta,
+    ) : ReplayEntry {
+        private val text = StringBuilder(head.delta)
+        private var combinedChars = head.deltaChars
+        private var materialized: AgentEvent.AssistantBlockDelta? = null
+
+        fun canMerge(next: AgentEvent.AssistantBlockDelta): Boolean =
+            head.round == next.round &&
+                head.kind == next.kind &&
+                head.index == next.index &&
+                // 合并上限：避免单个回放事件无限增长、超出 Binder 事务预算；达到上限后改为新起事件，
+                // attach 客户端按序拼接所有 delta，最终文本与不设上限时一致。
+                text.length + next.delta.length <= MAX_REPLAY_MERGED_DELTA_CHARS
+
+        fun append(next: AgentEvent.AssistantBlockDelta) {
+            text.append(next.delta)
+            combinedChars += next.deltaChars
+            materialized = null
+        }
+
+        override fun materialize(): AgentEvent {
+            materialized?.let { return it }
+            val event = head.copy(delta = text.toString(), deltaChars = combinedChars)
+            materialized = event
+            return event
         }
     }
 
@@ -162,14 +228,17 @@ internal class AgentRuntimeSession(
             state = State.COMMITTING
         }
         val commitFailure = runCatching(beforePublish).exceptionOrNull()
-        val sinks = lock.withLock {
+        val pending = lock.withLock {
             state = State.TERMINAL
-            val copy = subscribers.map { it.resultSink }
+            val copy = subscribers.toList()
             subscribers.clear()
             replayEvents.clear()
             copy
         }
-        sinks.forEach { sink -> runCatching { sink(result) } }
+        // 终态只投递给仍存活的订阅者，不再向失效绑定重复发送。
+        pending.filter { it.isAlive() }.forEach { subscriber ->
+            runCatching { subscriber.resultSink(result) }
+        }
         commitFailure?.let { throw it }
         return true
     }
@@ -187,14 +256,17 @@ internal class AgentRuntimeSession(
                 transcript = AgentToolBatchRecovery.completeInterrupted(latestTranscript),
                 operation = operation,
             )
-            val sinks = subscribers.map { it.resultSink }
+            val pending = subscribers.toList()
             subscribers.clear()
             replayEvents.clear()
-            result to sinks
+            result to pending
         }
-        val (result, sinks) = prepared
+        val (result, pending) = prepared
         controller.cancel()
-        sinks.forEach { sink -> runCatching { sink(result) } }
+        // 终态只投递给仍存活的订阅者，不再向失效绑定重复发送。
+        pending.filter { it.isAlive() }.forEach { subscriber ->
+            runCatching { subscriber.resultSink(result) }
+        }
         return true
     }
 }

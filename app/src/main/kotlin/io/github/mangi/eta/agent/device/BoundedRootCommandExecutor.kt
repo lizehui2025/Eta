@@ -5,9 +5,12 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 只执行 Eta 内部构造的固定 Root 命令。调用方不得把模型参数直接拼成脚本。
@@ -41,7 +44,10 @@ internal class BoundedRootCommandExecutor(
             return Result.failed("ROOT_EXECUTOR_CLOSED")
         }
 
-        val ioPool = Executors.newFixedThreadPool(2)
+        // 读取线程池进程级共享：原先每次 execute 都新建一个固定池并在 finally 里 shutdownNow，
+        // 高频工具调用会反复创建/销毁线程。这里改为共享池，但每个调用仍只提交自己的两条读取任务，
+        // 且池是 cached（按需新建线程），所以并发调用之间不会互相排队，单次调用超时/失败也不会关闭池。
+        val ioPool = IO_POOL
         return try {
             val stdoutFuture = ioPool.submit<BoundedOutput> {
                 process.inputStream.use { it.readBounded(maxOutputBytes) }
@@ -75,9 +81,11 @@ internal class BoundedRootCommandExecutor(
                 truncated = stdout.truncated || stderr.truncated,
             )
         } finally {
+            // 这里不能关闭共享池：单次调用（含超时）结束不得影响其它调用。
+            // 读取任务在 terminate() 关闭管道后自然结束；超时与丢弃部分结果的语义仍由
+            // 上面的 waitFor(timeout) + Future.get(IO_JOIN_TIMEOUT_MS) 保持不变。
             activeProcesses.remove(process)
             terminate(process)
-            ioPool.shutdownNow()
         }.also { result ->
             logger.debug {
                 "Agent root command outcome=${if (result.ok) "completed" else "failed"} " +
@@ -160,5 +168,27 @@ internal class BoundedRootCommandExecutor(
         const val DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024
         const val MAX_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
         const val IO_JOIN_TIMEOUT_MS = 2_000L
+
+        /** 读取线程命名序号，便于在日志/dumpsys 里区分并发的 Root 命令读取线程。 */
+        val IO_THREAD_SEQUENCE = AtomicInteger(0)
+
+        /**
+         * 进程级共享的管道读取池（首次执行命令时才创建）。
+         *
+         * 用 cached 池而不是固定大小池：每次 execute 都要同时占用两条读取线程，
+         * 固定池会让并发调用的读取任务排队，进而使后到的调用读不到输出；
+         * cached 池为每个任务即时提供线程，行为与“每次调用独享一个 2 线程池”一致。
+         * 池不在单次调用结束/失败时关闭，线程按需创建、空闲 60 秒后自行回收，不会常驻泄漏。
+         * 线程为命名非 daemon 线程。
+         */
+        val IO_POOL: ExecutorService by lazy {
+            Executors.newCachedThreadPool(
+                ThreadFactory { runnable ->
+                    Thread(runnable, "eta-root-io-${IO_THREAD_SEQUENCE.incrementAndGet()}").apply {
+                        isDaemon = false
+                    }
+                }
+            )
+        }
     }
 }

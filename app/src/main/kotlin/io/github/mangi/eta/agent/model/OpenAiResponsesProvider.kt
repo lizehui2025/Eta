@@ -34,9 +34,6 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         require(config.openAiEndpointMode == OpenAiEndpointMode.RESPONSES) {
             "当前 Provider 未配置为 Responses API"
         }
-        val body = buildRequestJson(config, request.messages, request.effectiveTools)
-            .toString()
-            .toRequestBody(JSON_MEDIA_TYPE)
         val headers = okhttp3.Headers.Builder()
             .add("Content-Type", "application/json; charset=utf-8")
             .add("Accept", "text/event-stream")
@@ -45,37 +42,71 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             }
             .also { ProviderRequestHeaders.mergeInto(it, config.baseUrl, config.customHeaders, request.sessionId) }
             .build()
-        val httpRequest = Request.Builder()
-            .url(ProviderUrls.openAiResponsesUrl(config.baseUrl))
-            .headers(headers)
-            .post(body)
-            .build()
-        val call = AgentHttpClient.modelClient.newCall(httpRequest)
-        val binding = runController.register(call::cancel)
 
-        try {
-            runController.throwIfCancelled()
-            onEvent(ProviderEvent.RequestStarted)
-            call.execute().use { response ->
-                onEvent(ProviderEvent.ResponseHeaders(response.code))
-                runController.throwIfCancelled()
-                if (!response.isSuccessful) {
-                    throw AgentModelFailure.http(response.code, response.peekBody(16_384).string())
-                }
-                val assistant = readStreamingResponse(
-                    stream = response.body.byteStream(),
-                    runController = runController,
-                    onEvent = onEvent,
-                )
-                onEvent(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))
-                return ProviderResponse(assistant)
+        var usePromptCacheKey = ProviderPromptCache.openAiPromptCacheKeyAllowed(config.baseUrl)
+        while (true) {
+            val promptCacheKey = if (usePromptCacheKey) {
+                ProviderPromptCache.promptCacheKey(request.sessionId)
+            } else {
+                null
             }
-        } catch (throwable: Throwable) {
-            runCatching { runController.throwIfCancelled() }
-                .getOrElse { interruption -> throw interruption }
-            throw throwable
-        } finally {
-            binding.close()
+            val body = buildRequestJson(config, request.messages, request.effectiveTools, promptCacheKey)
+                .toString()
+                .toRequestBody(JSON_MEDIA_TYPE)
+            val httpRequest = Request.Builder()
+                .url(ProviderUrls.openAiResponsesUrl(config.baseUrl))
+                .headers(headers)
+                .post(body)
+                .build()
+            val call = AgentHttpClient.modelClient.newCall(httpRequest)
+            val binding = runController.register(call::cancel)
+            var retryWithoutCacheKey = false
+
+            try {
+                runController.throwIfCancelled()
+                onEvent(ProviderEvent.RequestStarted)
+                call.execute().use { response ->
+                    onEvent(ProviderEvent.ResponseHeaders(response.code))
+                    runController.throwIfCancelled()
+                    if (!response.isSuccessful) {
+                        val code = response.code
+                        val errorBody = response.peekBody(16_384).string()
+                        if (
+                            usePromptCacheKey &&
+                            ProviderPromptCache.isUnsupportedFieldRejection(
+                                code,
+                                errorBody,
+                                ProviderPromptCache.PROMPT_CACHE_KEY_FIELD
+                            )
+                        ) {
+                            ProviderPromptCache.markOpenAiPromptCacheKeyRejected(config.baseUrl)
+                            retryWithoutCacheKey = true
+                        } else {
+                            throw AgentModelFailure.http(code, errorBody)
+                        }
+                    } else {
+                        val assistant = readStreamingResponse(
+                            stream = response.body.byteStream(),
+                            runController = runController,
+                            onEvent = onEvent,
+                        )
+                        onEvent(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))
+                        return ProviderResponse(assistant)
+                    }
+                }
+            } catch (throwable: Throwable) {
+                runCatching { runController.throwIfCancelled() }
+                    .getOrElse { interruption -> throw interruption }
+                throw throwable
+            } finally {
+                binding.close()
+            }
+
+            if (retryWithoutCacheKey) {
+                usePromptCacheKey = false
+                continue
+            }
+            error("模型接口请求未产生结果")
         }
     }
 
@@ -83,7 +114,15 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         config: AgentModelClient.ModelConfig,
         messages: JSONArray,
         tools: JSONArray,
-    ): JSONObject = ResponsesRequestBuilder.build(config, messages, tools)
+        promptCacheKey: String? = null,
+    ): JSONObject = ResponsesRequestBuilder.build(
+        config,
+        messages,
+        tools,
+        promptCacheKey,
+        config.requestOptions,
+        config.codingMode,
+    )
 
     private fun readStreamingResponse(
         stream: java.io.InputStream?,

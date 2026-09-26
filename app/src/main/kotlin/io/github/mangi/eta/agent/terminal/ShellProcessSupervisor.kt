@@ -329,8 +329,8 @@ internal class ShellProcessSupervisor(
             fi
             [ -d /data/local/tmp ] || exit 125
             eta_mount_required /data/local/tmp "${'$'}eta_rootfs/data/local/tmp" bind
-            "${'$'}eta_busybox" mkdir -p /data/local/tmp/eta || exit 125
-            eta_mount_required /data/local/tmp/eta "${'$'}eta_rootfs/workspace" bind
+            "${'$'}eta_busybox" mkdir -p ${TerminalRuntime.HOST_WORKSPACE_PATH} || exit 125
+            eta_mount_required ${TerminalRuntime.HOST_WORKSPACE_PATH} "${'$'}eta_rootfs/workspace" bind
         """.trimIndent()
         val innerScriptTail = """
             if [ "${'$'}eta_mode" = command ]; then

@@ -23,6 +23,7 @@ data class Model(
     val reasoningCapabilitiesOverride: ModelReasoningCapabilities? = null,
     val structuredOutput: Boolean? = null,
     val supportsTemperature: Boolean? = null,
+    val requestOptions: ModelRequestOptions? = null,
     val customHeaders: List<CustomHeader> = emptyList(),
     val customBody: List<CustomBody> = emptyList(),
     val source: ModelSource = ModelSource.MANUAL,

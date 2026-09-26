@@ -106,6 +106,24 @@ class AgentLocalToolsPermissionTest {
     }
 
     @Test
+    fun codingModeMemoryWriteIsRejectedWithModeHint() {
+        val tools = tools(
+            memoryEnabled = { true },
+            memoryWritable = false,
+            memoryWriteBlockedReason = CODING_MEMORY_READ_ONLY_REASON,
+        )
+        try {
+            val result = tools.execute(AgentModelClient.ToolCall("write", "memory_write", "{}"))
+            val json = JSONObject(result.content)
+            assertEquals("REAL_MEMORY_READ_ONLY", json.getString("code"))
+            assertTrue(json.getString("message").contains("编码模式"))
+            assertTrue(result.sensitive)
+        } finally {
+            tools.close()
+        }
+    }
+
+    @Test
     fun foregroundToolIsRejectedWhenEntrySurfaceIsNotReady() {
         val tools = tools(
             beforeToolExecution = {
@@ -258,6 +276,7 @@ class AgentLocalToolsPermissionTest {
         browserEnabled: () -> Boolean = { false },
         memoryEnabled: () -> Boolean = { false },
         memoryWritable: Boolean = true,
+        memoryWriteBlockedReason: String = ROLEPLAY_MEMORY_READ_ONLY_REASON,
         rootAvailable: () -> Boolean = { false },
         screenObservationProvider: (
             (AgentScreenObservationContract.Options) -> RootShellDeviceController.Observation
@@ -273,7 +292,7 @@ class AgentLocalToolsPermissionTest {
             terminalToolsEnabled = terminalEnabled,
             browserToolsEnabled = browserEnabled,
             memoryToolsEnabled = memoryEnabled,
-            memoryWritable = memoryWritable,
+            memoryWriteBlockedReason = { if (memoryWritable) null else memoryWriteBlockedReason },
             rootAvailable = rootAvailable,
             screenObservationProvider = screenObservationProvider,
             beforeToolExecution = beforeToolExecution,

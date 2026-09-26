@@ -203,6 +203,28 @@ class AgentToolCatalogTest {
     }
 
     @Test
+    fun memoryWriteToolIsHiddenWhenMemoryIsReadOnly() {
+        // 编码模式（以及角色会话）传入 memoryWritable=false：只保留读取，不暴露写入。
+        val readOnly = AgentToolCatalog.build(
+            terminalTools = false,
+            browserTools = false,
+            memoryTools = true,
+            memoryWritable = false,
+        ).toolNames()
+        assertTrue("memory_get" in readOnly)
+        assertFalse("memory_write" in readOnly)
+
+        val writable = AgentToolCatalog.build(
+            terminalTools = false,
+            browserTools = false,
+            memoryTools = true,
+            memoryWritable = true,
+        ).toolNames()
+        assertTrue("memory_get" in writable)
+        assertTrue("memory_write" in writable)
+    }
+
+    @Test
     fun planToolDeclaresBoundedTodoListReplacement() {
         val function = AgentToolCatalog.build(
             terminalTools = false,

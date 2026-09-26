@@ -38,6 +38,16 @@ internal class RootShellTerminalController(
         const val MAX_LIST_ENTRIES = 200
         const val MAX_LIST_SCAN = 5_000
         const val MAX_ASYNC_OUTPUT_CHARS = 64_000
+
+        /**
+         * 进程级 grep 能力缓存：控制器实例每个 run 重建，缓存若随实例走，
+         * 每个 run 的首次 search_code 都要重跑最多 5 次 su 探测。
+         * 读写统一用 [GREP_TOOL_CACHE_LOCK] 保护，探测在锁内完成。
+         */
+        val GREP_TOOL_CACHE_LOCK = Any()
+
+        @Volatile
+        var grepToolCache: GrepTool? = null
     }
 
     private val sessions = linkedMapOf<String, TerminalSession>()
@@ -882,6 +892,11 @@ internal class RootShellTerminalController(
         recursive: Boolean = false,
     ): String {
         if (!rootAvailable()) return UserFileAccess.list(path, showHidden, limit, offset, glob, recursive)
+        // `/workspace/mounts` 在 Android 命名空间不是真实目录（各子目录是独立 bind 源），
+        // 这里合成枚举视图：让主代理与子代理先发现挂载、再进入 /workspace/mounts/<name>/...
+        if (path.trim().trimEnd('/') == AgentFilePathMapper.LINUX_MOUNTS_ROOT) {
+            return mountsListingJson(linuxMountPairs(), limit, offset)
+        }
         val safePath = normalizePath(path.ifBlank { defaultScanRoot() })
         val maxEntries = limit.coerceIn(1, MAX_LIST_ENTRIES)
         val skip = offset.coerceAtLeast(0)
@@ -1036,16 +1051,22 @@ internal class RootShellTerminalController(
         val max = maxResults.coerceIn(1, AgentCodeSearch.MAX_RESULTS)
         val globTokens = glob.orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }
         // 单进程 grep -r 一轮出结果。旧实现是 find 列出 N 个文件再逐个 fork grep，大目录下
-        // 进程数爆炸且 30 秒超时；-I 跳过二进制，--exclude-dir 剪掉依赖与构建目录。
+        // 进程数爆炸且 30 秒超时。
+        // 兼容性：Root 会话默认进入 BusyBox ash，grep 是 BusyBox 版（不支持 --exclude-dir），
+        // 直接套 GNU 参数会静默失败并被 `| head` 掩盖成“0 结果”。这里按运行期探测选择可用的
+        // grep（优先 /system/bin/toybox grep），按真实能力拼接参数，错误不再吞掉。
         val includeExpr = globTokens.joinToString(" ") { "--include=${shellQuote(it)}" }
-        val command = "cd ${shellQuote(safeRoot)} && grep -rInHE -I " +
-            "--exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build " +
-            "--exclude-dir=.gradle --exclude-dir=.idea " +
-            (if (includeExpr.isNotEmpty()) "$includeExpr " else "") +
-            "-e ${shellQuote(trimmedPattern)} . 2>/dev/null | head -n $max"
-        val result = runSuText(command, timeoutSeconds = 30)
+        fun buildSearchCommand(tool: GrepTool): String =
+            "cd ${shellQuote(safeRoot)} && ${tool.prefix} -rInHE " + tool.flagArgs(includeExpr) +
+                "-e ${shellQuote(trimmedPattern)} . | head -n $max"
+        var result = runSuText(buildSearchCommand(grepTool()), timeoutSeconds = 30)
+        if (looksLikeGrepOptionError(result.stderr)) {
+            // 缓存的能力探测与实际环境不一致（例如 Root 会话外壳切换）：失效重探后重试一次。
+            invalidateGrepToolCache()
+            result = runSuText(buildSearchCommand(grepTool()), timeoutSeconds = 30)
+        }
         val rawLines = result.output.lineSequence().filter { it.isNotBlank() }.toList()
-        if (result.exitCode != 0 && rawLines.isEmpty()) {
+        if (rawLines.isEmpty() && (result.exitCode != 0 || result.stderr.isNotBlank())) {
             logger.warn(
                 "Agent terminal action=search_code outcome=failed patternChars=${trimmedPattern.length} " +
                     "exitCode=${result.exitCode} errorChars=${result.stderr.length}"
@@ -1162,12 +1183,177 @@ internal class RootShellTerminalController(
         runCatching { linuxSharedMountsProvider().map { it.name to it.sourcePath } }
             .getOrDefault(emptyList())
 
+    /** 共享挂载枚举视图的合成列表：条目为 `d 挂载名 -> Android 侧源路径`。 */
+    private fun mountsListingJson(mounts: List<Pair<String, String>>, limit: Int, offset: Int): String {
+        val entries = mounts.map { (name, source) -> "d $name -> $source" }
+        val maxEntries = limit.coerceIn(1, MAX_LIST_ENTRIES)
+        val skip = offset.coerceAtLeast(0)
+        val page = entries.drop(skip).take(maxEntries)
+        return JSONObject()
+            .put("ok", true)
+            .put("tool", "list_directory")
+            .put("path", AgentFilePathMapper.LINUX_MOUNTS_ROOT)
+            .put("exit_code", 0)
+            .put("virtual", true)
+            .put("total", entries.size)
+            .put("offset", skip)
+            .put("count", page.size)
+            .put("truncated", skip + page.size < entries.size)
+            .put("entries_text", page.joinToString("\n"))
+            .put(
+                "note",
+                if (entries.isEmpty()) {
+                    "当前未配置共享文件夹（/workspace/mounts 下没有挂载）。"
+                } else {
+                    "共享挂载视图：进入子目录请用 /workspace/mounts/<name>/... 路径。"
+                },
+            )
+            .put("stderr", "")
+            .toString()
+    }
+
+    /**
+     * 挂载视图的常见误用：把 /workspace/mounts 当普通目录，或访问未配置的挂载名。
+     * 这里给可操作的错误，而不是让底层 cd/show 报出难以理解的失败。
+     */
+    private fun mountsViewIssueMessage(path: String): String? {
+        val value = path.trim().trimEnd('/')
+        if (value.isEmpty()) return null
+        if (value == AgentFilePathMapper.LINUX_MOUNTS_ROOT) {
+            return "这是共享挂载枚举视图，不是可访问目录；可先 list_directory /workspace/mounts 查看挂载名，" +
+                "再用 /workspace/mounts/<name>/... 访问。" + mountNamesHint()
+        }
+        if (value.startsWith("${AgentFilePathMapper.LINUX_MOUNTS_ROOT}/")) {
+            val name = value.removePrefix("${AgentFilePathMapper.LINUX_MOUNTS_ROOT}/").substringBefore('/')
+            if (name.isNotEmpty() && linuxMountPairs().none { it.first == name }) {
+                return "未配置名为 \"$name\" 的共享挂载。" + mountNamesHint()
+            }
+        }
+        return null
+    }
+
+    private fun mountNamesHint(): String {
+        val names = linuxMountPairs().map { it.first }
+        return if (names.isEmpty()) "当前未配置任何共享文件夹。" else "当前可用挂载：" + names.joinToString(", ")
+    }
+
+    /** 运行期探测到的可用 grep：BusyBox grep 不支持 --exclude-dir，参数必须按能力拼接。 */
+    private data class GrepTool(
+        val prefix: String,
+        val excludeDirs: Boolean,
+        val ignoreBinary: Boolean,
+    ) {
+        fun flagArgs(includeExpr: String): String = buildString {
+            if (ignoreBinary) append("-I ")
+            if (excludeDirs) {
+                append("--exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build ")
+                append("--exclude-dir=.gradle --exclude-dir=.idea ")
+            }
+            if (includeExpr.isNotEmpty()) append(includeExpr).append(' ')
+        }
+    }
+
+    /**
+     * 取当前可用的 grep 能力。缓存是进程级共享的（控制器实例每个 run 重建，
+     * 探测本身要起若干次 su 进程，不能每个 run 重探），只在探测结论可信时写入。
+     */
+    private fun grepTool(): GrepTool {
+        grepToolCache?.let { return it }
+        return synchronized(GREP_TOOL_CACHE_LOCK) {
+            grepToolCache?.let { return@synchronized it }
+            val detection = detectGrepTool()
+            // Root 会话临时不可用时得到的降级猜测不写缓存，避免后续 run 一直用错能力。
+            if (detection.cacheable) grepToolCache = detection.tool
+            detection.tool
+        }
+    }
+
+    /** 能力缓存失效：下一次 searchCode 会重新探测。 */
+    private fun invalidateGrepToolCache() {
+        synchronized(GREP_TOOL_CACHE_LOCK) { grepToolCache = null }
+    }
+
+    /** 探测结论；[cacheable] 为 false 表示本轮有探测命令没能执行，结论不适合长期缓存。 */
+    private class GrepToolDetection(val tool: GrepTool, val cacheable: Boolean)
+
+    private fun detectGrepTool(): GrepToolDetection {
+        val excludes = "--exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build " +
+            "--exclude-dir=.gradle --exclude-dir=.idea"
+        var probesCompleted = true
+        fun probe(prefix: String, flags: String): Boolean =
+            when (val verdict = probeGrep(prefix, flags)) {
+                null -> {
+                    probesCompleted = false
+                    false
+                }
+                else -> verdict
+            }
+        // 首选 Android 自带 toybox：不受 Root 会话 BusyBox 覆盖影响，参数完整。
+        if (probe("/system/bin/toybox grep", "-I $excludes")) {
+            return GrepToolDetection(
+                GrepTool("/system/bin/toybox grep", excludeDirs = true, ignoreBinary = true),
+                cacheable = probesCompleted,
+            )
+        }
+        if (probe("toybox grep", "-I $excludes")) {
+            return GrepToolDetection(
+                GrepTool("toybox grep", excludeDirs = true, ignoreBinary = true),
+                cacheable = probesCompleted,
+            )
+        }
+        // 回退到 PATH 上的 grep，按实测能力降级（BusyBox 不认识 --exclude-dir）。
+        if (probe("grep", "-I $excludes")) {
+            return GrepToolDetection(
+                GrepTool("grep", excludeDirs = true, ignoreBinary = true),
+                cacheable = probesCompleted,
+            )
+        }
+        if (probe("grep", "-I")) {
+            return GrepToolDetection(
+                GrepTool("grep", excludeDirs = false, ignoreBinary = true),
+                cacheable = probesCompleted,
+            )
+        }
+        if (probe("grep", "")) {
+            return GrepToolDetection(
+                GrepTool("grep", excludeDirs = false, ignoreBinary = false),
+                cacheable = probesCompleted,
+            )
+        }
+        return GrepToolDetection(
+            GrepTool("grep", excludeDirs = false, ignoreBinary = false),
+            cacheable = probesCompleted,
+        )
+    }
+
+    /**
+     * 空输入探测：二进制存在且参数被接受即通过；失败文案会带 not found / option 关键字。
+     * 返回 null 表示这条探测命令本身没有正常执行完（例如 Root 会话不可用），
+     * 这一轮的结论不可信，调用方不应把它写入进程级缓存。
+     */
+    private fun probeGrep(prefix: String, flags: String): Boolean? {
+        val command = "echo | $prefix $flags -e eta_grep_probe 2>&1 | head -n 3"
+        val result = runCatching { runSuText(command, timeoutSeconds = 8) }.getOrNull() ?: return null
+        // 管道以 head 收尾，正常执行时退出码为 0；非 0 说明命令根本没跑起来（su 被拒/启动失败）。
+        if (result.exitCode != 0) return null
+        val text = (result.output + "\n" + result.stderr).lowercase()
+        val markers = listOf("not found", "unrecognized", "unknown option", "invalid option", "unknown command")
+        return markers.none { text.contains(it) }
+    }
+
+    private fun looksLikeGrepOptionError(stderr: String): Boolean {
+        val text = stderr.lowercase()
+        return text.contains("recognized option") || text.contains("unknown option") || text.contains("invalid option")
+    }
+
     private fun normalizePath(path: String): String {
         val raw = path.trim()
         require(raw.isNotBlank()) { "path 不能为空" }
+        mountsViewIssueMessage(raw)?.let { throw IllegalArgumentException(it) }
         // Linux 视图先翻译为 Android 视图：Root Shell 的挂载命名空间里没有 /workspace，
-        // 不翻译则读、列、搜遇到 Linux 写法直接失败，子代理批量取证时尤其致命。
-        val translated = AgentFilePathMapper.toAndroidPath(raw, linuxMountPairs(), TerminalRuntime.userWorkspacePath)
+        // 不翻译则读、列、搜遇到 Linux 写法直接失败，子代理批量取证时尤其致命；
+        // 翻译根与终端里 /workspace 的实际指向一致（chroot 为宿主工作区，PRoot 为私有工作区）。
+        val translated = AgentFilePathMapper.toAndroidPath(raw, linuxMountPairs(), TerminalRuntime.currentLinuxWorkspaceRoot())
         val effective = when {
             translated == "~" -> USER_STORAGE
             translated.startsWith("~/") -> USER_STORAGE + "/" + translated.removePrefix("~/")

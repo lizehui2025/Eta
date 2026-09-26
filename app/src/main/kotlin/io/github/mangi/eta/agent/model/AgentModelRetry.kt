@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
+import io.github.mangi.eta.core.AndroidAgentLogger
 
 /** 重试只包围模型请求；完整响应返回前不提交历史或执行本地工具。 */
 internal class AgentModelRetry(
@@ -48,21 +49,36 @@ internal class AgentModelRetry(
                     classified.code, false, classified.message.orEmpty(), classified, recoveryAllowed = false,
                 )
                 if (!classified.retryable) throw classified
-                if (retries == MAX_RETRIES) {
+                if (retries == maxRetries) {
                     throw AgentModelFailure(
                         classified.code, false,
-                        "${classified.message} 已重试 $MAX_RETRIES 次仍未恢复，已保留此前完成的工具结果。",
+                        "${classified.message} 已重试 $maxRetries 次仍未恢复，已保留此前完成的工具结果。",
                         classified,
                     )
                 }
                 retries += 1
                 val delayMs = BASE_DELAY_MS shl (retries - 1)
-                onEvent(AgentEvent.ModelRetryScheduled(round, retries, MAX_RETRIES, delayMs.toInt(), classified.code))
+                onEvent(AgentEvent.ModelRetryScheduled(round, retries, maxRetries, delayMs.toInt(), classified.code))
+                logRetryScheduled(round, retries, delayMs, classified)
                 waitBeforeRetry(controller, delayMs)
                 controller.throwIfCancelled()
                 // 展示保留失败尝试，模型上下文与最终思考摘要只接纳成功尝试。
                 discardAttemptReasoning()
                 round += 1
+            }
+        }
+    }
+
+    /**
+     * 重试决策补一条日志：事件里只有 code，日志里带上“上次失败原因”摘要，
+     * 用户一次就能拿到完整失败现场。按 code 限流，退避期间不刷屏。
+     */
+    private fun logRetryScheduled(round: Int, attempt: Int, delayMs: Long, failure: AgentModelFailure) {
+        // 日志失败不影响重试语义；纯 JVM 单测里 Android 日志可能未被 mock。
+        runCatching {
+            AndroidAgentLogger.warnThrottled("model_retry:${failure.code}") {
+                "模型请求失败，${delayMs}ms 后第 $attempt/$maxRetries 次重试（round=$round，code=${failure.code}）：" +
+                    "上次失败原因：${AgentModelFailure.failureSummary(failure.message)}"
             }
         }
     }

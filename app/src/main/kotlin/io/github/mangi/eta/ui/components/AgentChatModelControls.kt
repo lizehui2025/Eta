@@ -285,8 +285,11 @@ internal fun AgentContextUsageButton(
         usage.contextTokens == null -> stringResource(R.string.context_usage_after_response)
         else -> stringResource(R.string.context_usage_previous_response, summary)
     }
+    val cacheHitLine = usage.cacheHitPercent?.let {
+        stringResource(R.string.context_usage_cache_hit, it)
+    }
     val breakdownLine = usage.breakdown?.let { formatContextBreakdown(it, locale) }
-    val detailWithBreakdown = if (breakdownLine != null) "$detail\n$breakdownLine" else detail
+    val detailWithBreakdown = listOfNotNull(detail, cacheHitLine, breakdownLine).joinToString("\n")
     val usageDescription = stringResource(
         R.string.context_usage_description,
         summary.replace('\n', ' '),

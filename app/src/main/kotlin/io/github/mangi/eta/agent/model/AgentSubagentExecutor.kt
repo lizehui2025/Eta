@@ -3,6 +3,7 @@ package io.github.mangi.eta.agent.model
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.terminal.SharedFolderMounts
+import io.github.mangi.eta.agent.terminal.TerminalRuntime
 import java.util.UUID
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
@@ -41,6 +42,8 @@ internal class AgentSubagentExecutor(
     private val sharedMountsProvider: () -> List<Pair<String, String>> = {
         runCatching { SharedFolderMounts.current().map { it.name to it.sourcePath } }.getOrDefault(emptyList())
     },
+    /** 写入范围规范化用的 `/workspace` 翻译根来源；与文件工具同源，见 TerminalRuntime.currentLinuxWorkspaceRoot()。 */
+    private val linuxWorkspaceRootProvider: () -> String = { TerminalRuntime.currentLinuxWorkspaceRoot() },
 ) {
     data class SubTask(
         val label: String,
@@ -136,8 +139,12 @@ internal class AgentSubagentExecutor(
         }
 
         val mounts = if (mode == SubagentMode.CODE) sharedMountsProvider() else emptyList()
+        // 一次扇出内固定 `/workspace` 的翻译根（声明与实际写入必须同值）：chroot 为宿主工作区，其他为私有工作区。
+        val workspaceRoot = if (mode == SubagentMode.CODE) linuxWorkspaceRootProvider() else ""
         val declaredByIndex: List<List<String>> = if (mode == SubagentMode.CODE) {
-            val declared = tasks.map { task -> task.writePaths.map { AgentSubagentWritePaths.canonical(it, mounts) } }
+            val declared = tasks.map { task ->
+                task.writePaths.map { AgentSubagentWritePaths.canonical(it, mounts, workspaceRoot) }
+            }
             for (i in tasks.indices) {
                 for (j in i + 1 until tasks.size) {
                     for (a in declared[i]) {
@@ -203,6 +210,7 @@ internal class AgentSubagentExecutor(
                         mode = mode,
                         contextMode = contextMode,
                         mounts = mounts,
+                        workspaceRoot = workspaceRoot,
                         declaredWritePaths = declaredByIndex.getOrElse(index) { emptyList() },
                         writeRegistry = writeRegistry,
                         changedFiles = changedFilesByIndex[index],
@@ -350,6 +358,7 @@ internal class AgentSubagentExecutor(
         mode: SubagentMode,
         contextMode: SubagentContextMode,
         mounts: List<Pair<String, String>>,
+        workspaceRoot: String,
         declaredWritePaths: List<String>,
         writeRegistry: SubagentWriteRegistry,
         changedFiles: MutableSet<String>,
@@ -450,7 +459,9 @@ internal class AgentSubagentExecutor(
             parentRunController.throwIfCancelled()
             val guarded = AgentSubagentPolicy.guardedExecutor(baseToolExecutor, mode)
             val scopedExecutor = if (mode == SubagentMode.CODE) {
-                codeScopedExecutor(guarded, index, task.label, mounts, declaredWritePaths, writeRegistry, changedFiles)
+                codeScopedExecutor(
+                    guarded, index, task.label, mounts, workspaceRoot, declaredWritePaths, writeRegistry, changedFiles,
+                )
             } else {
                 guarded
             }
@@ -500,6 +511,8 @@ internal class AgentSubagentExecutor(
                     append("只做事实搜集与整理，不做最终决策；只使用本轮公开的只读工具；主上下文稳定性靠你保护：")
                     append("在隔离窗口内消化原文，只回填蒸馏后的事实摘要，不转储文件全文、长列表或原始长文本；")
                     append("给出结论、关键依据（含文件路径与行范围/记录时间/来源名）与不确定性，缺失直说缺失；")
+                    append("你只能看到宿主工作区（Linux 环境的 /workspace）与已授权共享目录；路径请用 /workspace 开头的绝对写法，")
+                    append("不要用相对路径猜仓库位置；若目标不在可见范围内，直接如实返回缺失，并说明需要主代理在 Linux 会话中定位。")
 
                     append("禁止 GUI/浏览器/前台操作与任何写操作（含 shell、文件写入），禁止再调用 spawn_agents；")
                     append("如需的工具不可用，直接如实返回缺失，不要编造。\n")
@@ -559,6 +572,7 @@ internal class AgentSubagentExecutor(
         index: Int,
         label: String,
         mounts: List<Pair<String, String>>,
+        workspaceRoot: String,
         declaredWritePaths: List<String>,
         writeRegistry: SubagentWriteRegistry,
         changedFiles: MutableSet<String>,
@@ -569,7 +583,7 @@ internal class AgentSubagentExecutor(
             } else {
                 val args = runCatching { JSONObject(call.argumentsJson.ifBlank { "{}" }) }.getOrNull()
                 val path = args?.optString("path")?.trim().orEmpty()
-                val canonical = AgentSubagentWritePaths.canonical(path, mounts)
+                val canonical = AgentSubagentWritePaths.canonical(path, mounts, workspaceRoot)
                 val declared = declaredWritePaths.any { AgentSubagentWritePaths.contains(it, canonical) }
                 when {
                     path.isEmpty() -> reject("INVALID_ARGUMENT", "写入工具缺少 path")

@@ -131,16 +131,26 @@ internal object RuntimeConfigRepository {
             reasoningCapabilities = reasoningCapabilities,
             customHeaders = provider.customHeaders + model.customHeaders,
             customBody = provider.customBody + model.customBody,
+            // typed 采样参数：仅取模型级（该功能无 provider 级配置，不与 provider 合并）。
+            requestOptions = model.requestOptions,
         )
     }
 
+    /**
+     * 写入 Hook 进程可读的 RemotePreferences。
+     *
+     * 该 JSON 会被多个被 hook 进程读取，因此固定写入 apiKey 置空（字段与顺序不变）的副本；
+     * Runtime 侧处理请求时会用内部存储回填 apiKey（见 AgentRuntimeRequestConfigResolver）。
+     * [runtimeConfigJson] 本身保持完整语义，供需要完整配置的内部调用与测试使用。
+     */
     private fun writeRuntimeConfig(
         prefs: SharedPreferences,
         config: AgentModelClient.ModelConfig,
     ): Boolean =
         runCatching {
+            val remoteConfig = config.copy(apiKey = "")
             prefs.edit()
-                .putString(Prefs.Keys.AGENT_RUNTIME_CONFIG_JSON, runtimeConfigJson(config))
+                .putString(Prefs.Keys.AGENT_RUNTIME_CONFIG_JSON, runtimeConfigJson(remoteConfig))
                 .commit()
         }.getOrDefault(false)
 

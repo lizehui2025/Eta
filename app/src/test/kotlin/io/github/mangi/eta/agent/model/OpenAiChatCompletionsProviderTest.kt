@@ -2,6 +2,8 @@ package io.github.mangi.eta.agent.model
 
 import com.sun.net.httpserver.HttpServer
 import io.github.mangi.eta.agent.runtime.AgentRunController
+import io.github.mangi.eta.data.model.CustomBody
+import io.github.mangi.eta.data.model.ModelRequestOptions
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.util.concurrent.CountDownLatch
@@ -9,9 +11,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.serialization.json.JsonPrimitive
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -470,6 +474,220 @@ class OpenAiChatCompletionsProviderTest {
             val thinking = JSONObject(requestBody.get()).getJSONObject("thinking")
             assertEquals("enabled", thinking.getString("type"))
             assertEquals("all", thinking.getString("keep"))
+        }
+    }
+
+    @Test
+    fun completeSendsPromptCacheKeyForSession() {
+        val requestBody = AtomicReference<String>()
+        val sessionId = "chat-cache-key-session"
+        val body = buildString {
+            append(sseChunk(JSONObject().put("content", "ok"), finishReason = "stop"))
+            append("data: [DONE]\n\n")
+        }
+
+        withSseServer(body, onRequest = requestBody::set) { baseUrl ->
+            OpenAiChatCompletionsProvider.complete(
+                request = providerRequest(baseUrl).copy(sessionId = sessionId),
+                runController = AgentRunController(),
+            )
+
+            val sent = JSONObject(requestBody.get())
+            val key = sent.getString("prompt_cache_key")
+            assertTrue(key.startsWith("eta-"))
+            assertEquals(ProviderPromptCache.promptCacheKey(sessionId), key)
+        }
+    }
+
+    @Test
+    fun completeRetriesOnceWithoutPromptCacheKeyWhenEndpointRejectsIt() {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val executor = Executors.newSingleThreadExecutor()
+        server.executor = executor
+        server.createContext("/chat/completions") { exchange ->
+            val sentBody = exchange.requestBody.use { it.readBytes().toString(Charsets.UTF_8) }
+            requests += sentBody
+            if (requests.size == 1) {
+                val payload = JSONObject()
+                    .put("error", JSONObject().put("message", "Unsupported parameter: prompt_cache_key"))
+                    .toString()
+                    .toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "application/json")
+                exchange.sendResponseHeaders(400, payload.size.toLong())
+                exchange.responseBody.use { it.write(payload) }
+            } else {
+                val payload = buildString {
+                    append(sseChunk(JSONObject().put("content", "降级成功"), finishReason = "stop"))
+                    append("data: [DONE]\n\n")
+                }.toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "text/event-stream")
+                exchange.sendResponseHeaders(200, payload.size.toLong())
+                exchange.responseBody.use { it.write(payload) }
+            }
+        }
+        server.start()
+        try {
+            val baseUrl = "http://127.0.0.1:${server.address.port}"
+            val response = OpenAiChatCompletionsProvider.complete(
+                request = providerRequest(baseUrl),
+                runController = AgentRunController(),
+            )
+
+            assertEquals("降级成功", response.assistantMessage.getString("content"))
+            assertEquals(2, requests.size)
+            assertTrue(JSONObject(requests[0]).has("prompt_cache_key"))
+            assertTrue(!JSONObject(requests[1]).has("prompt_cache_key"))
+        } finally {
+            server.stop(0)
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun requestOptionsAreSentAsTypedSamplingFields() {
+        val requestBody = AtomicReference<String>()
+        val body = buildString {
+            append(sseChunk(JSONObject().put("content", "ok"), finishReason = "stop"))
+            append("data: [DONE]\n\n")
+        }
+
+        withSseServer(body, onRequest = requestBody::set) { baseUrl ->
+            OpenAiChatCompletionsProvider.complete(
+                request = providerRequest(baseUrl) {
+                    it.copy(
+                        requestOptions = ModelRequestOptions(
+                            temperature = 0.35,
+                            topP = 0.9,
+                            topK = 40,
+                            maxOutputTokens = 512,
+                            presencePenalty = 0.1,
+                            frequencyPenalty = 0.2,
+                            seed = 42L,
+                        ),
+                    )
+                },
+                runController = AgentRunController(),
+            )
+
+            val sent = JSONObject(requestBody.get())
+            assertEquals(0.35, sent.getDouble("temperature"), 1e-9)
+            assertEquals(0.9, sent.getDouble("top_p"), 1e-9)
+            assertEquals(0.1, sent.getDouble("presence_penalty"), 1e-9)
+            assertEquals(0.2, sent.getDouble("frequency_penalty"), 1e-9)
+            assertEquals(42L, sent.getLong("seed"))
+            assertEquals(512, sent.getInt("max_tokens"))
+            assertFalse(sent.has("top_k"))
+            assertFalse(sent.has("max_completion_tokens"))
+        }
+    }
+
+    @Test
+    fun requestOptionsAbsentKeepsRequestWithoutTypedFields() {
+        val requestBody = AtomicReference<String>()
+        val body = buildString {
+            append(sseChunk(JSONObject().put("content", "ok"), finishReason = "stop"))
+            append("data: [DONE]\n\n")
+        }
+
+        withSseServer(body, onRequest = requestBody::set) { baseUrl ->
+            OpenAiChatCompletionsProvider.complete(
+                request = providerRequest(baseUrl),
+                runController = AgentRunController(),
+            )
+
+            val sent = JSONObject(requestBody.get())
+            assertFalse(sent.has("temperature"))
+            assertFalse(sent.has("top_p"))
+            assertFalse(sent.has("presence_penalty"))
+            assertFalse(sent.has("frequency_penalty"))
+            assertFalse(sent.has("seed"))
+            assertFalse(sent.has("max_tokens"))
+            assertFalse(sent.has("max_completion_tokens"))
+        }
+    }
+
+    @Test
+    fun customBodyOverridesTypedRequestOptions() {
+        val requestBody = AtomicReference<String>()
+        val body = buildString {
+            append(sseChunk(JSONObject().put("content", "ok"), finishReason = "stop"))
+            append("data: [DONE]\n\n")
+        }
+
+        withSseServer(body, onRequest = requestBody::set) { baseUrl ->
+            OpenAiChatCompletionsProvider.complete(
+                request = providerRequest(baseUrl) {
+                    it.copy(
+                        requestOptions = ModelRequestOptions(
+                            temperature = 0.35,
+                            topP = null,
+                            topK = null,
+                            maxOutputTokens = 512,
+                            presencePenalty = null,
+                            frequencyPenalty = null,
+                            seed = null,
+                        ),
+                        customBody = listOf(CustomBody("temperature", JsonPrimitive(0.9))),
+                    )
+                },
+                runController = AgentRunController(),
+            )
+
+            val sent = JSONObject(requestBody.get())
+            assertEquals(0.9, sent.getDouble("temperature"), 1e-9)
+            assertEquals(512, sent.getInt("max_tokens"))
+        }
+    }
+
+    @Test
+    fun codingModeOverridesTypedTemperature() {
+        val requestBody = AtomicReference<String>()
+        val body = buildString {
+            append(sseChunk(JSONObject().put("content", "ok"), finishReason = "stop"))
+            append("data: [DONE]\n\n")
+        }
+
+        withSseServer(body, onRequest = requestBody::set) { baseUrl ->
+            OpenAiChatCompletionsProvider.complete(
+                request = providerRequest(baseUrl) {
+                    it.copy(
+                        codingMode = true,
+                        requestOptions = ModelRequestOptions(temperature = 0.7, topP = 0.9),
+                    )
+                },
+                runController = AgentRunController(),
+            )
+
+            val sent = JSONObject(requestBody.get())
+            assertEquals(0.1, sent.getDouble("temperature"), 1e-9)
+            assertEquals(0.9, sent.getDouble("top_p"), 1e-9)
+        }
+    }
+
+    @Test
+    fun customBodyOverridesCodingModeTemperature() {
+        val requestBody = AtomicReference<String>()
+        val body = buildString {
+            append(sseChunk(JSONObject().put("content", "ok"), finishReason = "stop"))
+            append("data: [DONE]\n\n")
+        }
+
+        withSseServer(body, onRequest = requestBody::set) { baseUrl ->
+            OpenAiChatCompletionsProvider.complete(
+                request = providerRequest(baseUrl) {
+                    it.copy(
+                        codingMode = true,
+                        requestOptions = ModelRequestOptions(temperature = 0.7, topP = 0.9),
+                        customBody = listOf(CustomBody("temperature", JsonPrimitive(0.9))),
+                    )
+                },
+                runController = AgentRunController(),
+            )
+
+            val sent = JSONObject(requestBody.get())
+            assertEquals(0.9, sent.getDouble("temperature"), 1e-9)
+            assertEquals(0.9, sent.getDouble("top_p"), 1e-9)
         }
     }
 

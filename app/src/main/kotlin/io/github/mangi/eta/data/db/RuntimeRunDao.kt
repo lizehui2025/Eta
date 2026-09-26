@@ -66,6 +66,29 @@ internal interface RuntimeRunDao : ChunkedTextDao {
     @Transaction
     suspend fun runtimeResults(): List<RuntimeResultEntity> = runtimeResultRows().map { restoreRuntimeResult(it) }
 
+    /**
+     * 保留策略所需的轻量统计：一次查询同时得到行数与“已过期”行数，不读 content / transcript 等大字段。
+     * 过期判据与旧实现一致：now - createdAt > 阈值 等价于 createdAt < now - 阈值（严格小于）。
+     */
+    @Query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN created_at < :expiredBefore THEN 1 ELSE 0 END), 0) AS expired FROM runtime_results")
+    suspend fun runtimeResultRetentionCounts(expiredBefore: Long): RuntimeResultRetentionCounts
+
+    /** 只取主键，按 created_at 升序定位待淘汰行（等价于旧实现“先过期、再最旧”的删除顺序）。 */
+    @Query("SELECT run_id FROM runtime_results ORDER BY created_at ASC LIMIT :limit")
+    suspend fun oldestRuntimeResultIds(limit: Int): List<String>
+
+    @Query("DELETE FROM runtime_results WHERE run_id IN (:runIds)")
+    suspend fun deleteRuntimeResultsByIdsBatch(runIds: List<String>)
+
+    /** 单次批量删除内部按 SQLite 绑定参数上限分片，保证一次调用即可删完给定集合。 */
+    @Transaction
+    suspend fun deleteRuntimeResultsByIds(runIds: List<String>) {
+        if (runIds.isEmpty()) return
+        runIds.chunked(MAX_IDS_PER_STATEMENT).forEach { batch ->
+            deleteRuntimeResultsByIdsBatch(batch)
+        }
+    }
+
     @Upsert
     suspend fun upsertRuntimeResultRow(result: RuntimeResultEntity)
 
@@ -112,6 +135,30 @@ internal interface RuntimeRunDao : ChunkedTextDao {
         stored.copy(run = restoreArchivedRun(stored.run), events = stored.events.map { event ->
             event.copy(eventJson = restoreText("runtime_archive_runs", event.archiveRunId, "event:${event.sortIndex}", event.eventJson))
         })
+    }
+
+    /** 归档保留上限判定只需要计数，不必加载归档主记录与事件 JSON。 */
+    @Query("SELECT COUNT(*) FROM runtime_archive_runs")
+    suspend fun archivedRunCount(): Int
+
+    /** 只取主键，按 created_at 升序定位溢出的归档（与旧实现“淘汰最旧”顺序一致）。 */
+    @Query("SELECT archive_run_id FROM runtime_archive_runs ORDER BY created_at ASC LIMIT :limit")
+    suspend fun oldestArchivedRunIds(limit: Int): List<String>
+
+    @Query("DELETE FROM runtime_archive_runs WHERE archive_run_id IN (:archiveRunIds)")
+    suspend fun deleteArchivedRunsByArchiveIdsBatch(archiveRunIds: List<String>)
+
+    @Query("DELETE FROM runtime_archive_events WHERE archive_run_id IN (:archiveRunIds)")
+    suspend fun deleteArchivedEventsByArchiveIdsBatch(archiveRunIds: List<String>)
+
+    /** 与旧实现相同：每个被淘汰的归档先删主记录再删事件；整批在同一事务内完成，避免只删一半。 */
+    @Transaction
+    suspend fun deleteArchivedRunsByArchiveIds(archiveRunIds: List<String>) {
+        if (archiveRunIds.isEmpty()) return
+        archiveRunIds.chunked(MAX_IDS_PER_STATEMENT).forEach { batch ->
+            deleteArchivedRunsByArchiveIdsBatch(batch)
+            deleteArchivedEventsByArchiveIdsBatch(batch)
+        }
     }
 
     @Upsert
@@ -238,3 +285,12 @@ internal data class RuntimeArchiveRunWithEventsSeed(
     val run: RuntimeArchiveRunEntity,
     val events: List<RuntimeArchiveEventEntity>,
 )
+
+/** runtime_results 保留策略的轻量计数结果（不包含任何正文列）。 */
+internal data class RuntimeResultRetentionCounts(
+    val total: Int,
+    val expired: Int,
+)
+
+/** Room 把 IN (:ids) 展开成等量绑定参数，按旧版 SQLite 的 999 变量上限留出余量分片。 */
+private const val MAX_IDS_PER_STATEMENT = 200

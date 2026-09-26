@@ -1,25 +1,23 @@
 package io.github.mangi.eta.agent.model
 
+import io.github.mangi.eta.agent.terminal.AgentFilePathMapper
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 子代理写入范围规范化与重叠判断（纯函数，便于单测）。
- * 共享目录的 Linux 视图 /workspace/mounts/<name>/... 映射回 Android 侧真实路径，
- * 避免同一文件因两种写法绕过互斥；只比较规范化后的字符串，不访问文件系统。
+ * Linux 视图路径（`/workspace`、`/workspace/mounts/<name>/...`、`workspace/` 相对别名等）
+ * 统一映射回 Android 侧真实路径，避免同一文件因两种写法绕过互斥或误报 WRITE_NOT_DECLARED；
+ * 只比较规范化后的字符串，不访问文件系统。
  */
 internal object AgentSubagentWritePaths {
     const val MOUNTS_ROOT = "/workspace/mounts"
 
-    fun canonical(path: String, mounts: List<Pair<String, String>>): String {
-        val value = path.trim()
-        if (value != MOUNTS_ROOT && !value.startsWith("$MOUNTS_ROOT/")) return normalize(value)
-        val remainder = value.removePrefix(MOUNTS_ROOT).trimStart('/')
-        val name = remainder.substringBefore('/')
-        val mount = mounts.firstOrNull { it.first == name } ?: return normalize(value)
-        val rest = remainder.removePrefix(name).trimStart('/')
-        val mapped = if (rest.isEmpty()) mount.second else mount.second.trimEnd('/') + "/" + rest
-        return normalize(mapped)
-    }
+    /**
+     * [workspaceRoot] 是当前 Linux 环境 `/workspace` 指向的 Android 根路径（chroot 为宿主工作区，
+     * 其他为私有工作区），与文件工具共用同一解析来源；声明与实际写入必须传同一值。
+     */
+    fun canonical(path: String, mounts: List<Pair<String, String>>, workspaceRoot: String): String =
+        normalize(AgentFilePathMapper.toAndroidPath(path, mounts, workspaceRoot))
 
     fun contains(declared: String, path: String): Boolean {
         val root = normalize(declared)

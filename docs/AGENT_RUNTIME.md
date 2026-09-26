@@ -74,6 +74,8 @@ Runtime 独立于 Provider 自定义提示词注入 Eta 身份，以“当前配
 
 OpenAI-compatible Provider 可在配置页选择 `Chat Completions` 或 `Responses API`。新安装和重置后的内置 OpenAI 默认使用 Responses；数据库中已有 Provider 不会被默认值覆盖。自定义 Provider 和其他内置 Provider 默认仍使用 Chat Completions。
 
+模型可携带一组可选的底层请求参数（temperature、top_p、top_k、最大输出 token、presence/frequency penalty、seed）；它们随 Run 配置经 RemotePreferences JSON 与 Runtime Bundle 一并传递，并在协议请求体构建时先于 `extraBody` 与自定义请求体写入，推理档位最后覆盖。压缩、摘要与改写等内部用途不携带这些参数，与自定义请求体使用同一套裁剪规则。编码模式例外：运行开始时会把 `codingMode` 快照进运行配置，主对话、子代理与内部调用均统一写入 `temperature=0.1`；用户自定义请求体仍可覆盖。
+
 Chat Completions 在协议边界把当前上下文中的全部 `system` 内容按原顺序合并为首条唯一系统消息，兼容要求系统消息只能位于开头的模型 Chat Template。Responses 则把完整的 `system`/`developer` 上下文投影到 `instructions`，并将持久历史重建为带 `type: "message"` 的 input Items。
 
 Responses 请求固定使用 `stream:true`、`store:false`，不发送 `previous_response_id`。Runtime 在同一次 run 的工具回合之间精确回放 Provider 返回的完整 output Items；因此 encrypted reasoning、服务端工具状态等 opaque 数据只存在于内存，不进入 IPC transcript、Room、日志或运行归档。持久会话只保留规范化回答、可见推理内容和 Eta 工具记录，后续 run 由这些稳定数据重新构建上下文。
@@ -112,6 +114,8 @@ MCP 地址由用户直接配置，HTTP、HTTPS、局域网与本机地址使用�
 
 `memory_write` 支持行区间替换、独立章节追加与清空；单次模型生成内容最多 3500 字符，设置页的用户手动编辑不受此单次工具限制。关闭记忆不会删除文件，后续 run 不再注入或暴露工具；已开始的 run 在每次执行记忆工具前也会重新检查开关。
 
+顶栏左上角可在“聊天 / 编码”两种模式间切换：聊天模式正常注入并允许更新记忆；编码模式不主动保存——本次 run 的工具表不暴露 `memory_write`，系统背景改为只读提示，且每次写入前还会重新检查当前模式，中途切到编码模式会立即拦截进行中 run 的保存。模式在 run 开始时快照（决定提示词与工具表），切换影响之后的 run；读取（注入与 `memory_get`）在两种模式下保持可用。编码模式下请求统一使用 temperature=0.1（自定义请求体仍可覆盖）。
+
 记忆内容只作为可编辑背景，不具有指令优先级。记忆工具原始参数与结果可供当前 Agent Loop 使用，但对应工具调用在持久 transcript 中整体脱敏；运行事件只保存操作类型、行数、字节数和错误码，不保存正文或查询词。
 
 ## 本地工具能力合同
@@ -129,7 +133,7 @@ Root 探测在 IO 线程执行：存在 `su` 时首次自动请求一次，最�
 - `android` 继续使用系统 Shell。`user` 身份不升级权限；`root` 身份在 `su` 内探测 Magisk、KernelSU、APatch 或系统 BusyBox，并优先进入 standalone `ash`，因此 BusyBox applet 不要求预先加入 PATH。旧 `run_command`、文件读写和目录操作保持这一环境，避免改变既有 Android 路径与命令语义。
 - `linux` 解析用户选择的发行版和后端。chroot 保持原有 rootfs、独立 mount namespace、`/data/local/tmp/eta` 工作区与特权挂载。新建 PRoot 环境和普通工作区使用 App UID 独占的 `filesDir/terminal-user` 目录，避开旧 Root 目录的属主限制；已有普通环境继续使用原位置，路径统一由 `TerminalPrivateStorage` 解析，`/workspace` 映射该私有工作区。仅映射有权访问的共享目录，拒绝“所有文件访问”后仍可导入导出。Linux 内的模拟 root 不意味着 Android Root，两个后端都不构成隔离安全沙箱。
 - 已建立会话和任务保存后端与实际 rootfs/工作区，不因 Root 变化自动切换。持久任务记录的后端与宿主工作区字段为可选，兼容旧记录。获得 Root 不迁移 PRoot，失去 Root 不删除 chroot 或改变文件属主。
-- 普通 Android Shell、文件读写与图片读取使用 App UID；Root 用户保留原有特权路径。文件类工具（读、列、搜）的空白与相对路径默认使用终端工作区而非隔离日志目录；Linux 视图的 `/workspace/...` 与 `/workspace/mounts/<name>/...` 在执行前翻译为 Android 视图，保证子代理批量取证时可见；Root 搜索为单进程 `grep -r`（跳二进制、剪依赖构建目录），递归列目录同样剪枝，免 Root 搜索改流式逐行。无法直接访问的选择器文件经有界复制导入工作区；目录选择不能冒充可实时访问的路径。
+- 普通 Android Shell、文件读写与图片读取使用 App UID；Root 用户保留原有特权路径。文件类工具（读、列、搜）的空白与相对路径默认使用终端工作区而非隔离日志目录；Linux 视图的 `/workspace/...` 与 `/workspace/mounts/<name>/...` 在执行前翻译为 Android 视图，保证子代理批量取证时可见（翻译目标与当前后端实际 bind 的工作区一致：chroot 为宿主工作区 `/data/local/tmp/eta`，PRoot 与未配置时为私有工作区）；Root 搜索为单进程 `grep -r`（跳二进制、剪依赖构建目录），递归列目录同样剪枝，免 Root 搜索改流式逐行。无法直接访问的选择器文件经有界复制导入工作区；目录选择不能冒充可实时访问的路径。
 
 用户在 Alpine 与 Debian 中选择一个当前 Linux 发行版，模型与终端统一通过 `environment=linux` 使用该选择。基础环境安装与基础工具安装是两个独立步骤：安装器先下载固定版本、大小和 SHA-256 的 rootfs，在临时目录解压，运行检查成功后才写入基础完成标记；PRoot 的流式解包校验归档路径和链接，支持取消与失败清理；用户随后安装只含通用命令的基础工具集。Python profile 只安装 uv，随后由 uv 把最新正式版 Python 安装到 `/opt/eta/python` 并把全局命令链接到 `/usr/local/bin`。Node.js profile 在 Debian 安装上游最新正式版 ARM64/x64 制品，在 Alpine 安装稳定分支提供的 `nodejs-current`；SSH 使用所选发行版的最新稳定包。App 侧只读取安装器完成标记，不再重复检查 rootfs 内的符号链接、二进制或执行权限。中国大陆网络下，Alpine 使用阿里云镜像，Debian 主仓库使用清华 TUNA、安全更新使用 Debian 官方源，各自只保留官方主仓库作为失败出口；APT 还启用重试并关闭 HTTP pipelining。
 
@@ -154,7 +158,7 @@ App 在发起请求前已经把当前用户消息写入会话 history，因此 R
 
 图片只在需要它的当前模型回合中传递；持久 transcript 会删除图片正文并写入稳定的省略说明。外部入口归档可另外保存小预览用于还原用户消息 UI，预览不会重新进入模型历史。敏感工具及 MCP 的原始参数、结果仍只在当前运行内存中使用；普通用户文本、模型回复、工具调用与结果不因长度被截断。
 
-完整脱敏历史 `journal`、可替换的模型上下文 `history` 和展示消息分别保存。Room 的大文本按小行分块存储，主记录仅保存分块引用；DAO 在同一事务中更新主记录与分块，读取时验证顺序与完整长度，删除所属记录时清理分块；分块引用只在严格匹配 `@eta:chunks:v1:<count>:<length>` 时按引用恢复，其余形态原样返回，损坏引用降级为空串并写节流日志。分块大小限制单行，不限制会话总长度。数据库迁移完整搬迁现存历史，不能恢复已被旧版本丢弃的内容。消息行还保存折叠展示所需的 `detail` 与子代理 `steps_json`（同一分块存储）；21→22 迁移只新增这两列与默认值。已存在会话保存时 `created_at` 沿用库中原值，避免反复保存漂移；设置备份导出在单事务内读取快照行集合，避免与并发保存交错。
+完整脱敏历史 `journal`、可替换的模型上下文 `history` 和展示消息分别保存。Room 的大文本按小行分块存储，主记录仅保存分块引用；DAO 在同一事务中更新主记录与分块，读取时验证顺序与完整长度，删除所属记录时清理分块；分块引用只在严格匹配 `@eta:chunks:v1:<count>:<length>` 时按引用恢复，其余形态原样返回，损坏引用降级为空串并写节流日志，同时记录损坏标记；此后对同一字段的退化写回（空串或空 JSON）会被拒绝并保留原引用与残余分块，直到写入真实内容为止，避免用降级值覆盖造成不可逆丢失。分块大小限制单行，不限制会话总长度。数据库迁移完整搬迁现存历史，不能恢复已被旧版本丢弃的内容。消息行还保存折叠展示所需的 `detail` 与子代理 `steps_json`（同一分块存储）；21→22 迁移只新增这两列与默认值。已存在会话保存时 `created_at` 沿用库中原值，避免反复保存漂移；设置备份导出在单事务内读取快照行集合，避免与并发保存交错。
 
 会话保存是增量的：`AgentConversationStore` 为每个会话维护内容指纹（只覆盖会落盘的字段，输入框草稿、流式与压缩标志不参与），未变化的会话不重写消息、检查点与文本分块；消失的会话按删除处理，删除前显式清理其消息与检查点，使分块清理触发器照常触发。跳过写入还有两个前置条件：该会话已在库中，且库中该行的 `updated_at` 仍是上次写入的值——备份恢复等绕过本对象的整库写入会被识别并重新整份写入。指纹只在事务提交成功后推进，保存失败不会留下"以为写过"的状态。整库覆盖仍由 `ConversationDao.replaceAll` 提供给备份恢复使用。
 

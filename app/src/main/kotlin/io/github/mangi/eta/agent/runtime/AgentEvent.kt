@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.runtime
 
 import io.github.mangi.eta.core.toSafeLogToken
+import kotlin.math.roundToInt
 
 internal sealed interface AgentEvent {
     fun toLogLine(): String
@@ -22,7 +23,8 @@ internal sealed interface AgentEvent {
             PHASE_STARTED -> RUNNING_DETAIL
             PHASE_COMPLETED -> "上下文已压缩：约 ${compactionTokenCount(tokensBefore)} → " +
                 "${compactionTokenCount(tokensAfter ?: 0)} tokens"
-            else -> "上下文压缩失败，原始上下文已保留。"
+            else -> if (reasonCode.isNotBlank()) "上下文压缩失败（$reasonCode），原始上下文已保留。"
+            else "上下文压缩失败，原始上下文已保留。"
         }
         override fun toLogLine(): String =
             "context_compaction phase=${phase.toSafeLogToken()}, before=$tokensBefore, after=$tokensAfter, code=${reasonCode.toSafeLogToken()}"
@@ -136,7 +138,10 @@ internal sealed interface AgentEvent {
         val usage: AgentTokenUsage
     ) : AgentEvent {
         override fun toLogLine(): String =
-            "usage_received round=$round, ctx=${usage.contextTokens}, in=${usage.inputTokens}, out=${usage.outputTokens}, reasoning=${usage.reasoningTokens}, cache=${usage.cachedTokens}"
+            "usage_received round=$round, ctx=${usage.contextTokens}, in=${usage.inputTokens}, " +
+                "out=${usage.outputTokens}, reasoning=${usage.reasoningTokens}, " +
+                "cache=${usage.cachedTokens}" +
+                usage.cacheHitPercentOrNull()?.let { ", cache_hit=$it%" }.orEmpty()
     }
 
     data class UserSupplementReceived(
@@ -316,6 +321,14 @@ internal sealed interface AgentEvent {
 
 private const val MAX_LOGGED_TOOL_NAMES = 8
 private const val RESULT_CODE_MARKER = "code="
+
+/** 缓存命中率（百分比）：input 缺失或非正、cached 缺失时返回 null，结果夹在 0..100。 */
+private fun AgentTokenUsage.cacheHitPercentOrNull(): Int? {
+    val input = inputTokens ?: return null
+    val cached = cachedTokens ?: return null
+    if (input <= 0) return null
+    return (cached * 100.0 / input).roundToInt().coerceIn(0, 100)
+}
 
 private fun compactionTokenCount(value: Int): String =
     java.text.NumberFormat.getIntegerInstance().format(value)

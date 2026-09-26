@@ -13,6 +13,7 @@ import org.json.JSONObject
 
 internal object OpenAiChatCompletionsProvider : AgentProviderClient {
     private const val MAX_ERROR_CHARS = 600
+
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
     override val id: String = "openai_chat_completions"
@@ -49,55 +50,120 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             .also { ProviderRequestHeaders.mergeInto(it, config.baseUrl, config.customHeaders, request.sessionId) }
             .build()
 
-        val requestBody = buildRequestJson(config, request.messages, request.effectiveTools).apply {
-            if (!request.purpose.allowsTools) {
-                remove("tools")
-                remove("tool_choice")
+        var usePromptCacheKey = ProviderPromptCache.openAiPromptCacheKeyAllowed(config.baseUrl)
+        // 本次完成是否剥离历史 reasoning_content。默认 false：默认路径与现状逐字节一致。
+        var stripReasoning = false
+        // 降级预算：单次完成最多再发一次请求。prompt_cache_key 与 reasoning_content 两类降级
+        // 由同一次失败的一次判定选出（if/else 互斥），加上各自的“已经降过”守卫，
+        // 因此最多 2 次 HTTP 尝试，不会叠加、也不会循环。
+        var degradedRetriesLeft = 1
+        while (true) {
+            val promptCacheKey = if (usePromptCacheKey) {
+                ProviderPromptCache.promptCacheKey(request.sessionId)
+            } else {
+                null
             }
-        }
-            .toString()
-            .toRequestBody(JSON_MEDIA_TYPE)
-
-        val httpRequest = Request.Builder()
-            .url(url)
-            .headers(headers)
-            .post(requestBody)
-            .build()
-
-        val call = AgentHttpClient.modelClient.newCall(httpRequest)
-        val binding = runController.register { call.cancel() }
-
-        try {
-            runController.throwIfCancelled()
-            onEvent(ProviderEvent.RequestStarted)
-
-            call.execute().use { response ->
-                val code = response.code
-                onEvent(ProviderEvent.ResponseHeaders(code))
-                runController.throwIfCancelled()
-
-                if (!response.isSuccessful) {
-                    val errorBody = response.peekBody(16_384).string()
-                    throw AgentModelFailure.http(code, errorBody)
+            val requestBody = buildRequestJson(
+                config,
+                request.messages,
+                request.effectiveTools,
+                promptCacheKey,
+                stripReasoning,
+            ).apply {
+                if (!request.purpose.allowsTools) {
+                    remove("tools")
+                    remove("tool_choice")
                 }
-
-                val assistantMessage = readStreamingAssistantMessage(response.body.byteStream(), runController, onEvent)
-                onEvent(ProviderEvent.Completed(assistantMessage.optString("finish_reason").ifBlank { null }))
-                return ProviderResponse(assistantMessage)
             }
-        } catch (throwable: Throwable) {
-            runCatching { runController.throwIfCancelled() }
-                .getOrElse { interruption -> throw interruption }
-            throw throwable
-        } finally {
-            binding.close()
+                .toString()
+                .toRequestBody(JSON_MEDIA_TYPE)
+
+            val httpRequest = Request.Builder()
+                .url(url)
+                .headers(headers)
+                .post(requestBody)
+                .build()
+
+            val call = AgentHttpClient.modelClient.newCall(httpRequest)
+            val binding = runController.register { call.cancel() }
+            var retryWithoutCacheKey = false
+            var retryWithoutReasoningContent = false
+
+            try {
+                runController.throwIfCancelled()
+                onEvent(ProviderEvent.RequestStarted)
+
+                call.execute().use { response ->
+                    val code = response.code
+                    onEvent(ProviderEvent.ResponseHeaders(code))
+                    runController.throwIfCancelled()
+
+                    if (!response.isSuccessful) {
+                        val errorBody = response.peekBody(16_384).string()
+                        if (
+                            degradedRetriesLeft > 0 &&
+                            usePromptCacheKey &&
+                            ProviderPromptCache.isUnsupportedFieldRejection(
+                                code,
+                                errorBody,
+                                ProviderPromptCache.PROMPT_CACHE_KEY_FIELD
+                            )
+                        ) {
+                            ProviderPromptCache.markOpenAiPromptCacheKeyRejected(config.baseUrl)
+                            retryWithoutCacheKey = true
+                        } else if (
+                            degradedRetriesLeft > 0 &&
+                            !stripReasoning &&
+                            ProviderPromptCache.isReasoningContentRejection(code, errorBody)
+                        ) {
+                            // 服务端拒绝历史消息里的 reasoning_content（跨模型会话常见）：剥离后重试一次。
+                            // 判定用字段专用版本 [ProviderPromptCache.isReasoningContentRejection]，
+                            // 它覆盖通用“未知/不支持字段”措辞，并额外认中文等更宽的拒绝说法。
+                            // `!stripReasoning` 保证剥离降级在单次完成内只发生一次，且已剥离时
+                            // 重试请求体与失败请求体完全相同，重试没有意义。
+                            ProviderPromptCache.markReasoningContentRejected(config.baseUrl)
+                            retryWithoutReasoningContent = true
+                        } else {
+                            throw AgentModelFailure.http(code, errorBody)
+                        }
+                    } else {
+                        val assistantMessage = readStreamingAssistantMessage(
+                            response.body.byteStream(),
+                            runController,
+                            onEvent
+                        )
+                        onEvent(ProviderEvent.Completed(assistantMessage.optString("finish_reason").ifBlank { null }))
+                        return ProviderResponse(assistantMessage)
+                    }
+                }
+            } catch (throwable: Throwable) {
+                runCatching { runController.throwIfCancelled() }
+                    .getOrElse { interruption -> throw interruption }
+                throw throwable
+            } finally {
+                binding.close()
+            }
+
+            if (retryWithoutCacheKey) {
+                degradedRetriesLeft--
+                usePromptCacheKey = false
+                continue
+            }
+            if (retryWithoutReasoningContent) {
+                degradedRetriesLeft--
+                stripReasoning = true
+                continue
+            }
+            error("模型接口请求未产生结果")
         }
     }
 
     private fun buildRequestJson(
         config: AgentModelClient.ModelConfig,
         messages: JSONArray,
-        tools: JSONArray
+        tools: JSONArray,
+        promptCacheKey: String?,
+        stripReasoning: Boolean
     ): JSONObject {
         val sourceType = ProviderSourceRegistry.resolve(
             providerId = config.providerId,
@@ -108,13 +174,23 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
         return JSONObject()
             .put("model", config.model)
             .put("stream", true)
-            .put("messages", OpenAiRequestMessages.forChatCompletions(messages))
+            .put("messages", OpenAiRequestMessages.forChatCompletions(messages, stripReasoning))
             .put("tools", tools)
             .put("tool_choice", "auto")
             .also { request ->
                 if (sourceType != ProviderSourceTypes.OPENROUTER) {
                     request.put("stream_options", JSONObject().put("include_usage", true))
                 }
+                if (promptCacheKey != null) {
+                    request.put(ProviderPromptCache.PROMPT_CACHE_KEY_FIELD, promptCacheKey)
+                }
+                // typed 请求参数最先写入；extraBody/customBody 随后合并，用户原始覆盖优先。
+                RequestOptionsApplicator.applyChatCompletions(
+                    request,
+                    config.requestOptions,
+                    sourceType,
+                    config.codingMode,
+                )
                 mergeExtraBody(request, config.extraBodyJson)
                 RequestBodyMerge.mergeCustomBody(request, config.customBody)
                 ProviderReasoning.applyOpenAiCompatibleRequest(request, config)

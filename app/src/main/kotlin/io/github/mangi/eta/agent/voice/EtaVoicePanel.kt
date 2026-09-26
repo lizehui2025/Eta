@@ -276,11 +276,19 @@ internal fun EtaVoicePanel(
                 colors = colors,
                 focusRequester = focusRequester,
                 canOpenConversation = canOpenConversation,
-                baseContentHeightPx = assistantBaseHeightPx(
-                    messages = state.messages,
-                    maxHeightPx = maxContentHeightPx,
-                    density = density.density,
-                ),
+                // 每次组合都重算会把每条消息的正文长度再遍历一遍；helper 是纯函数，
+                // 只依赖 messages 与这两个参数，命中 key 时复用同一结果。
+                baseContentHeightPx = remember(
+                    state.messages,
+                    maxContentHeightPx,
+                    density.density,
+                ) {
+                    assistantBaseHeightPx(
+                        messages = state.messages,
+                        maxHeightPx = maxContentHeightPx,
+                        density = density.density,
+                    )
+                },
                 maxContentHeightPx = maxContentHeightPx,
                 bottomInsetPx = bottomInset,
                 imeOverlapPx = imeOverlap,

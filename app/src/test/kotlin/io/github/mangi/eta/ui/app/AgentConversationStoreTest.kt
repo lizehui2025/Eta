@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui.app
 
 import android.content.Context
+import android.os.Looper
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.roleplay.CharacterCardCodec
@@ -35,6 +36,7 @@ import kotlinx.coroutines.cancel
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -47,6 +49,20 @@ class AgentConversationStoreTest {
         context = RuntimeEnvironment.getApplication()
         EtaDatabase.closeForTests()
         context.deleteDatabase("eta.db")
+    }
+
+    /**
+     * 初始会话快照在 IO 线程读取、回主线程应用；Robolectric 的主 Looper 不会自动执行，
+     * 因此手动推进主 Looper，直到 [AgentAppState.awaitInitialLoad] 表明门控已打开。
+     */
+    private fun awaitInitialConversationLoad(state: AgentAppState) {
+        val deadlineMillis = System.currentTimeMillis() + 10_000
+        while (state.conversationsLoading) {
+            check(System.currentTimeMillis() < deadlineMillis) { "初始会话加载未在超时内完成" }
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(2)
+        }
+        runBlocking { state.awaitInitialLoad() }
     }
 
     @Test
@@ -420,6 +436,7 @@ class AgentConversationStoreTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         try {
             val state = AgentAppState(context, scope)
+            awaitInitialConversationLoad(state)
             val binding = RoleplayBinding(
                 "local-character", CharacterCardCodec.encodeJson(CharacterCardCodec.create("旅人")),
                 "旅人", userName = "小林",
@@ -446,6 +463,7 @@ class AgentConversationStoreTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         try {
             val state = AgentAppState(context, scope)
+            awaitInitialConversationLoad(state)
 
             state.createConversation()
             state.createConversation()

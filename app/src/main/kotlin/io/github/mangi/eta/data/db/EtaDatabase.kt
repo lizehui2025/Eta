@@ -1,6 +1,7 @@
 package io.github.mangi.eta.data.db
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import androidx.annotation.VisibleForTesting
 import androidx.room.Database
 import androidx.room.Room
@@ -26,8 +27,9 @@ import androidx.room.migration.Migration
         CharacterEntity::class,
         UserPersonaEntity::class,
     ],
-    version = 23,
-    exportSchema = false,
+    version = 24,
+    // 开启 schema 导出：生成 app/schemas 下的 JSON（配合 build.gradle.kts 的 room.schemaLocation）。
+    exportSchema = true,
 )
 internal abstract class EtaDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
@@ -66,12 +68,20 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_20_21,
                         MIGRATION_21_22,
                         MIGRATION_22_23,
+                        MIGRATION_23_24,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db) }
                         override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db) }
                     })
-                    .fallbackToDestructiveMigration(dropAllTables = true)
+                    // 数据丢失护栏：破坏性迁移（缺迁移时静默删表重建）只在可调试构建启用。
+                    // 正式构建缺迁移时，Room 会在打开数据库时抛 IllegalStateException：
+                    // 宁可启动失败并暴露问题，也不把用户数据（对话、Provider 配置等）不可逆地清空。
+                    .apply {
+                        if (isDebuggableBuild(context)) {
+                            fallbackToDestructiveMigration(dropAllTables = true)
+                        }
+                    }
                     .build()
                     .also { instance = it }
             }
@@ -83,6 +93,13 @@ internal abstract class EtaDatabase : RoomDatabase() {
                 instance = null
             }
         }
+
+        /**
+         * 破坏性迁移护栏判据：只有可调试构建才允许在缺迁移时静默删表。
+         * 项目关闭了 BuildConfig（buildConfig = false），因此改用系统的 FLAG_DEBUGGABLE。
+         */
+        private fun isDebuggableBuild(context: Context): Boolean =
+            (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
         internal val MIGRATION_19_20 = Migration(19, 20) { database ->
             database.execSQL("ALTER TABLE conversation_context_checkpoints ADD COLUMN journal_json TEXT NOT NULL DEFAULT ''")
@@ -121,6 +138,10 @@ internal abstract class EtaDatabase : RoomDatabase() {
             database.execSQL("ALTER TABLE mcp_servers ADD COLUMN args_json TEXT NOT NULL DEFAULT '[]'")
             database.execSQL("ALTER TABLE mcp_servers ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'")
             database.execSQL("ALTER TABLE mcp_servers ADD COLUMN working_dir TEXT NOT NULL DEFAULT ''")
+        }
+
+        internal val MIGRATION_23_24 = Migration(23, 24) { database ->
+            database.execSQL("ALTER TABLE provider_models ADD COLUMN request_options_json TEXT")
         }
 
         private fun createTextChunkCleanup(database: androidx.sqlite.db.SupportSQLiteDatabase) {

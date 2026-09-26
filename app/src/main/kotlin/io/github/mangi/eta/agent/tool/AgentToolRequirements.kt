@@ -122,7 +122,8 @@ internal object AgentToolRequirements {
                     ?.put("enum", JSONArray().put("user"))
                     ?.put("description", "宿主执行身份；当前仅支持 user，默认 user。")
                 properties?.getJSONObject("environment")?.put("description",
-                    "android 使用普通 Android Shell；linux 使用用户选择的发行版和免 Root 后端。默认 android。")
+                    "android 使用普通 Android Shell；linux 使用用户选择的发行版和免 Root 后端。" +
+                        "未指定时运行期决定：已安装 Linux 环境则默认 linux（找代码/处理数据），否则回退 android；设备数据类命令请显式传 android。")
                 properties?.getJSONObject("cwd")?.put("description",
                     "工作目录。Android 默认使用 Eta 私有工作区，Linux 默认 /workspace。")
             }

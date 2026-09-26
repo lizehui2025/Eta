@@ -52,6 +52,12 @@ internal object AgentConversationCodec {
                 if (message.toolCallsJson.isNotBlank()) {
                     target.put("tool_calls", JSONTokener(message.toolCallsJson).nextValue())
                 }
+                // output items 随消息持久化，跨 run 复用前缀缓存与推理链。
+                if (message.responsesOutputItemsJson.isNotBlank()) {
+                    runCatching { JSONArray(message.responsesOutputItemsJson) }
+                        .getOrNull()
+                        ?.let { items -> target.put(ResponsesEphemeralState.OUTPUT_ITEMS_KEY, items) }
+                }
             }
 
     fun fromJsonObject(message: JSONObject): AgentModelClient.ConversationMessage {
@@ -75,6 +81,7 @@ internal object AgentConversationCodec {
             toolCallId = message.optString("tool_call_id"),
             reasoningContent = message.optString("reasoning_content"),
             toolCallsJson = message.optJSONArray("tool_calls")?.toString().orEmpty(),
+            responsesOutputItemsJson = ResponsesEphemeralState.persistedItemsJson(message),
         )
     }
 
@@ -187,6 +194,35 @@ internal object AgentConversationCodec {
                     .put("arguments", argumentsJson),
             )
 
+    /**
+     * 只取 tool_calls 的 id，不解析/序列化 arguments。
+     * [parseToolCalls] 会把每个 arguments（write_file 可达 512KB）转成字符串，
+     * 切分点扫描、敏感检测这类只关心 id/名字的场景应当用本方法，避免为每条调用付一次大拷贝。
+     */
+    fun toolCallIds(message: JSONObject): List<String> {
+        val rawCalls = message.optJSONArray("tool_calls") ?: return emptyList()
+        return buildList {
+            for (index in 0 until rawCalls.length()) {
+                val call = rawCalls.optJSONObject(index) ?: continue
+                add(call.optString("id").ifBlank { "tool_call_$index" })
+            }
+        }
+    }
+
+    /** 取 tool_calls 中命中敏感策略的 id，不解析 arguments。 */
+    fun sensitiveCallIds(message: JSONObject): List<String> {
+        val rawCalls = message.optJSONArray("tool_calls") ?: return emptyList()
+        return buildList {
+            for (index in 0 until rawCalls.length()) {
+                val call = rawCalls.optJSONObject(index) ?: continue
+                val name = call.optJSONObject("function")?.optString("name").orEmpty()
+                if (AgentSensitiveToolPolicy.isSensitive(name)) {
+                    add(call.optString("id").ifBlank { "tool_call_$index" })
+                }
+            }
+        }
+    }
+
     fun transcript(
         messages: JSONArray,
         startIndex: Int,
@@ -195,8 +231,7 @@ internal object AgentConversationCodec {
         val redactedIds = sensitiveToolCallIds.toMutableSet()
         for (index in startIndex until messages.length()) {
             val message = messages.optJSONObject(index) ?: continue
-            parseToolCalls(message).filter { AgentSensitiveToolPolicy.isSensitive(it.name) }
-                .forEach { redactedIds += it.id }
+            redactedIds += sensitiveCallIds(message)
         }
         return buildList {
             for (index in startIndex until messages.length()) {
@@ -214,20 +249,69 @@ internal object AgentConversationCodec {
         sensitiveToolCallIds: Set<String>,
     ): JSONObject {
         if (sensitiveToolCallIds.isEmpty()) return source
-        val copy = JSONObject(source.toString())
-        if (
-            copy.optString("role") == "tool" &&
-            copy.optString("tool_call_id") in sensitiveToolCallIds
-        ) {
-            copy.put("content", SENSITIVE_TOOL_OMITTED_TEXT)
+        // 快路径：绝大多数消息与敏感 id 无关，直接复用原对象。
+        // 旧实现只要集合非空就对每条消息 `JSONObject(source.toString())` 深拷贝，
+        // 大文本历史下准备阶段被放大 N 倍，是“数分钟”级卡顿的主因之一。
+        val role = source.optString("role")
+        val toolCallId = if (role == "tool") source.optString("tool_call_id") else ""
+        val calls = source.optJSONArray("tool_calls")
+        var needsCopy = toolCallId in sensitiveToolCallIds
+        if (!needsCopy && calls != null) {
+            for (index in 0 until calls.length()) {
+                if (calls.optJSONObject(index)?.optString("id") in sensitiveToolCallIds) {
+                    needsCopy = true
+                    break
+                }
+            }
         }
-        val calls = copy.optJSONArray("tool_calls") ?: return copy
+        if (!needsCopy) return source
+        // 命中才浅拷贝：只重建受影响的字段，大正文直接丢弃不再拷贝。
+        val copy = JSONObject()
+        val keys = source.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            // 敏感消息的 output items 一并剥离，不随脱敏拷贝继续传递。
+            if (key == "content" || key == "tool_calls" || key == ResponsesEphemeralState.OUTPUT_ITEMS_KEY) {
+                continue
+            }
+            copy.put(key, source.opt(key))
+        }
+        if (role == "tool" && toolCallId in sensitiveToolCallIds) {
+            copy.put("content", SENSITIVE_TOOL_OMITTED_TEXT)
+        } else {
+            // 非 tool 角色或非敏感 tool 结果：复用原 content 引用，不序列化。
+            if (source.has("content")) copy.put("content", source.opt("content"))
+        }
+        if (calls == null) return copy
+        val newCalls = JSONArray()
         for (index in 0 until calls.length()) {
             val call = calls.optJSONObject(index) ?: continue
-            if (call.optString("id") !in sensitiveToolCallIds) continue
-            call.optJSONObject("function")
-                ?.put("arguments", JSONObject().put("redacted", true).toString())
+            if (call.optString("id") !in sensitiveToolCallIds) {
+                // 未命中直接复用引用，不做 toString 深拷贝；调用方只读不改。
+                newCalls.put(call)
+                continue
+            }
+            val newCall = JSONObject()
+            val callKeys = call.keys()
+            while (callKeys.hasNext()) {
+                val ck = callKeys.next()
+                if (ck != "function") newCall.put(ck, call.opt(ck))
+            }
+            val fn = call.optJSONObject("function")
+            val newFn = JSONObject()
+            if (fn != null) {
+                val fnKeys = fn.keys()
+                while (fnKeys.hasNext()) {
+                    val fk = fnKeys.next()
+                    if (fk != "arguments") newFn.put(fk, fn.opt(fk))
+                }
+                newFn.put("name", fn.optString("name"))
+            }
+            newFn.put("arguments", JSONObject().put("redacted", true).toString())
+            newCall.put("function", newFn)
+            newCalls.put(newCall)
         }
+        copy.put("tool_calls", newCalls)
         return copy
     }
 
@@ -277,13 +361,27 @@ internal object AgentConversationCodec {
         return target
     }
 
-    private fun sanitizeContentObject(source: JSONObject): JSONObject =
-        JSONObject(source.toString()).also { target ->
+    private fun sanitizeContentObject(source: JSONObject): JSONObject {
+        // 无图片字段时直接复用，避免每 part 一次 toString 深拷贝。
+        if (!source.has("image_url") && !source.has("source")) {
+            if (!source.has("text")) return source
+            // text 字段本身是小字符串，原地规范化需要拷贝；但只拷贝 keys，不序列化正文。
+            val copy = JSONObject()
+            val keys = source.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                copy.put(k, source.opt(k))
+            }
+            copy.put("text", source.optString("text"))
+            return copy
+        }
+        return JSONObject(source.toString()).also { target ->
             target.remove("image_url")
             target.remove("source")
             if (target.has("text")) {
                 target.put("text", target.optString("text"))
             }
         }
+    }
 
 }

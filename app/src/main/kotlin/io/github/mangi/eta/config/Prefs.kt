@@ -22,6 +22,12 @@ internal object Prefs {
     /** 远程配置组名，UI 写入与 Hook 读取必须一致。 */
     const val GROUP = "eta_prefs"
 
+    /** Agent 交互模式取值：聊天模式（正常保存记忆）。 */
+    const val AGENT_MODE_CHAT = "chat"
+
+    /** Agent 交互模式取值：编码模式（不主动保存记忆）。 */
+    const val AGENT_MODE_CODING = "coding"
+
     private const val LOCAL_AGENT_GROUP = "eta_agent_preferences"
 
     /** 所有功能开关 key。默认值按功能风险独立定义。 */
@@ -44,6 +50,9 @@ internal object Prefs {
         const val AGENT_DEVICE_SENSITIVE_ACTION_TOOLS = "agent_device_sensitive_action_tools"
         const val AGENT_THINKING_ENABLED = "agent_thinking_enabled"
         const val AGENT_RUNTIME_CONFIG_JSON = "agent_runtime_config_json"
+
+        /** Agent 交互模式：chat（聊天，正常保存记忆）/ coding（编码，不主动保存记忆）。 */
+        const val AGENT_MODE = "agent_mode"
 
         /** 全部布尔开关及其默认值。 */
         val BOOLEAN_DEFAULTS: Map<String, Boolean> = mapOf(
@@ -146,6 +155,18 @@ internal object Prefs {
 
     /** Eta 设置页与 Runtime 使用的本地 Agent 配置，不依赖 LSPosed。 */
     fun localAgentPreferences(): SharedPreferences? = localAgent
+
+    /** 当前 Agent 交互模式（chat/coding）；未写入或读取失败时回退聊天模式。 */
+    fun agentMode(): String {
+        val stored = runCatching { localAgent?.getString(Keys.AGENT_MODE, null) }.getOrNull()
+        return if (stored == AGENT_MODE_CODING) AGENT_MODE_CODING else AGENT_MODE_CHAT
+    }
+
+    /** 写入 Agent 交互模式；同进程读取立即生效，磁盘异步落盘。 */
+    fun setAgentMode(mode: String) {
+        val normalized = if (mode == AGENT_MODE_CODING) AGENT_MODE_CODING else AGENT_MODE_CHAT
+        runCatching { localAgent?.edit()?.putString(Keys.AGENT_MODE, normalized)?.apply() }
+    }
 
     /**
      * 首次升级优先把已有 RemotePreferences 值迁入本地；之后本地值是事实源，并在框架

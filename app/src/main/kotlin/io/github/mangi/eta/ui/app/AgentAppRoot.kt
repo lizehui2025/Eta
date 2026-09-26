@@ -25,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -84,6 +85,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.nav.core.NavDisplay
 import top.yukonga.miuix.kmp.nav.core.NavDisplayEffects
@@ -216,6 +218,8 @@ fun AgentAppRoot(
             isCurrentRoute = backStack.lastOrNull() == route,
             conversationPaneState = agentState.conversationPaneState,
             isConversationPaneOpen = conversationPaneOpen,
+            agentMode = agentState.agentMode,
+            onAgentModeChange = agentState::updateAgentMode,
             onBack = { popRoute() },
             onOpenConversationPane = { conversationPaneOpen = true },
             onDismissConversationPane = { conversationPaneOpen = false },
@@ -284,7 +288,10 @@ fun AgentAppRoot(
     val swipeDismiss = swipeBackDirection.takeIf {
         LocalAppearanceSettings.current.swipeDismissEnabled
     }
-    key(navigationResetKey) {
+    if (agentState.conversationsLoading) {
+        // 初始会话快照在后台加载完成前显示占位，避免用户在空列表上误操作。
+        AgentConversationsLoadingPlaceholder()
+    } else key(navigationResetKey) {
         NavDisplay(
             backStack = backStack,
             onBack = { popRoute() },
@@ -800,3 +807,14 @@ private data class MessageMutationTarget(
     val messageId: String,
     val laterTurnCount: Int,
 )
+
+/** 初始会话快照异步加载期间的占位；加载完成前替代页面内容，避免用户在空列表上误操作。 */
+@Composable
+private fun AgentConversationsLoadingPlaceholder() {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        InfiniteProgressIndicator(size = 36.dp)
+    }
+}

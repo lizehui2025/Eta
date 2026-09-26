@@ -43,45 +43,71 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                 ProviderRequestHeaders.mergeInto(this, config.baseUrl, config.customHeaders, request.sessionId)
             }
             .build()
-        val httpRequest = Request.Builder()
-            .url(ProviderUrls.anthropicMessagesUrl(config.baseUrl))
-            .headers(headers)
-            .post(
-                buildRequestJson(config, request.messages, request.effectiveTools)
-                    .toString()
-                    .toRequestBody(JSON_MEDIA_TYPE)
-            )
-            .build()
+        var useCacheControl = ProviderPromptCache.anthropicCacheControlAllowed(config.baseUrl)
+        while (true) {
+            val httpRequest = Request.Builder()
+                .url(ProviderUrls.anthropicMessagesUrl(config.baseUrl))
+                .headers(headers)
+                .post(
+                    buildRequestJson(config, request.messages, request.effectiveTools, useCacheControl)
+                        .toString()
+                        .toRequestBody(JSON_MEDIA_TYPE)
+                )
+                .build()
 
-        val call = AgentHttpClient.modelClient.newCall(httpRequest)
-        val binding = runController.register { call.cancel() }
-        try {
-            runController.throwIfCancelled()
-            onEvent(ProviderEvent.RequestStarted)
-            call.execute().use { response ->
-                onEvent(ProviderEvent.ResponseHeaders(response.code))
+            val call = AgentHttpClient.modelClient.newCall(httpRequest)
+            val binding = runController.register { call.cancel() }
+            var retryWithoutCacheControl = false
+            try {
                 runController.throwIfCancelled()
-                if (!response.isSuccessful) {
-                    val errorBody = response.peekBody(16_384).string()
-                    throw AgentModelFailure.http(response.code, errorBody)
+                onEvent(ProviderEvent.RequestStarted)
+                call.execute().use { response ->
+                    onEvent(ProviderEvent.ResponseHeaders(response.code))
+                    runController.throwIfCancelled()
+                    if (!response.isSuccessful) {
+                        val errorBody = response.peekBody(16_384).string()
+                        if (
+                            useCacheControl &&
+                            ProviderPromptCache.isUnsupportedFieldRejection(
+                                response.code,
+                                errorBody,
+                                ProviderPromptCache.CACHE_CONTROL_FIELD
+                            )
+                        ) {
+                            ProviderPromptCache.markAnthropicCacheControlRejected(config.baseUrl)
+                            retryWithoutCacheControl = true
+                        } else {
+                            throw AgentModelFailure.http(response.code, errorBody)
+                        }
+                    } else {
+                        val assistant = readStreamingAssistantMessage(response.body.byteStream(), runController, onEvent)
+                        onEvent(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))
+                        return ProviderResponse(assistant)
+                    }
                 }
-                val assistant = readStreamingAssistantMessage(response.body.byteStream(), runController, onEvent)
-                onEvent(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))
-                return ProviderResponse(assistant)
+            } catch (throwable: Throwable) {
+                runCatching { runController.throwIfCancelled() }
+                    .getOrElse { interruption -> throw interruption }
+                throw throwable
+            } finally {
+                binding.close()
             }
-        } catch (throwable: Throwable) {
-            runCatching { runController.throwIfCancelled() }
-                .getOrElse { interruption -> throw interruption }
-            throw throwable
-        } finally {
-            binding.close()
+            if (retryWithoutCacheControl) {
+                useCacheControl = false
+                continue
+            }
+            error("模型接口请求未产生结果")
         }
     }
+
+    /** 每次调用新建一个延迟缓存断点对象，避免在请求之间复用同一可变实例。 */
+    private fun ephemeralCacheControl(): JSONObject = JSONObject().put("type", "ephemeral")
 
     private fun buildRequestJson(
         config: AgentModelClient.ModelConfig,
         messages: JSONArray,
-        tools: JSONArray
+        tools: JSONArray,
+        cacheControl: Boolean
     ): JSONObject {
         val systemParts = mutableListOf<String>()
         val anthropicMessages = JSONArray()
@@ -124,8 +150,36 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
             .put("messages", anthropicMessages)
             .also { request ->
                 val system = systemParts.joinToString("\n\n").trim()
-                if (system.isNotBlank()) request.put("system", system)
-                convertTools(tools)?.let { request.put("tools", it) }
+                if (system.isNotBlank()) {
+                    if (cacheControl) {
+                        request.put(
+                            "system",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("type", "text")
+                                    .put("text", system)
+                                    .put("cache_control", ephemeralCacheControl())
+                            )
+                        )
+                    } else {
+                        request.put("system", system)
+                    }
+                }
+                convertTools(tools)?.let { converted ->
+                    if (cacheControl) {
+                        converted.optJSONObject(converted.length() - 1)
+                            ?.put("cache_control", ephemeralCacheControl())
+                    }
+                    request.put("tools", converted)
+                }
+                if (cacheControl) {
+                    val lastContent = anthropicMessages.optJSONObject(anthropicMessages.length() - 1)
+                        ?.optJSONArray("content")
+                    lastContent?.optJSONObject(lastContent.length() - 1)
+                        ?.put("cache_control", ephemeralCacheControl())
+                }
+                // typed 请求参数先写入（覆盖默认 max_tokens）；customBody 与推理运行时随后依次接管。
+                RequestOptionsApplicator.applyAnthropic(request, config.requestOptions, config.codingMode)
                 RequestBodyMerge.mergeCustomBody(request, config.customBody)
                 ProviderReasoning.applyAnthropicRequest(request, config)
             }

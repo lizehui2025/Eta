@@ -93,12 +93,17 @@ class AgentContextCompactionTest {
         assertTrue(result.contextSnapshot!!.messages.none { it.role == "user" && it.content.isBlank() })
     }
 
+    /**
+     * 被内容过滤 / 无有效正文的摘要绝不提交、不动原始上下文。
+     * 终止原因 length 现在按设计接受（模型常见 stop/length，摘要长度由上限截断约束），
+     * 不再像旧实现那样要求必须 END_TURN。
+     */
     @Test
-    fun truncatedSummaryNeverReplacesOriginalContext() {
+    fun filteredSummaryNeverReplacesOriginalContext() {
         val original = jsonHistory()
         val before = original.toString()
         val session = AgentContextSession(config, original, 1, "operation", provider { _, _ ->
-            response("半截摘要", "length")
+            response("半截摘要", "content_filter")
         }, AgentRunController(), { emptySet() }, {}, { fail("不应提交快照") })
         assertThrows(AgentModelFailure::class.java) { session.compact(JSONArray(), force = true) }
         assertEquals(before, original.toString())

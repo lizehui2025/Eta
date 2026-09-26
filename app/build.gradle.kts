@@ -146,6 +146,12 @@ android {
     }
 }
 
+// Room schema 导出：配合 @Database(exportSchema = true)，把各版本 schema JSON 落到 app/schemas。
+// 目录不存在时由 Room 编译器自动创建；建议把这些 JSON 随代码提交，便于迁移评审。
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation(libs.commons.compress)
     implementation(libs.xz)

@@ -93,7 +93,9 @@ internal class AgentContextBudget(private val window: Int?) {
     }
 
     private fun cachedToolSchemaTokens(tools: JSONArray): Int {
-        val signature = tools.length()
+        // 空工具表是高频路径（压缩摘要请求）：直接返回常量，避免新建对象时的 miss 计数与 toString。
+        if (tools.length() == 0) return EMPTY_TOOLS_TOKENS
+        val signature = toolsSignature(tools)
         val cached = toolSchemaTokenCache[tools]
         if (cached != null && cached.signature == signature) {
             toolSchemaHits++
@@ -103,6 +105,12 @@ internal class AgentContextBudget(private val window: Int?) {
         val tokens = textTokens(tools.toString())
         toolSchemaTokenCache[tools] = CachedEstimate(signature, tokens)
         return tokens
+    }
+
+    /** 工具表指纹：实例身份 + 长度 + 首元素身份，O(1)，避免每轮重序列化。 */
+    private fun toolsSignature(tools: JSONArray): Int {
+        val first = if (tools.length() > 0) System.identityHashCode(tools.opt(0)) else 0
+        return (31 * (31 * tools.length() + System.identityHashCode(tools)) + first)
     }
 
     private fun cachedMessageTokens(message: JSONObject): Int {
@@ -118,16 +126,22 @@ internal class AgentContextBudget(private val window: Int?) {
         return tokens
     }
 
-    /** 廉价的内容指纹：正文对象身份 + 长度 + 键数量，足以发现就地改写，成本与正文大小无关。 */
+    /** 廉价的内容指纹：O(1)，不扫描正文；覆盖 role/content/tool_calls 三处可变点。 */
     private fun contentSignature(message: JSONObject): Int {
         val content = message.opt("content")
         val contentSignature = when {
             content is String -> 31 * content.length + System.identityHashCode(content)
-            content is JSONArray -> 17 * content.length()
+            content is JSONArray -> 31 * (17 * content.length() + System.identityHashCode(content)) +
+                content.length()
             content == null || content == JSONObject.NULL -> 0
             else -> 1
         }
-        return contentSignature * 31 + message.length()
+        val toolCalls = message.optJSONArray("tool_calls")
+        val toolSig = if (toolCalls == null) 0
+        else 31 * toolCalls.length() + System.identityHashCode(toolCalls)
+        // role 变更不会改变 length，必须单独计入，否则缓存返回过期 token。
+        val roleSig = message.optString("role").hashCode()
+        return ((contentSignature * 31 + toolSig) * 31 + roleSig) * 31 + message.length()
     }
 
     fun shouldCompact(tokens: Int): Boolean {
@@ -153,12 +167,34 @@ internal class AgentContextBudget(private val window: Int?) {
         /** 消息级估算缓存的规模上限，超过即整体丢弃，避免长会话把对象图钉在内存里。 */
         const val CACHE_LIMIT = 4096
 
-        fun textTokens(text: String): Int {
+        /** 空工具表 token 常量：避免压缩摘要路径每轮 `textTokens("[]")` 的重复计算与 miss 计数。 */
+        internal val EMPTY_TOOLS_TOKENS: Int = fastTextTokens("[]")
+
+        /**
+         * 快路径 token 启发式：与旧 `codePoints` 口径一致（ASCII 3 字符≈1 token，其余 1 码点≈1 token），
+         * 但用 UTF-16 循环代替 `IntStream`，大字符串快 5~10 倍且零分配；代理对计为 1。
+         */
+        private fun fastTextTokens(text: String): Int {
             var ascii = 0
             var other = 0
-            text.codePoints().forEach { if (it < 128) ascii++ else other++ }
+            var i = 0
+            val n = text.length
+            while (i < n) {
+                val c = text[i]
+                if (c < '\u0080') {
+                    ascii++
+                } else if (c.isHighSurrogate() && i + 1 < n && text[i + 1].isLowSurrogate()) {
+                    other++
+                    i++
+                } else {
+                    other++
+                }
+                i++
+            }
             return (ascii + 2) / 3 + other
         }
+
+        fun textTokens(text: String): Int = fastTextTokens(text)
 
         fun rawEstimate(messages: JSONArray, tools: JSONArray = JSONArray()): Int {
             var tokens = textTokens(tools.toString()) + 16
@@ -169,23 +205,55 @@ internal class AgentContextBudget(private val window: Int?) {
             return tokens
         }
 
-        /** 单条消息的估算口径：图片按 4096 计，其余按整串启发式计数。 */
+        /**
+         * 单条消息的估算口径：图片按 4096 计，其余按启发式计数。
+         *
+         * 零拷贝实现：旧实现把整条消息（含上百 KB 的 tool 结果）先 `copy.toString()` 再整体计数，
+         * 大文本下每次估算都要转义一次大字符串。这里直接对各字段分别计数，不再物化整串；
+         * 误差只有 JSON 转义符级别（每条个位数 token），压缩阈值不受影响。
+         */
         fun messageTokens(message: JSONObject): Int {
-            var tokens = 0
-            val copy = JSONObject()
-            message.keys().forEach { key -> if (key != "content") copy.put(key, message.get(key)) }
+            var tokens = 8
+            val keys = message.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                if (key == "content") continue
+                if (key == "tool_calls") {
+                    val calls = message.optJSONArray(key)
+                    if (calls != null) tokens += fastTextTokens(calls.toString())
+                    continue
+                }
+                // 小字段直接计数，不经过 JSONObject 拷贝。
+                tokens += fastTextTokens(key) + 2
+                when (val v = message.opt(key)) {
+                    null, JSONObject.NULL -> Unit
+                    is String -> tokens += fastTextTokens(v)
+                    is JSONArray -> tokens += fastTextTokens(v.toString())
+                    else -> tokens += fastTextTokens(v.toString())
+                }
+            }
             val parts = message.optJSONArray("content")
             if (parts != null) {
-                val text = JSONArray()
                 for (partIndex in 0 until parts.length()) {
                     val part = parts.optJSONObject(partIndex) ?: continue
-                    if (part.optString("type") in setOf("image_url", "input_image", "image")) {
+                    if (part.optString("type") in IMAGE_PART_TYPES) {
                         tokens += 4096
-                    } else text.put(part)
+                    } else {
+                        // 文本 part 只计正文 + 信封常量，不序列化整个 part。
+                        tokens += fastTextTokens(part.optString("text")) + 6
+                    }
                 }
-                copy.put("content", text)
-            } else copy.put("content", message.opt("content"))
-            return tokens + textTokens(copy.toString()) + 8
+                tokens += 4
+            } else {
+                when (val c = message.opt("content")) {
+                    null, JSONObject.NULL -> Unit
+                    is String -> tokens += fastTextTokens(c)
+                    else -> tokens += fastTextTokens(c.toString())
+                }
+            }
+            return tokens
         }
+
+        private val IMAGE_PART_TYPES = setOf("image_url", "input_image", "image")
     }
 }

@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.tool
 
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.ResponsesEphemeralState
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -26,7 +27,10 @@ internal class ConversationHistoryTool(
         val entries = JSONArray()
         while (index < history.size && remaining > 0 && entries.length() < 20) {
             val message = history[index]
-            val text = AgentConversationCodec.toJsonObject(message).toString()
+            // output items 属于协议内部状态：不通过历史读取工具暴露给模型，也避免分页文本被推理链撑大。
+            val text = AgentConversationCodec.toJsonObject(message)
+                .apply { remove(ResponsesEphemeralState.OUTPUT_ITEMS_KEY) }
+                .toString()
             if (query.isNotBlank() && !text.contains(query, ignoreCase = true)) {
                 index++
                 offset = 0

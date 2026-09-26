@@ -414,6 +414,23 @@ internal fun AgentConversationMessages(
     // 流式消息的渲染会话按 id 提升到列表层持有：item 滚出视口被 LazyColumn 销毁后，
     // 滑回时复用同一解析会话与打字机进度，避免整段内容重新解析并重放显现动画。
     val streamingMarkdownStates = remember { mutableStateMapOf<String, StreamingMarkdownState>() }
+    // 每个状态持有解析会话、AST 快照与显现全文副本，单会话内会随流式消息数线性累积；
+    // 因此另用独立的插入顺序队列限制缓存条目数：超限淘汰最早插入的条目，最新插入的
+    // 流式条目在队尾、不会被同一轮淘汰；被淘汰的旧消息退回无状态渲染，正确性不变
+    // （条目缺席时读取端回退到组合内 remember，与历史消息加载路径一致）。
+    val streamingMarkdownStateOrder = remember { ArrayDeque<String>() }
+
+    fun retainStreamingMarkdownState(id: String): StreamingMarkdownState {
+        streamingMarkdownStates[id]?.let { return it }
+        val state = StreamingMarkdownState()
+        streamingMarkdownStates[id] = state
+        streamingMarkdownStateOrder.addLast(id)
+        while (streamingMarkdownStateOrder.size > MAX_RETAINED_STREAMING_MARKDOWN_STATES) {
+            streamingMarkdownStates.remove(streamingMarkdownStateOrder.removeFirst())
+        }
+        return state
+    }
+
     val bottomItemIndex = timelineEntries.size
     val isUserDragging by scrollState.interactionSource.collectIsDraggedAsState()
     val isAtBottom by remember(scrollState) {
@@ -635,9 +652,7 @@ internal fun AgentConversationMessages(
                             retainedStreamingState = (message as? AgentMessageUi)
                                 ?.takeIf { it.isStreaming || streamingMarkdownStates.containsKey(it.id) }
                                 ?.let { agentMessage ->
-                                    streamingMarkdownStates.getOrPut(agentMessage.id) {
-                                        StreamingMarkdownState()
-                                    }
+                                    retainStreamingMarkdownState(agentMessage.id)
                                 },
                             onSuggestionClick = onSuggestionClick,
                             onRunTraceClick = onRunTraceClick,
@@ -662,9 +677,7 @@ internal fun AgentConversationMessages(
                     is AgentTimelineEntry.WorkProcess -> {
                         entry.messages.forEach { message ->
                             if (message is ThinkingMessageUi && message.isStreaming) {
-                                streamingMarkdownStates.getOrPut(message.id) {
-                                    StreamingMarkdownState()
-                                }
+                                retainStreamingMarkdownState(message.id)
                             }
                         }
                         AgentWorkProcess(
@@ -960,6 +973,9 @@ private const val BOTTOM_FOLLOW_MAX_SPEED_DP_PER_SECOND = 1400f
 private const val BOTTOM_FOLLOW_MIN_STEP_PX = 1f
 private const val BOTTOM_FOLLOW_SNAP_DISTANCE_PX = 3f
 private const val BOTTOM_FOLLOW_INSTANT_JUMP_PX = 2400f
+
+// 流式 Markdown 缓存状态（解析会话、AST 快照、显现全文副本）按消息 id 保留的数量上限。
+private const val MAX_RETAINED_STREAMING_MARKDOWN_STATES = 64
 
 internal fun resolveKeepBottomAnchored(
     current: Boolean,

@@ -14,6 +14,11 @@ internal class LogThrottle(
         require(windowMs >= 0L) { "日志节流窗口不能为负数" }
 
         val now = uptimeMillis()
+        // 容量保护：动态键（runId/host/status 拼接等）会持续增长；仅当“新键进入且已满”时整体清空，
+        // ConcurrentHashMap.clear() 线程安全且实现最简；代价是被清空的键窗口重置、最多再多放行一条日志（节流为尽力而为语义）。
+        if (lastAcceptedAt.size >= MAX_ENTRIES && !lastAcceptedAt.containsKey(key)) {
+            lastAcceptedAt.clear()
+        }
         var accepted = false
         lastAcceptedAt.compute(key) { _, previous ->
             if (previous == null || now < previous || now - previous >= windowMs) {
@@ -24,5 +29,10 @@ internal class LogThrottle(
             }
         }
         return accepted
+    }
+
+    private companion object {
+        /** lastAcceptedAt 条目上限；新键进入且超限时整体清空。 */
+        const val MAX_ENTRIES = 512
     }
 }

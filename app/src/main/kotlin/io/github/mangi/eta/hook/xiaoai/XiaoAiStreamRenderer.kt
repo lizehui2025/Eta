@@ -28,6 +28,7 @@ internal class XiaoAiStreamRenderer(
     private val streamedText = StringBuilder()
     private val pendingText = AtomicReference<String?>(null)
     private val flushPosted = AtomicBoolean(false)
+    private val flushRunnable = Runnable { flush() }
     private val cardRetryCount = AtomicInteger()
 
     fun onEvent(event: AgentEvent) {
@@ -90,6 +91,7 @@ internal class XiaoAiStreamRenderer(
     fun cancel(loader: ClassLoader = classLoader) {
         if (!cancelled.compareAndSet(false, true)) return
         pendingText.set(null)
+        mainHandler.removeCallbacks(flushRunnable)
         mainHandler.post {
             runCatching {
                 val player = ttsPlayer(loader) ?: return@runCatching
@@ -102,11 +104,11 @@ internal class XiaoAiStreamRenderer(
         if (cancelled.get() || text.isBlank()) return
         pendingText.set(text)
         if (immediate) {
-            mainHandler.post { flush() }
+            mainHandler.post(flushRunnable)
             return
         }
         if (flushPosted.compareAndSet(false, true)) {
-            mainHandler.postDelayed(::flush, STREAM_FLUSH_DELAY_MILLIS)
+            mainHandler.postDelayed(flushRunnable, STREAM_FLUSH_DELAY_MILLIS)
         }
     }
 
@@ -121,7 +123,7 @@ internal class XiaoAiStreamRenderer(
         if (targetCard == null) {
             pendingText.compareAndSet(null, text)
             if (cardRetryCount.incrementAndGet() <= MAX_CARD_RETRIES) {
-                mainHandler.postDelayed(::flush, CARD_RETRY_DELAY_MILLIS)
+                mainHandler.postDelayed(flushRunnable, CARD_RETRY_DELAY_MILLIS)
             }
             return
         }

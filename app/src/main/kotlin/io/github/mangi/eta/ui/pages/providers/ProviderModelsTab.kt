@@ -754,6 +754,29 @@ private fun ModelEditDialog(
         contextWindowOverrideText,
         context.getString(R.string.page_the_context_length_must_be_a_positive_integer_06ca7a),
     )
+    var requestOptionsDraft by remember(model.id, isNew) {
+        mutableStateOf(formatModelRequestOptions(model.requestOptions))
+    }
+    var customBodyText by remember(model.id, isNew) {
+        mutableStateOf(formatCustomBodyJson(model.customBody))
+    }
+    val requestOptionsParse = parseModelRequestOptions(requestOptionsDraft)
+    val customBodyParse = parseCustomBodyJson(customBodyText)
+    val customBodyError = if (customBodyParse is CustomBodyParseResult.Invalid) {
+        context.getString(R.string.provider_model_custom_body_invalid)
+    } else {
+        null
+    }
+
+    fun requestOptionError(field: ModelRequestOptionField): String? =
+        requestOptionsParse.fieldErrors[field]?.let { error ->
+            context.getString(
+                when (error) {
+                    ModelRequestOptionError.NOT_A_NUMBER -> R.string.provider_model_option_invalid_number
+                    ModelRequestOptionError.OUT_OF_RANGE -> R.string.provider_model_option_out_of_range
+                },
+            )
+        }
 
     fun resetAutomaticReasoning() {
         reasoningOverrideActive = false
@@ -770,6 +793,8 @@ private fun ModelEditDialog(
         contextWindowOverride = contextWindowOverrideText.trim()
             .takeIf(String::isNotEmpty)
             ?.toInt(),
+        requestOptions = requestOptionsParse.options,
+        customBody = (customBodyParse as? CustomBodyParseResult.Success)?.customBody.orEmpty(),
         reasoningOverride = reasoningEnabled.takeIf { reasoningOverrideActive },
         reasoningCapabilitiesOverride = if (reasoningOverrideActive && reasoningEnabled) {
             val canDisable = ReasoningEffort.OFF in selectedReasoningEfforts
@@ -869,6 +894,97 @@ private fun ModelEditDialog(
                 }
                 Text(
                     text = stringResource(R.string.ui_this_value_is_used_for_session_clipping_and_context__c3f9e7),
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                )
+                Text(
+                    text = stringResource(R.string.provider_model_request_options_title),
+                    style = MiuixTheme.textStyles.subtitle,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                Text(
+                    text = stringResource(R.string.provider_model_request_options_hint),
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                )
+                ModelRequestOptionTextField(
+                    value = requestOptionsDraft.temperature,
+                    onValueChange = { requestOptionsDraft = requestOptionsDraft.copy(temperature = it) },
+                    label = stringResource(R.string.provider_model_option_temperature),
+                    keyboardType = KeyboardType.Decimal,
+                    error = requestOptionError(ModelRequestOptionField.TEMPERATURE),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                ModelRequestOptionTextField(
+                    value = requestOptionsDraft.topP,
+                    onValueChange = { requestOptionsDraft = requestOptionsDraft.copy(topP = it) },
+                    label = stringResource(R.string.provider_model_option_top_p),
+                    keyboardType = KeyboardType.Decimal,
+                    error = requestOptionError(ModelRequestOptionField.TOP_P),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                ModelRequestOptionTextField(
+                    value = requestOptionsDraft.topK,
+                    onValueChange = { requestOptionsDraft = requestOptionsDraft.copy(topK = it) },
+                    label = stringResource(R.string.provider_model_option_top_k),
+                    keyboardType = KeyboardType.Number,
+                    error = requestOptionError(ModelRequestOptionField.TOP_K),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                ModelRequestOptionTextField(
+                    value = requestOptionsDraft.maxOutputTokens,
+                    onValueChange = { requestOptionsDraft = requestOptionsDraft.copy(maxOutputTokens = it) },
+                    label = stringResource(R.string.provider_model_option_max_output_tokens),
+                    keyboardType = KeyboardType.Number,
+                    error = requestOptionError(ModelRequestOptionField.MAX_OUTPUT_TOKENS),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                ModelRequestOptionTextField(
+                    value = requestOptionsDraft.presencePenalty,
+                    onValueChange = { requestOptionsDraft = requestOptionsDraft.copy(presencePenalty = it) },
+                    label = stringResource(R.string.provider_model_option_presence_penalty),
+                    keyboardType = KeyboardType.Decimal,
+                    error = requestOptionError(ModelRequestOptionField.PRESENCE_PENALTY),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                ModelRequestOptionTextField(
+                    value = requestOptionsDraft.frequencyPenalty,
+                    onValueChange = { requestOptionsDraft = requestOptionsDraft.copy(frequencyPenalty = it) },
+                    label = stringResource(R.string.provider_model_option_frequency_penalty),
+                    keyboardType = KeyboardType.Decimal,
+                    error = requestOptionError(ModelRequestOptionField.FREQUENCY_PENALTY),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                ModelRequestOptionTextField(
+                    value = requestOptionsDraft.seed,
+                    onValueChange = { requestOptionsDraft = requestOptionsDraft.copy(seed = it) },
+                    label = stringResource(R.string.provider_model_option_seed),
+                    keyboardType = KeyboardType.Number,
+                    error = requestOptionError(ModelRequestOptionField.SEED),
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                TextField(
+                    value = customBodyText,
+                    onValueChange = { customBodyText = it },
+                    label = stringResource(R.string.provider_model_custom_body_title),
+                    singleLine = false,
+                    minLines = 4,
+                    maxLines = 14,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                customBodyError?.let { message ->
+                    Text(
+                        text = message,
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = StatusError,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                Text(
+                    text = stringResource(R.string.provider_model_custom_body_hint),
                     style = MiuixTheme.textStyles.footnote2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
@@ -980,11 +1096,43 @@ private fun ModelEditDialog(
             confirmEnabled = !isSaving &&
                 displayName.isNotBlank() &&
                 modelId.isNotBlank() &&
-                contextError == null,
+                contextError == null &&
+                requestOptionsParse.isValid &&
+                customBodyError == null,
             cancelEnabled = !isSaving,
             onCancel = onDismiss,
             onConfirm = { onSubmit(updated()) },
             modifier = Modifier.padding(top = 16.dp),
+        )
+    }
+}
+
+/** 采样与输出参数字段：单行数字键盘 + 字段级错误提示，样式与弹窗内其他输入框一致。 */
+@Composable
+private fun ModelRequestOptionTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    keyboardType: KeyboardType,
+    error: String?,
+) {
+    TextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = label,
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = keyboardType,
+            imeAction = ImeAction.Next,
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    error?.let { message ->
+        Text(
+            text = message,
+            style = MiuixTheme.textStyles.footnote2,
+            color = StatusError,
+            modifier = Modifier.padding(top = 4.dp),
         )
     }
 }

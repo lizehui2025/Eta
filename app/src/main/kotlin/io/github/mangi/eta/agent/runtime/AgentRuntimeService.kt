@@ -242,6 +242,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                     attachRun(
                         runId = AgentRuntimeWire.runIdFromBundle(msg.data ?: return),
                         replyTo = msg.replyTo,
+                        senderUid = msg.sendingUid,
                     )
                 }
             }
@@ -331,6 +332,8 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             operation = request.operation,
             eventSink = { event -> sendEventTo(replyTo, event) },
             resultSink = { result -> sendResultTo(replyTo, result) },
+            // 启动方绑定失效（入口进程被回收）后不再保留该订阅者。
+            initialClientAlive = { replyTo.isPeerAlive() },
         )
         // Root 入口保留原有绑定服务生命周期；新增 FGS 不能成为厂商后台入口的新前置权限。
         val allowBoundFallback = RootAccess.isGranted
@@ -622,7 +625,16 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         }
     }
 
-    private fun attachRun(runId: String, replyTo: Messenger?) {
+    /**
+     * 客户端绑定存活探测：Messenger 缺失或远端进程已死亡（binder 失活）时返回 false；
+     * 同进程绑定始终视为存活。Session 据此清理失效订阅者、跳过无效终态投递。
+     */
+    private fun Messenger?.isPeerAlive(): Boolean {
+        val target = this?.binder ?: return false
+        return runCatching { target.isBinderAlive && target.pingBinder() }.getOrDefault(false)
+    }
+
+    private fun attachRun(runId: String, replyTo: Messenger?, senderUid: Int) {
         val session = activeSession
         val attached = replyTo != null &&
             runId.isNotBlank() &&
@@ -631,6 +643,9 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                 eventSink = { event -> sendEventTo(replyTo, event) },
                 resultSink = { result -> sendResultTo(replyTo, result) },
                 onReplayComplete = { sendAttachRunResponse(runId, replyTo, attached = true) },
+                // 同一发送方（uid）的重复 attach（重连/重试）取代旧订阅者，避免无界累积。
+                clientKey = senderUid,
+                isClientAlive = { replyTo.isPeerAlive() },
             )
         if (!attached) sendAttachRunResponse(runId, replyTo, attached = false)
     }

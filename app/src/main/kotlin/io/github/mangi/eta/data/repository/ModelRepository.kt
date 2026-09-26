@@ -124,6 +124,7 @@ internal object ModelRepository {
                                     contextWindowOverride = stored.contextWindowOverride,
                                     reasoningOverride = stored.reasoningOverride,
                                     reasoningCapabilitiesOverride = stored.reasoningCapabilitiesOverride,
+                                    requestOptions = stored.requestOptions,
                                     source = stored.source,
                                     createdAt = stored.createdAt,
                                 )

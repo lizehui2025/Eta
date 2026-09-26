@@ -140,6 +140,52 @@ class AgentModelPickerProjectorTest {
         )
     }
 
+    @Test
+    fun latestContextUsage_exposesCacheHitFromTheSameAdoptedUsage() {
+        val usage = latestUsage(
+            TokenUsageUi(
+                contextTokens = 4_000,
+                inputTokens = 1_000,
+                cachedTokens = 900,
+            ),
+        )
+
+        assertEquals(90, usage.cacheHitPercent)
+        assertEquals(1_000, usage.lastInputTokens)
+        assertEquals(900, usage.lastCachedTokens)
+    }
+
+    @Test
+    fun latestContextUsage_cacheHitIsNullWithoutValidInputOrCache() {
+        assertNull(latestUsage(TokenUsageUi(contextTokens = 10_000)).cacheHitPercent)
+        assertNull(
+            latestUsage(TokenUsageUi(contextTokens = 10_000, inputTokens = 1_000)).cacheHitPercent,
+        )
+        assertNull(
+            latestUsage(TokenUsageUi(contextTokens = 10_000, inputTokens = 0, cachedTokens = 0))
+                .cacheHitPercent,
+        )
+    }
+
+    @Test
+    fun latestContextUsage_cacheHitRoundsToNearestPercent() {
+        val twoOfThree = latestUsage(
+            TokenUsageUi(contextTokens = 3_000, inputTokens = 3, cachedTokens = 2),
+        )
+        assertEquals(67, twoOfThree.cacheHitPercent)
+
+        val cachedAboveInput = latestUsage(
+            TokenUsageUi(contextTokens = 3_000, inputTokens = 1_000, cachedTokens = 2_000),
+        )
+        assertEquals(100, cachedAboveInput.cacheHitPercent)
+    }
+
+    private fun latestUsage(usage: TokenUsageUi): AgentContextUsageUi =
+        latestContextUsage(
+            messages = listOf(AgentMessageUi(id = "message", content = "content", usage = usage)),
+            selectedModel = null,
+        )
+
     private fun provider(
         id: String,
         name: String = id,

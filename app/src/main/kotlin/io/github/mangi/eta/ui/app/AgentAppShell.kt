@@ -2,6 +2,7 @@ package io.github.mangi.eta.ui.app
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -20,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -27,7 +29,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
+import io.github.mangi.eta.agent.model.AgentMode
 import io.github.mangi.eta.ui.components.AdaptiveTopAppBar
+import io.github.mangi.eta.ui.components.AgentModeSwitch
 import io.github.mangi.eta.ui.components.ConversationSidePaneScaffold
 import io.github.mangi.eta.ui.components.MiuixBackButton
 import io.github.mangi.eta.ui.components.TopBarBackdrop
@@ -58,11 +62,14 @@ import top.yukonga.miuix.kmp.window.WindowListPopup
  * - Settings 由标准二级页骨架自己提供 TopAppBar，壳层在此路由不重复绘制。
  */
 @Composable
-fun AgentAppShell(
+internal fun AgentAppShell(
     currentRoute: AppRoute?,
     isCurrentRoute: Boolean,
     conversationPaneState: ConversationPaneUiState?,
     isConversationPaneOpen: Boolean,
+    /** 当前交互模式：聊天保存记忆，编码不主动保存。 */
+    agentMode: AgentMode,
+    onAgentModeChange: (AgentMode) -> Unit,
     onBack: () -> Unit,
     onOpenConversationPane: () -> Unit,
     onDismissConversationPane: () -> Unit,
@@ -104,6 +111,8 @@ fun AgentAppShell(
                             route = currentRoute,
                             scrollBehavior = scrollBehavior,
                             color = topBarColor,
+                            agentMode = agentMode,
+                            onAgentModeChange = onAgentModeChange,
                             onBack = onBack,
                             onOpenConversationPane = onOpenConversationPane,
                             onNewConversation = onNewConversation,
@@ -163,6 +172,8 @@ private fun AgentTopBar(
     route: AppRoute?,
     scrollBehavior: ScrollBehavior,
     color: Color,
+    agentMode: AgentMode,
+    onAgentModeChange: (AgentMode) -> Unit,
     onBack: () -> Unit,
     onOpenConversationPane: () -> Unit,
     onNewConversation: () -> Unit,
@@ -176,16 +187,23 @@ private fun AgentTopBar(
 ) {
     val isHome = route is AppRoute.Home
     val navigationIcon: @Composable () -> Unit = {
-        if (isHome) {
-            IconButton(onClick = onOpenConversationPane) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Outlined.ShortText,
-                    modifier = Modifier.size(24.dp),
-                    contentDescription = stringResource(R.string.action_conversation_history),
-                )
+        when {
+            // 聊天/编码模式切换放在左上角：首页紧邻历史入口，独立对话页紧邻返回键。
+            isHome -> Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onOpenConversationPane) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Outlined.ShortText,
+                        modifier = Modifier.size(24.dp),
+                        contentDescription = stringResource(R.string.action_conversation_history),
+                    )
+                }
+                AgentModeSwitch(mode = agentMode, onModeChange = onAgentModeChange)
             }
-        } else {
-            MiuixBackButton(onClick = onBack)
+            route is AppRoute.Chat -> Row(verticalAlignment = Alignment.CenterVertically) {
+                MiuixBackButton(onClick = onBack)
+                AgentModeSwitch(mode = agentMode, onModeChange = onAgentModeChange)
+            }
+            else -> MiuixBackButton(onClick = onBack)
         }
     }
     val actions: @Composable RowScope.() -> Unit = {

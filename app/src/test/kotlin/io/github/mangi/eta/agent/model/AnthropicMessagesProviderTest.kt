@@ -3,9 +3,11 @@ package io.github.mangi.eta.agent.model
 import com.sun.net.httpserver.HttpServer
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.data.model.AnthropicProviderSetting
+import io.github.mangi.eta.data.model.ModelRequestOptions
 import io.github.mangi.eta.data.model.ProviderTypes
 import java.io.OutputStream
 import java.net.InetSocketAddress
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -270,6 +272,212 @@ class AnthropicMessagesProviderTest {
         }
     }
 
+    @Test
+    fun requestBodyCarriesCacheControlBreakpointsWhenAllowed() {
+        val body = buildString {
+            append(blockStart(0, JSONObject().put("type", "text").put("text", "缓存就绪")))
+            append(blockStop(0))
+            append(event("message_stop", JSONObject()))
+        }
+
+        val requestBody = AtomicReference<String>()
+        withAnthropicServer(body, onRequest = requestBody::set) { baseUrl ->
+            val response = AnthropicMessagesProvider.complete(
+                request = ProviderRequest(
+                    config = AgentModelClient.ModelConfig(
+                        providerType = ProviderTypes.ANTHROPIC,
+                        baseUrl = baseUrl,
+                        apiKey = "key",
+                        model = "claude-sonnet-5",
+                        systemPrompt = "system"
+                    ),
+                    messages = JSONArray()
+                        .put(JSONObject().put("role", "system").put("content", "系统提示"))
+                        .put(JSONObject().put("role", "user").put("content", "第一问"))
+                        .put(JSONObject().put("role", "assistant").put("content", "第一答"))
+                        .put(JSONObject().put("role", "user").put("content", "第二问")),
+                    tools = JSONArray()
+                        .put(toolSpec("observe_screen"))
+                        .put(toolSpec("tap_element"))
+                ),
+                runController = AgentRunController(),
+            )
+
+            assertEquals("缓存就绪", response.assistantMessage.getString("content"))
+            val request = JSONObject(requestBody.get())
+
+            val system = request.getJSONArray("system")
+            assertEquals(1, system.length())
+            assertEquals("text", system.getJSONObject(0).getString("type"))
+            assertEquals("系统提示", system.getJSONObject(0).getString("text"))
+            assertEquals("ephemeral", system.getJSONObject(0).getJSONObject("cache_control").getString("type"))
+
+            val tools = request.getJSONArray("tools")
+            assertEquals(2, tools.length())
+            assertFalse(tools.getJSONObject(0).has("cache_control"))
+            assertEquals("tap_element", tools.getJSONObject(1).getString("name"))
+            assertEquals("ephemeral", tools.getJSONObject(1).getJSONObject("cache_control").getString("type"))
+
+            val messages = request.getJSONArray("messages")
+            assertEquals(3, messages.length())
+            val firstBlocks = messages.getJSONObject(0).getJSONArray("content")
+            assertFalse(firstBlocks.getJSONObject(firstBlocks.length() - 1).has("cache_control"))
+            assertFalse(messages.getJSONObject(1).getJSONArray("content").getJSONObject(0).has("cache_control"))
+            val lastBlocks = messages.getJSONObject(messages.length() - 1).getJSONArray("content")
+            val lastBlock = lastBlocks.getJSONObject(lastBlocks.length() - 1)
+            assertEquals("第二问", lastBlock.getString("text"))
+            assertEquals("ephemeral", lastBlock.getJSONObject("cache_control").getString("type"))
+        }
+    }
+
+    @Test
+    fun retriesWithoutCacheControlWhenEndpointRejectsField() {
+        val requestBodies = CopyOnWriteArrayList<String>()
+        val streamBody = buildString {
+            append(blockStart(0, JSONObject().put("type", "text").put("text", "降级成功")))
+            append(blockStop(0))
+            append(event("message_stop", JSONObject()))
+        }
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val executor = Executors.newSingleThreadExecutor()
+        server.executor = executor
+        server.createContext("/v1/messages") { exchange ->
+            requestBodies += exchange.requestBody.use { it.readBytes().toString(Charsets.UTF_8) }
+            if (requestBodies.size == 1) {
+                val error = "{\"error\":{\"message\":\"Unknown parameter: cache_control\"}}"
+                    .toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "application/json")
+                exchange.sendResponseHeaders(400, error.size.toLong())
+                exchange.responseBody.use { output -> output.write(error) }
+            } else {
+                val sse = streamBody.toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "text/event-stream")
+                exchange.sendResponseHeaders(200, sse.size.toLong())
+                exchange.responseBody.use { output -> output.write(sse) }
+            }
+        }
+        server.start()
+        try {
+            val baseUrl = "http://127.0.0.1:${server.address.port}"
+            val events = mutableListOf<ProviderEvent>()
+            val response = AnthropicMessagesProvider.complete(
+                request = ProviderRequest(
+                    config = AgentModelClient.ModelConfig(
+                        providerType = ProviderTypes.ANTHROPIC,
+                        baseUrl = baseUrl,
+                        apiKey = "key",
+                        model = "claude-sonnet-5",
+                        systemPrompt = "system"
+                    ),
+                    messages = JSONArray()
+                        .put(JSONObject().put("role", "system").put("content", "系统提示"))
+                        .put(JSONObject().put("role", "user").put("content", "hi")),
+                    tools = JSONArray().put(toolSpec("observe_screen"))
+                ),
+                runController = AgentRunController(),
+                onEvent = events::add,
+            )
+
+            assertEquals("降级成功", response.assistantMessage.getString("content"))
+            assertEquals(2, requestBodies.size)
+            assertTrue(requestBodies[0].contains("cache_control"))
+            assertFalse(requestBodies[1].contains("cache_control"))
+            assertEquals(
+                listOf(400, 200),
+                events.filterIsInstance<ProviderEvent.ResponseHeaders>().map { it.httpCode }
+            )
+        } finally {
+            server.stop(0)
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun requestOptionsOverrideDefaultMaxTokensAndCarryTopK() {
+        val body = buildString {
+            append(blockStart(0, JSONObject().put("type", "text").put("text", "ok")))
+            append(blockStop(0))
+            append(event("message_stop", JSONObject()))
+        }
+
+        val requestBody = AtomicReference<String>()
+        withAnthropicServer(body, onRequest = requestBody::set) { baseUrl ->
+            AnthropicMessagesProvider.complete(
+                request = ProviderRequest(
+                    config = AgentModelClient.ModelConfig(
+                        providerType = ProviderTypes.ANTHROPIC,
+                        baseUrl = baseUrl,
+                        apiKey = "key",
+                        model = "claude-sonnet-5",
+                        systemPrompt = "system",
+                        requestOptions = ModelRequestOptions(
+                            temperature = 0.4,
+                            topP = 0.8,
+                            topK = 48,
+                            maxOutputTokens = 8192,
+                            presencePenalty = null,
+                            frequencyPenalty = null,
+                            seed = null,
+                        ),
+                    ),
+                    messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
+                    tools = JSONArray(),
+                ),
+                runController = AgentRunController(),
+            )
+
+            val request = JSONObject(requestBody.get())
+            assertEquals(8192, request.getInt("max_tokens"))
+            assertEquals(48, request.getInt("top_k"))
+            assertEquals(0.4, request.getDouble("temperature"), 1e-9)
+            assertEquals(0.8, request.getDouble("top_p"), 1e-9)
+            assertFalse(request.has("max_completion_tokens"))
+        }
+    }
+
+    @Test
+    fun codingModeForcesTemperatureAndKeepsTopKAndDefaultMaxTokens() {
+        val body = buildString {
+            append(blockStart(0, JSONObject().put("type", "text").put("text", "ok")))
+            append(blockStop(0))
+            append(event("message_stop", JSONObject()))
+        }
+
+        val requestBody = AtomicReference<String>()
+        withAnthropicServer(body, onRequest = requestBody::set) { baseUrl ->
+            AnthropicMessagesProvider.complete(
+                request = ProviderRequest(
+                    config = AgentModelClient.ModelConfig(
+                        providerType = ProviderTypes.ANTHROPIC,
+                        baseUrl = baseUrl,
+                        apiKey = "key",
+                        model = "claude-sonnet-5",
+                        systemPrompt = "system",
+                        codingMode = true,
+                        requestOptions = ModelRequestOptions(
+                            temperature = 0.7,
+                            topP = null,
+                            topK = 48,
+                            maxOutputTokens = null,
+                            presencePenalty = null,
+                            frequencyPenalty = null,
+                            seed = null,
+                        ),
+                    ),
+                    messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
+                    tools = JSONArray(),
+                ),
+                runController = AgentRunController(),
+            )
+
+            val request = JSONObject(requestBody.get())
+            assertEquals(0.1, request.getDouble("temperature"), 1e-9)
+            assertEquals(48, request.getInt("top_k"))
+            assertEquals(4096, request.getInt("max_tokens"))
+            assertFalse(request.has("max_completion_tokens"))
+        }
+    }
+
     private fun providerRequest(baseUrl: String) = ProviderRequest(
         config = AgentModelClient.ModelConfig(
             providerType = ProviderTypes.ANTHROPIC,
@@ -281,6 +489,16 @@ class AnthropicMessagesProviderTest {
         messages = JSONArray().put(JSONObject().put("role", "user").put("content", "测试推理")),
         tools = JSONArray(),
     )
+
+    private fun toolSpec(name: String) = JSONObject()
+        .put("type", "function")
+        .put(
+            "function",
+            JSONObject()
+                .put("name", name)
+                .put("description", "工具 $name")
+                .put("parameters", JSONObject().put("type", "object"))
+        )
 
     private fun blockStart(index: Int, content: JSONObject) =
         event("content_block_start", JSONObject().put("index", index).put("content_block", content))

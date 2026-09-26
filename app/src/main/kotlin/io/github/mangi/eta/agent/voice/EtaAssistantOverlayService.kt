@@ -47,6 +47,7 @@ import io.github.mangi.eta.ui.MainActivity
 import io.github.mangi.eta.ui.app.AgentAppTheme
 import io.github.mangi.eta.data.model.AppearanceSettings
 import io.github.mangi.eta.data.repository.AppearanceSettingsRepository
+import io.github.mangi.eta.ui.app.AgentRunEventCoalescer
 import io.github.mangi.eta.ui.app.AgentRunMessageProjector
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import io.github.mangi.eta.ui.model.AgentMessageUi
@@ -86,6 +87,9 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
     }
     private val runtimeClient = AgentRuntimeClient(this, AndroidAgentLogger)
     private val runMessageProjector = AgentRunMessageProjector()
+    // 与主会话（AgentAppState）同级的流式合帧：文本增量先累积，40ms 窗口后一次性投影。
+    private val runEventCoalescer = AgentRunEventCoalescer()
+    private val runDeltaFlushJobs = mutableMapOf<String, Job>()
     private val conversationKey = "eta_assistant_${UUID.randomUUID()}"
     private var conversationHistory = emptyList<AgentModelClient.ConversationMessage>()
 
@@ -416,6 +420,9 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
                 if (activeRunId != runId) return@withContext false
                 activeRunId = null
                 runJob = null
+                // 终态定稿前强制冲刷：run 返回时可能仍有未到合帧窗口的增量，
+                // 必须先合并进 uiState，finishRunMessages 才能得出与现状一致的最终消息。
+                flushPendingRunDelta(runId)
                 if (result.contextSnapshot != null) {
                     conversationHistory = result.contextSnapshot.messages
                 } else if (result.ok) {
@@ -458,7 +465,48 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
             if (AgentOverlayVisibilityPolicy.shouldDismissEntrySurfaceFor(event)) {
                 hideForForegroundOperation()
             }
+            if (event is AgentEvent.AssistantBlockDelta) {
+                // 只有文本增量进合帧窗口；TOOL_CALL 增量与空增量对 uiState 无影响，
+                // 与主会话一样直接丢弃（可见性策略已在上面按原事件即时求值）。
+                if (event.kind == AgentEvent.AssistantBlockKind.TOOL_CALL || event.delta.isEmpty()) {
+                    return@launch
+                }
+                runEventCoalescer.append(runId, event)?.let { ready ->
+                    uiState = projectRuntimeEvent(runId, ready, uiState)
+                }
+                scheduleRunDeltaFlush(runId)
+                return@launch
+            }
+            // 非增量事件（块边界、工具开始/结束、终态、结果等）不得延迟：
+            // 先把已缓冲增量按顺序落地，再立即投影当前事件，可见顺序与现状一致。
+            flushPendingRunDelta(runId)
             uiState = projectRuntimeEvent(runId, event, uiState)
+        }
+    }
+
+    /** 合帧窗口到期后把缓冲的文本增量一次性投影；run 已结束时只丢弃不可能再显示的残留。 */
+    private fun scheduleRunDeltaFlush(runId: String) {
+        if (runDeltaFlushJobs[runId]?.isActive == true) return
+        runDeltaFlushJobs[runId] = scope.launch(Dispatchers.Main.immediate) {
+            delay(STREAM_DELTA_FLUSH_INTERVAL_MS)
+            runDeltaFlushJobs.remove(runId)
+            if (activeRunId != runId) {
+                runEventCoalescer.flush(runId)
+                return@launch
+            }
+            applyPendingRunDelta(runId)
+        }
+    }
+
+    /** 立即落地该 run 的缓冲增量并取消未到期的合帧任务。 */
+    private fun flushPendingRunDelta(runId: String) {
+        runDeltaFlushJobs.remove(runId)?.cancel()
+        applyPendingRunDelta(runId)
+    }
+
+    private fun applyPendingRunDelta(runId: String) {
+        runEventCoalescer.flush(runId)?.let { ready ->
+            uiState = projectRuntimeEvent(runId, ready, uiState)
         }
     }
 
@@ -751,6 +799,8 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
     private fun stopCurrentRun() {
         val runId = activeRunId
         if (runId != null) {
+            // 手动停止也要先落地缓冲增量，否则定稿文本会缺最后一小段。
+            flushPendingRunDelta(runId)
             activeRunId = null
             requestRuntimeCancellation(runId)
             runJob?.cancel()
@@ -776,6 +826,9 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
 
     private fun cancelCurrentRun() {
         val runId = activeRunId ?: return
+        // 取消/停服务路径（含 onDestroy、浮窗关闭、入口重建）同样强制冲刷，
+        // 不把已缓冲文本留在合并队列里等一个永远不会再渲染的窗口。
+        flushPendingRunDelta(runId)
         activeRunId = null
         requestRuntimeCancellation(runId)
         runJob?.cancel()
@@ -976,6 +1029,12 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
         private const val SYNTHETIC_STOPPED = "eta_status:stopped"
         private const val SYNTHETIC_RUNTIME_FAILED = "eta_status:runtime_failed"
         private const val FOREGROUND_DISMISS_TIMEOUT_MS = 2_000L
+
+        /**
+         * 与主会话 `AgentAppState` 同级的流式合帧窗口（那边是 private，无法直接引用），
+         * 保持同样的 40ms，避免浮窗与主会话的显现节奏不一致。
+         */
+        private const val STREAM_DELTA_FLUSH_INTERVAL_MS = 40L
         private val mainHandler = Handler(Looper.getMainLooper())
 
         @Volatile

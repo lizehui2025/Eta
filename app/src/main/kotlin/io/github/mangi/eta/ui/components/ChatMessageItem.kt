@@ -83,6 +83,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -194,10 +195,62 @@ internal fun rememberDataUrlBitmap(dataUrl: String): ImageBitmap? {
     return bitmap
 }
 
+/**
+ * dataUrl → 解码位图的进程级 LRU 缓存。
+ *
+ * 消息里的图片在 LazyColumn 滚出视口后会被销毁，滚回来时 remember 状态已不存在，只能重新
+ * 做 base64 解码与整图采样解码；这里按 dataUrl 记住最近几条结果，命中即复用同一 ImageBitmap。
+ * 解码入参、采样率与像素内容都不变，所以渲染结果与加缓存前完全一致。
+ *
+ * 容量按解码后字节数（16 MiB）与条目数（8）双重限制：采样后长边不超过 1024，ARGB_8888 下
+ * 单张最多约 4 MiB，16 MiB 约能同时留住 4 张大图或更多小图；条目上限兜住大量极小图。
+ * 淘汰只释放引用，不对位图调用 recycle（可能仍被 Compose 绘制使用），回收交给 GC。
+ */
+private const val DATA_URL_BITMAP_CACHE_MAX_BYTES = 16 * 1024 * 1024
+private const val DATA_URL_BITMAP_CACHE_MAX_ENTRIES = 8
+
+private class DataUrlBitmapLruCache {
+    private data class Key(val maxLongEdge: Int, val dataUrl: String)
+
+    private val lock = Any()
+    private val entries = LinkedHashMap<Key, ImageBitmap>(16, 0.75f, true)
+    private var bytes = 0L
+
+    fun get(maxLongEdge: Int, dataUrl: String): ImageBitmap? = synchronized(lock) {
+        entries[Key(maxLongEdge, dataUrl)]
+    }
+
+    fun put(maxLongEdge: Int, dataUrl: String, bitmap: ImageBitmap) {
+        val size = bitmap.decodedByteCount()
+        synchronized(lock) {
+            entries.put(Key(maxLongEdge, dataUrl), bitmap)?.let { previous ->
+                bytes -= previous.decodedByteCount()
+            }
+            bytes += size
+            val iterator = entries.entries.iterator()
+            while (iterator.hasNext() && overCapacity()) {
+                bytes -= iterator.next().value.decodedByteCount()
+                iterator.remove()
+            }
+        }
+    }
+
+    /** 仅在上锁的临界区内读取 entries/bytes。 */
+    private fun overCapacity(): Boolean =
+        entries.size > DATA_URL_BITMAP_CACHE_MAX_ENTRIES ||
+            bytes > DATA_URL_BITMAP_CACHE_MAX_BYTES
+}
+
+private val dataUrlBitmapCache = DataUrlBitmapLruCache()
+
+private fun ImageBitmap.decodedByteCount(): Long =
+    asAndroidBitmap().allocationByteCount.toLong()
+
 internal fun decodeDataUrlBitmap(dataUrl: String, maxLongEdge: Int = 1024): ImageBitmap? {
+    dataUrlBitmapCache.get(maxLongEdge, dataUrl)?.let { cached -> return cached }
     val base64 = dataUrl.substringAfter("base64,", "")
     if (base64.isBlank()) return null
-    return runCatching {
+    val decoded = runCatching {
         val bytes = Base64.decode(base64, Base64.NO_WRAP)
         // 先只读边界算采样率，长边压到 maxLongEdge 以内，避免全图进内存再缩。
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -208,6 +261,8 @@ internal fun decodeDataUrlBitmap(dataUrl: String, maxLongEdge: Int = 1024): Imag
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap()
     }.getOrNull()
+    if (decoded != null) dataUrlBitmapCache.put(maxLongEdge, dataUrl, decoded)
+    return decoded
 }
 
 /**
@@ -2567,8 +2622,8 @@ private fun ToolActivityInline(
 /**
  * 浏览器工具的实时页面预览：迷你地址条 + 当前视口截图。
  *
- * 截图只在页面加载中或内容稳定后的低频节拍刷新；组合销毁即停止，
- * 不做后台轮询。截图不可用时退化为图标占位。
+ * 截图在页面加载中按快节拍刷新，页面稳定后再抓取一帧确认即停；
+ * 组合销毁即停止，不做后台轮询。截图不可用时退化为图标占位。
  */
 @Composable
 private fun BrowserPagePreview(
@@ -2584,14 +2639,26 @@ private fun BrowserPagePreview(
     }
     LaunchedEffect(snapshot.url, snapshot.isLoading, resumed) {
         if (!resumed) return@LaunchedEffect
-        while (true) {
+        suspend fun capturePreviewFrame() {
             val image = withContext(Dispatchers.IO) {
                 runCatching {
                     AgentBrowserSession.capturePreview()?.let { decodeDataUrlBitmap(it.dataUrl) }
                 }.getOrNull()
             }
             if (image != null) preview = image
-            delay(if (snapshot.isLoading) 1_200L else 4_000L)
+        }
+        if (snapshot.isLoading) {
+            // 加载中：保持 1.2s 快节拍刷新，直到 isLoading 变化重启本 effect。
+            while (true) {
+                capturePreviewFrame()
+                delay(1_200L)
+            }
+        } else {
+            // 页面已稳定：立即抓取一帧，再隔 4s 确认一帧后退出循环，
+            // 避免页面不再变化时仍无限抓屏；url / isLoading / resumed 变化时本 effect 重启。
+            capturePreviewFrame()
+            delay(4_000L)
+            capturePreviewFrame()
         }
     }
 

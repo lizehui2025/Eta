@@ -66,6 +66,7 @@ internal class AgentLoop(
         config, messages, systemCount, operationId, provider, runController,
         { sensitiveToolCallIds }, onEvent, onContextSnapshot, { transcript.length() },
         roleplay = roleplayContext != null,
+        sessionId = sessionId,
     )
     private var supplementIndex = initialSupplementIndex
 
@@ -108,7 +109,9 @@ internal class AgentLoop(
             publishTranscript()
             context.compact(roundTools)
             var requestMessages = roleplayContext?.projectMessages(messages, roundTools) ?: messages
-            var requestEstimate = AgentContextBudget.rawEstimate(requestMessages, roundTools)
+            // 复用会话 budget 的消息级缓存：非角色态下 requestMessages 与 messages 同身份，直接命中，
+            // 避免每轮把上百 KB 的 tool 结果重新 toString 一遍。旧实现用无缓存的静态 rawEstimate。
+            var requestEstimate = context.budget.rawEstimateCached(requestMessages, roundTools)
             var roundInputTokens: Int? = null
             var overflowAttempts = 0
             val reasoningLengthBeforeRound = accumulatedReasoning.length
@@ -148,7 +151,7 @@ internal class AgentLoop(
                         accumulatedReasoning.setLength(reasoningLengthBeforeRound)
                         context.compact(roundTools, force = true)
                         requestMessages = roleplayContext?.projectMessages(messages, roundTools) ?: messages
-                        requestEstimate = AgentContextBudget.rawEstimate(requestMessages, roundTools)
+                        requestEstimate = context.budget.rawEstimateCached(requestMessages, roundTools)
                         roundInputTokens = null
                         round++
                     }

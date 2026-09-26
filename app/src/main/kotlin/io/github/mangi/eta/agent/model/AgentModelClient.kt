@@ -12,6 +12,7 @@ import io.github.mangi.eta.data.model.CustomBody
 import io.github.mangi.eta.data.model.CustomHeader
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
+import io.github.mangi.eta.data.model.ModelRequestOptions
 import io.github.mangi.eta.data.model.ProviderTypes
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.provider.BuiltinProviders
@@ -99,6 +100,11 @@ internal object AgentModelClient {
         initialUserMessageId: String = "user-$operationId",
         initialSupplementIndex: Int = 0,
         roleplayContext: RoleplayRunContext? = null,
+        /**
+         * 交互模式快照：决定本次 run 是否保存持久记忆（编码模式不主动保存）。
+         * 写入许可在执行期由工具层动态复查；这里只影响提示词与工具表。
+         */
+        agentMode: AgentMode = AgentMode.CHAT,
         rewriteReply: Boolean = false,
         onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
         onTranscript: (List<ConversationMessage>) -> Unit = {},
@@ -106,6 +112,8 @@ internal object AgentModelClient {
     ): ModelResponse.Text {
         config.validate()
         val initialCapabilities = capabilitiesProvider()
+        // 角色会话语义上永远对现实记忆只读；编码模式不主动保存记忆。
+        val memoryWritable = roleplayContext == null && agentMode.memoryWritable
         val messages = AgentPromptBuilder.buildInitialMessages(
             config,
             prompt,
@@ -115,6 +123,7 @@ internal object AgentModelClient {
             memoryContext,
             rootAvailable = initialCapabilities.rootAvailable,
             roleplayContext = roleplayContext,
+            memoryWritable = memoryWritable,
         )
         if (rewriteReply) {
             messages.put(messages.length() - 1, AgentConversationCodec.userTextMessage(
@@ -143,7 +152,7 @@ internal object AgentModelClient {
                 skillGitHubDiscovery = true,
                 skillGitHubInstall = true,
                 memoryTools = memoryContext.enabled,
-                memoryWritable = roleplayContext == null,
+                memoryWritable = memoryWritable,
                 capabilities = capabilities,
             ).also { tools ->
                 for (index in 0 until additionalTools.length()) {
@@ -172,6 +181,7 @@ internal object AgentModelClient {
                 val sysSnapshot = AgentPromptBuilder.buildSystemMessages(
                     config, skillContext, memoryContext, initialCapabilities.rootAvailable, roleplayContext,
                     planGuidance = false,
+                    memoryWritable = memoryWritable,
                 )
                 AgentSubagentExecutor(
                     config = config,
@@ -219,6 +229,7 @@ internal object AgentModelClient {
                 if (capabilities.rootAvailable != promptRootAvailable) {
                     val systemMessages = AgentPromptBuilder.buildSystemMessages(
                         config, skillContext, memoryContext, capabilities.rootAvailable, roleplayContext,
+                        memoryWritable = memoryWritable,
                     )
                     for (index in 0 until systemMessages.length()) {
                         messages.put(index, systemMessages.getJSONObject(index))
@@ -310,7 +321,17 @@ internal object AgentModelClient {
         val reasoningCapabilities: ModelReasoningCapabilities? = null,
         val extraBodyJson: String = "",
         val customHeaders: List<CustomHeader> = emptyList(),
-        val customBody: List<CustomBody> = emptyList()
+        val customBody: List<CustomBody> = emptyList(),
+        /**
+         * 模型级 typed 采样参数（温度等）；仅主对话请求携带，压缩/改写等内部调用不继承。
+         * 缺失（旧 JSON/Bundle 未含该键）时解析为 null，行为与未配置一致。
+         */
+        val requestOptions: ModelRequestOptions? = null,
+        /**
+         * 编码模式快照：编码模式下所有请求统一 temperature=0.1，用户自定义请求体（extraBody/customBody）
+         * 仍可覆盖。默认 false，旧 JSON/Bundle 兼容。
+         */
+        val codingMode: Boolean = false
     ) {
         val effectiveReasoningEffort: ReasoningEffort
             get() = reasoningEffort ?: ReasoningEffort.fromLegacy(thinkingEnabled)
@@ -324,6 +345,7 @@ internal object AgentModelClient {
         val toolCallId: String = "",
         val reasoningContent: String = "",
         val toolCallsJson: String = "",
+        val responsesOutputItemsJson: String = "",
         val contextSummary: Boolean = false,
         val compactedUserTurns: Int = 0,
         val summaryThroughUserTurn: Int = 0,

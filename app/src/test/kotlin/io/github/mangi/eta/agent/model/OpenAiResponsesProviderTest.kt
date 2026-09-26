@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.data.model.CustomBody
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
+import io.github.mangi.eta.data.model.ModelRequestOptions
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ReasoningEffort
 import java.io.OutputStream
@@ -562,6 +563,150 @@ class OpenAiResponsesProviderTest {
         assertTrue(formatted.contains("[[1]]"))
         assertTrue(formatted.contains("来源："))
         assertTrue(formatted.contains("https://example.com/b"))
+    }
+
+    @Test
+    fun completeSendsPromptCacheKeyForSession() {
+        val requestBody = AtomicReference<String>()
+        val sessionId = "responses-cache-key-session"
+        val body = buildString {
+            append(event("response.output_text.delta", JSONObject().put("delta", "ok")))
+            append(
+                event(
+                    "response.completed",
+                    JSONObject().put("response", JSONObject().put("status", "completed")),
+                ),
+            )
+        }
+
+        withSseServer(body, onRequest = requestBody::set) { baseUrl ->
+            OpenAiResponsesProvider.complete(
+                request = ProviderRequest(
+                    config = config(baseUrl),
+                    messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
+                    tools = JSONArray(),
+                    sessionId = sessionId,
+                ),
+                runController = AgentRunController(),
+            )
+
+            val sent = JSONObject(requestBody.get())
+            val key = sent.getString("prompt_cache_key")
+            assertTrue(key.startsWith("eta-"))
+            assertEquals(ProviderPromptCache.promptCacheKey(sessionId), key)
+        }
+    }
+
+    @Test
+    fun completeRetriesOnceWithoutPromptCacheKeyWhenEndpointRejectsIt() {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val executor = Executors.newSingleThreadExecutor()
+        server.executor = executor
+        server.createContext("/responses") { exchange ->
+            val sentBody = exchange.requestBody.use { it.readBytes().toString(Charsets.UTF_8) }
+            requests += sentBody
+            if (requests.size == 1) {
+                val payload = JSONObject()
+                    .put("error", JSONObject().put("message", "Unsupported parameter: prompt_cache_key"))
+                    .toString()
+                    .toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "application/json")
+                exchange.sendResponseHeaders(400, payload.size.toLong())
+                exchange.responseBody.use { it.write(payload) }
+            } else {
+                val payload = buildString {
+                    append(event("response.output_text.delta", JSONObject().put("delta", "降级成功")))
+                    append(
+                        event(
+                            "response.completed",
+                            JSONObject().put("response", JSONObject().put("status", "completed")),
+                        ),
+                    )
+                }.toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "text/event-stream")
+                exchange.sendResponseHeaders(200, payload.size.toLong())
+                exchange.responseBody.use { it.write(payload) }
+            }
+        }
+        server.start()
+        try {
+            val baseUrl = "http://127.0.0.1:${server.address.port}"
+            val response = OpenAiResponsesProvider.complete(
+                request = ProviderRequest(
+                    config = config(baseUrl),
+                    messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
+                    tools = JSONArray(),
+                ),
+                runController = AgentRunController(),
+            )
+
+            assertEquals("降级成功", response.assistantMessage.getString("content"))
+            assertEquals(2, requests.size)
+            assertTrue(JSONObject(requests[0]).has("prompt_cache_key"))
+            assertTrue(!JSONObject(requests[1]).has("prompt_cache_key"))
+        } finally {
+            server.stop(0)
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun requestOptionsMapToTypedResponsesFields() {
+        val request = OpenAiResponsesProvider.buildRequestJson(
+            config = config("https://example.com/v1").copy(
+                requestOptions = ModelRequestOptions(
+                    temperature = 0.2,
+                    topP = 0.7,
+                    topK = null,
+                    maxOutputTokens = 4096,
+                    presencePenalty = null,
+                    frequencyPenalty = null,
+                    seed = null,
+                ),
+            ),
+            messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
+            tools = JSONArray(),
+        )
+
+        assertEquals(0.2, request.getDouble("temperature"), 1e-9)
+        assertEquals(0.7, request.getDouble("top_p"), 1e-9)
+        assertEquals(4096, request.getInt("max_output_tokens"))
+        assertFalse(request.has("max_tokens"))
+        assertFalse(request.has("top_k"))
+    }
+
+    @Test
+    fun codingModePinsResponsesTemperatureToPointOne() {
+        val request = OpenAiResponsesProvider.buildRequestJson(
+            config = config("https://example.com/v1").copy(codingMode = true),
+            messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
+            tools = JSONArray(),
+        )
+
+        assertEquals(0.1, request.getDouble("temperature"), 1e-9)
+    }
+
+    @Test
+    fun codingModeOverridesRequestOptionsTemperatureInResponses() {
+        val request = OpenAiResponsesProvider.buildRequestJson(
+            config = config("https://example.com/v1").copy(
+                codingMode = true,
+                requestOptions = ModelRequestOptions(
+                    temperature = 0.7,
+                    topP = null,
+                    topK = null,
+                    maxOutputTokens = null,
+                    presencePenalty = null,
+                    frequencyPenalty = null,
+                    seed = null,
+                ),
+            ),
+            messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
+            tools = JSONArray(),
+        )
+
+        assertEquals(0.1, request.getDouble("temperature"), 1e-9)
     }
 
     private fun config(baseUrl: String) = AgentModelClient.ModelConfig(

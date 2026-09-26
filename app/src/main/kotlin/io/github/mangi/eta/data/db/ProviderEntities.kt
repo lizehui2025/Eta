@@ -13,6 +13,7 @@ import io.github.mangi.eta.data.model.CustomHeader
 import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.Model
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
+import io.github.mangi.eta.data.model.ModelRequestOptions
 import io.github.mangi.eta.data.model.ModelSource
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
@@ -84,6 +85,7 @@ internal data class ProviderModelEntity(
     val reasoningCapabilitiesOverrideJson: String = "null",
     @ColumnInfo(name = "structured_output") val structuredOutput: Boolean?,
     @ColumnInfo(name = "supports_temperature") val supportsTemperature: Boolean?,
+    @ColumnInfo(name = "request_options_json") val requestOptionsJson: String? = null,
     @ColumnInfo(name = "custom_headers_json") val customHeadersJson: String,
     @ColumnInfo(name = "custom_body_json") val customBodyJson: String,
     val source: String,
@@ -226,6 +228,7 @@ private fun Model.toEntity(providerId: String): ProviderModelEntity =
         ),
         structuredOutput = structuredOutput,
         supportsTemperature = supportsTemperature,
+        requestOptionsJson = ProviderJson.encodeRequestOptions(requestOptions),
         customHeadersJson = ProviderJson.encodeHeaders(customHeaders),
         customBodyJson = ProviderJson.encodeBody(customBody),
         source = source.name.lowercase(),
@@ -259,6 +262,7 @@ private fun ProviderModelEntity.toDomain(): Model =
         ),
         structuredOutput = structuredOutput,
         supportsTemperature = supportsTemperature,
+        requestOptions = ProviderJson.decodeRequestOptions(requestOptionsJson),
         customHeaders = ProviderJson.decodeHeaders(customHeadersJson),
         customBody = ProviderJson.decodeBody(customBodyJson),
         source = runCatching { ModelSource.valueOf(source.uppercase()) }.getOrDefault(
@@ -272,6 +276,13 @@ private object ProviderJson {
         ignoreUnknownKeys = true
         encodeDefaults = true
     }
+
+    // requestOptions 使用紧凑 JSON 存储：未设置的参数不写入，解码时回落到 null。
+    private val requestOptionsJson = Json {
+        ignoreUnknownKeys = true
+        explicitNulls = false
+    }
+
     private val headersSerializer = ListSerializer(CustomHeader.serializer())
     private val bodySerializer = ListSerializer(CustomBody.serializer())
     private val stringsSerializer = ListSerializer(String.serializer())
@@ -302,6 +313,19 @@ private object ProviderJson {
             ?.let { encoded ->
                 runCatching {
                     json.decodeFromString(ModelReasoningCapabilities.serializer(), encoded)
+                }.getOrNull()
+            }
+
+    fun encodeRequestOptions(options: ModelRequestOptions?): String? =
+        options
+            ?.takeUnless { it.isEmpty }
+            ?.let { requestOptionsJson.encodeToString(ModelRequestOptions.serializer(), it) }
+
+    fun decodeRequestOptions(raw: String?): ModelRequestOptions? =
+        raw?.takeUnless { it.isBlank() || it == "null" }
+            ?.let { encoded ->
+                runCatching {
+                    requestOptionsJson.decodeFromString(ModelRequestOptions.serializer(), encoded)
                 }.getOrNull()
             }
 }

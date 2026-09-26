@@ -82,9 +82,9 @@ internal class AgentTranscriptPublisher(
             openCallIds.remove(message.optString("tool_call_id"))
             return
         }
-        AgentConversationCodec.parseToolCalls(message).forEach { call ->
-            openCallIds += call.id
-            publishedCallIds += call.id
+        AgentConversationCodec.toolCallIds(message).forEach { id ->
+            openCallIds += id
+            publishedCallIds += id
         }
     }
 }

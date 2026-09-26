@@ -105,13 +105,48 @@ class AgentHistoryRetentionTest {
         }
     }
 
-    @Test fun missingChunkFailsInsteadOfReturningEmptyHistory() {
+    @Test fun corruptedChunkRestoreDegradesAndProtectsRemainingChunksUntilRealWrite() {
         val transcript = listOf(AgentModelClient.ConversationMessage("assistant", "事实".repeat(80_000)))
         val run = AgentRuntimeWire.CompletedRun(AgentRuntimeWire.EntryHandoff("broken", "test", "c"),
             AgentRuntimeWire.RunResult("broken", true, "完成", transcript = transcript), System.currentTimeMillis())
         AgentRuntimeResultStore.add(context, run)
-        EtaDatabase.get(context).openHelper.writableDatabase.execSQL("DELETE FROM agent_text_chunks WHERE chunk_index = 1")
-        assertThrows(IllegalStateException::class.java) { AgentRuntimeResultStore.list(context) }
+        val db = EtaDatabase.get(context).openHelper.writableDatabase
+        val originalRef = db.query("SELECT transcript_json FROM runtime_results WHERE run_id = 'broken'").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            cursor.getString(0)
+        }
+        assertTrue(originalRef.startsWith("@eta:chunks:v1:"))
+        fun transcriptChunkCount(): Int = db.query(
+            "SELECT COUNT(*) FROM agent_text_chunks WHERE owner_table = 'runtime_results' " +
+                "AND owner_id = 'broken' AND field = 'transcriptJson' AND chunk_index >= 0"
+        ).use { cursor -> assertTrue(cursor.moveToFirst()); cursor.getInt(0) }
+        val chunksBeforeCorruption = transcriptChunkCount()
+        assertTrue(chunksBeforeCorruption > 1)
+        db.execSQL("DELETE FROM agent_text_chunks WHERE owner_table = 'runtime_results' " +
+            "AND owner_id = 'broken' AND field = 'transcriptJson' AND chunk_index = 1")
+        val dao = EtaDatabase.get(context).runtimeRunDao()
+
+        // 读损坏：不再抛异常，按设计降级（此处 transcript 回退为 content 投影），并给该字段写入损坏哨兵行。
+        val degraded = AgentRuntimeResultStore.list(context).single()
+        assertEquals(listOf(AgentModelClient.ConversationMessage("assistant", "完成")), degraded.result.transcript)
+        assertTrue(runBlocking { dao.isTextCorrupted("runtime_results", "broken", "transcriptJson") })
+        // 退化值写回被拒绝：返回损坏前保存的引用，不删除残余分块、不覆盖主行。
+        assertEquals(originalRef, runBlocking { dao.storeText("runtime_results", "broken", "transcriptJson", "") })
+
+        // 模拟“降级后进程内首次保存”整份写回空 transcript：旧实现会在这里删光残余分块并把主行覆盖成空值。
+        assertTrue(AgentRuntimeResultStore.add(context, run.copy(result = run.result.copy(transcript = emptyList()))))
+        db.query("SELECT transcript_json FROM runtime_results WHERE run_id = 'broken'").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(originalRef, cursor.getString(0))
+        }
+        assertEquals(chunksBeforeCorruption - 1, transcriptChunkCount())
+        assertTrue(runBlocking { dao.isTextCorrupted("runtime_results", "broken", "transcriptJson") })
+
+        // 真实的非退化写入仍能正常覆盖损坏内容，并清除损坏标记。
+        assertTrue(AgentRuntimeResultStore.add(context, run))
+        EtaDatabase.closeForTests()
+        assertEquals(transcript, AgentRuntimeResultStore.list(context).single().result.transcript)
+        assertFalse(runBlocking { EtaDatabase.get(context).runtimeRunDao().isTextCorrupted("runtime_results", "broken", "transcriptJson") })
         assertThrows(Exception::class.java) { AgentConversationCodec.decodeTranscript("[invalid]") }
     }
 

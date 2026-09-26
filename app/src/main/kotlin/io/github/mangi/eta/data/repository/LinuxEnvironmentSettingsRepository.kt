@@ -55,6 +55,19 @@ internal object LinuxEnvironmentSettingsRepository {
     fun current(context: Context): LinuxDistribution =
         cachedSelection ?: defaultSelection(context.applicationContext)
 
+    /**
+     * 当前选中的 Linux 工具环境是否已安装完成（就绪标记存在）。
+     * 运行期据此决定“未显式指定 environment”时的默认环境，避免把默认写死成 android：
+     * 装了 Linux 就以 Linux 为默认工作环境，没装才回退 Android。
+     */
+    fun isEnvironmentReady(context: Context): Boolean = runCatching {
+        val distribution = current(context.applicationContext)
+        val backend = backend(context.applicationContext, distribution)
+        LinuxEnvironmentPaths.rootfsReady(
+            LinuxEnvironmentPaths.rootfsDir(context.applicationContext, distribution, backend).absolutePath,
+        )
+    }.getOrDefault(false)
+
     suspend fun initialize(context: Context) {
         LinuxDistribution.entries.forEach { distribution ->
             val value = SettingsDataStore.linuxBackendFlow(distribution.wireName).first()

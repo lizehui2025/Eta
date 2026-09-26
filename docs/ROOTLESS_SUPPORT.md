@@ -24,7 +24,7 @@ Eta 使用同一个 APK，根据实际授权提供能力。基础功能不会等
 
 ## 文件与 Linux 数据
 
-新建普通工作区位于 `filesDir/terminal-user/workspace`，PRoot 环境位于 `filesDir/terminal-user/proot/<发行版>`，避开旧版可能由 Root 创建的 `filesDir/terminal` 父目录。已存在于旧布局的普通工作区与 PRoot 环境继续使用原位置，不自动迁移或修改属主；目录选择不依赖 Root 授权。工作区在 Linux 中仍映射为 `/workspace`。文件选择器返回的 URI 如果无法作为 App UID 可读路径使用，会先有界导入工作区再引用；不能直接导入的目录会给出明确说明。公共目录共享按需申请“所有文件访问”，拒绝后仍可使用私有工作区与导入导出。
+新建普通工作区位于 `filesDir/terminal-user/workspace`，PRoot 环境位于 `filesDir/terminal-user/proot/<发行版>`，避开旧版可能由 Root 创建的 `filesDir/terminal` 父目录。已存在于旧布局的普通工作区与 PRoot 环境继续使用原位置，不自动迁移或修改属主；目录选择不依赖 Root 授权。工作区在 Linux 中仍映射为 `/workspace`；普通模式下文件工具对 `/workspace/...` 的翻译同样指向该私有工作区，不依赖 `/data/local/tmp`。文件选择器返回的 URI 如果无法作为 App UID 可读路径使用，会先有界导入工作区再引用；不能直接导入的目录会给出明确说明。公共目录共享按需申请“所有文件访问”，拒绝后仍可使用私有工作区与导入导出。
 
 PRoot 与 chroot 使用独立 rootfs。旧 chroot、`/data/local/tmp/eta` 与特权共享挂载不迁移；运行会话和任务固定创建时的后端与路径。Root 状态变化不会删除环境、更改属主或自动切换已有会话。PRoot 内的模拟 root 没有 Android Root 权限。
 

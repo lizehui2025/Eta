@@ -178,7 +178,7 @@ Eta 不对浏览器请求执行额外的 URL、DNS、IP、主机数量、请求�
 终端按用途分为三个环境：
 
 - `android` 是原生 Android Shell，负责系统、应用、日志、Magisk 和设备文件操作。Root 会话会自动发现 Magisk、KernelSU 或 APatch 提供的 BusyBox，并以 standalone `ash` 补齐不在系统 PATH 中的 applet。
-- Linux 用户态在 Alpine musl 与 Debian Trixie glibc 中二选一，选择持久化后由模型工具、块式终端和控制台共同使用；模型可见协议统一为 `environment=linux`。基础 rootfs 与基础工具分步安装，基础工具集不包含 Python 或 Node.js；Python profile 只安装 uv，再由 uv 全局安装最新正式版 Python，Node.js profile 安装当前可用的最新正式版。SSH 使用发行版最新稳定包，APK 分析在两个发行版中均可单独安装。Kimi Code profile 依赖 Node.js profile，通过 npm 安装最新正式版 `@moonshot-ai/kimi-code`（国内镜像优先），两个发行版均可使用；安装就绪后可在环境页一键启动 Kimi Web——以守护任务常驻 `kimi web`，从日志解析带 token 的本机地址并拉起系统浏览器。App 侧只读取安装器写入的完成标记，不再从非 Root 进程重复检查 rootfs 内的符号链接、二进制或执行权限。Eta 通过独立 mount namespace + Root chroot 运行所选环境；Linux 默认在映射到 Eta Android 工作目录的 `/workspace` 中执行，共享存储位于 `/sdcard`。它不是安全沙箱，也不会取代 Android 环境。
+- Linux 用户态在 Alpine musl 与 Debian Trixie glibc 中二选一，选择持久化后由模型工具、块式终端和控制台共同使用；模型可见协议统一为 `environment=linux`。基础 rootfs 与基础工具分步安装，基础工具集不包含 Python 或 Node.js；Python profile 只安装 uv，再由 uv 全局安装最新正式版 Python，Node.js profile 安装当前可用的最新正式版。SSH 使用发行版最新稳定包，APK 分析在两个发行版中均可单独安装。Kimi Code profile 依赖 Node.js profile，通过 npm 安装最新正式版 `@moonshot-ai/kimi-code`（国内镜像优先），两个发行版均可使用；安装就绪后可在环境页一键启动 Kimi Web——以守护任务常驻 `kimi web`，从日志解析带 token 的本机地址并拉起系统浏览器。App 侧只读取安装器写入的完成标记，不再从非 Root 进程重复检查 rootfs 内的符号链接、二进制或执行权限。Eta 通过独立 mount namespace + Root chroot 运行所选环境；Linux 默认在 `/workspace` 中执行：chroot 后端映射宿主工作区 `/data/local/tmp/eta`，PRoot 后端映射 App 私有工作区，文件工具对 `/workspace/...` 的翻译与当前后端一致；共享存储位于 `/sdcard`。它不是安全沙箱，也不会取代 Android 环境。
 - 中国大陆网络下，Alpine APK 只尝试阿里云与官方 CDN；Debian 主仓库只尝试清华 TUNA 与 Debian 官方源，安全更新固定使用 Debian 官方源。成功的源会写回 rootfs 供后续 profile 和工具安装复用；APT 同时关闭易触发连接重置的 HTTP pipelining 并启用重试。GitHub 制品只尝试一个固定 HTTPS 下载入口，再回到官方地址，所有 rootfs/制品仍必须通过固定大小和 SHA-256 校验。
 
 首页溢出菜单的「打开终端」是供用户手动操作的终端，默认是块式终端，BusyBox `script` 可用时可切换到 PTY 控制台模式：经 `script` 为 shell 分配伪终端（启动时 stty 设定网格尺寸、TERM 宣告为 xterm-256color），输出字节流由 VT 子集屏幕缓冲区维护成字符网格——支持 SGR 颜色与样式、光标定位、行/屏擦除、滚动区、备用屏幕（alt buffer）与宽字符占格，滚动历史有界保留；软键盘输入经隐藏输入框捕获直接写 stdin，Esc/Ctrl/Tab/方向键由键条补齐，Ctrl 组合键产生真实控制字节。两种模式各自支持多会话并存（上限各 6 个），状态栏的会话列表统一提供新建、切换、重启与关闭；切换环境与离开页面都不回收存活会话，会话由 ViewModel 持有到手动关闭或进程死亡。两种模式的会话启动时都显式加载 `/etc/profile` 与 `~/.profile`，安装器写入 PATH 的用户 CLI 可直接运行。
@@ -199,12 +199,15 @@ rootfs 内文件归 root 所有，Linux 工具环境页还提供只读的文件�
 - **动态预算**：核心注入量根据当前模型上下文窗口计算；窗口未知时按 128K 处理，并始终为历史、工具、图片和回复预留空间
 - **原子更新**：文件上限为 1 MiB UTF-8 字节，模型使用 revision 进行局部更新，冲突时必须重新读取；完整文件通过 `AtomicFile` 覆盖，失败保留旧内容
 - **用户控制**：设置页可查看用量、编辑完整 Markdown、清空或关闭记忆；关闭不会删除文件，但 Runtime 会立即停止注入并拒绝新的记忆工具调用
+- **聊天 / 编码模式**：顶栏左上角可切换；聊天模式正常保存记忆，编码模式不主动保存（不暴露 `memory_write`、执行期复核写入并提示切回聊天模式），模式在 run 开始时快照，读取在两种模式下保持可用；编码模式下请求统一使用 temperature=0.1。
 
 ## 会话级 Thinking Effort
 
 聊天会话保存独立的 `ReasoningEffort`，输入栏按当前 Provider、端点和模型能力显示 `Thinking · Off / Default / Low / Medium / High / XHigh / Max` 的实际子集。模型不支持推理时不显示入口；强制推理且没有可调档位的模型只显示不可点击的 `Thinking · Default`。模型切换或远端能力刷新后，已保存但不再合法的档位会向下裁剪到最近的有效档位，没有可比档位时回到 `Default`。
 
 能力解析依次采用远端精确元数据、内置模型目录、Provider 与模型家族规则，最后安全降级。`Default` 保留供应商或高级自定义请求体的默认行为；显式档位在请求体合并完成后应用，因此会话选择是最终覆盖。Room、Runtime Bundle、RemotePreferences JSON 和外部归档同时保留旧 `thinkingEnabled` 布尔投影，旧 `true/false` 分别解释为 `Default/Off`；强制推理模型收到 `Off` 时直接报告配置错误。
+
+模型级可配置底层请求参数（temperature、top_p、top_k、最大输出 token、presence/frequency penalty、seed）保存在 `provider_models.request_options_json`（数据库版本 24 起），随 Runtime 配置进入请求构建：请求体先写入 typed 参数，再依次合并 `extraBody` 与自定义请求体，最后应用推理运行时字段，同名键优先级为 typed < extraBody < customBody < 推理档位。各协议只发送自身支持的键：Chat Completions 发 temperature/top_p/presence_penalty/frequency_penalty/seed，最大输出 token 对 OpenAI 官方来源写 `max_completion_tokens`、其余写 `max_tokens`；Responses 发 temperature/top_p/max_output_tokens；Anthropic 发 temperature/top_p/top_k/max_tokens（覆盖默认 4096，仍可被高思考档位提升）。模型编辑弹窗提供留空即不发送的输入，以及原始 JSON 自定义请求体编辑；压缩、摘要与改写等内部用途与自定义请求体使用同一套裁剪规则，不携带用户采样参数。编码模式在 run 开始时把快照写入运行配置（codingMode），全链路请求统一 temperature=0.1；用户自定义请求体仍可覆盖。
 
 ## 聊天流式渲染
 

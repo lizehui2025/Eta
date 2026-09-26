@@ -11,6 +11,7 @@ import io.github.mangi.eta.agent.device.DeviceControlUnavailableException
 import io.github.mangi.eta.agent.device.RootAccess
 import io.github.mangi.eta.agent.device.RootShellDeviceController
 import io.github.mangi.eta.agent.device.BoundedRootCommandExecutor
+import io.github.mangi.eta.agent.model.AgentMode
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentScreenObservationContract
 import io.github.mangi.eta.agent.model.AgentSensitiveToolPolicy
@@ -54,6 +55,24 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.runBlocking
 
+/** memory_write 在角色会话中的只读原因：现实记忆只读，剧情走角色记忆工具。 */
+internal const val ROLEPLAY_MEMORY_READ_ONLY_REASON = "角色会话的现实记忆只读；剧情请使用角色记忆工具"
+
+/** memory_write 在编码模式中的只读原因：不主动保存，需要时提示切换聊天模式。 */
+internal const val CODING_MEMORY_READ_ONLY_REASON =
+    "编码模式下不主动保存记忆；如需长期记住某项内容，请提示用户切换到聊天模式后再保存"
+
+/**
+ * 记忆写入拒绝策略：角色会话始终只读；编码模式不主动保存；聊天模式可写。
+ * 执行器在每次 memory_write 调用前重新求值，中途切换模式立即生效。
+ */
+internal fun memoryWriteBlockedReasonFor(roleplay: Boolean, mode: AgentMode): String? =
+    when {
+        roleplay -> ROLEPLAY_MEMORY_READ_ONLY_REASON
+        mode != AgentMode.CHAT -> CODING_MEMORY_READ_ONLY_REASON
+        else -> null
+    }
+
 internal class AgentLocalTools(
     private val context: Context,
     private val logger: AgentLogger,
@@ -76,7 +95,12 @@ internal class AgentLocalTools(
     private val memoryToolsEnabled: () -> Boolean = {
         runBlocking { AgentMemoryRepository.isEnabled() }
     },
-    private val memoryWritable: Boolean = true,
+    /**
+     * memory_write 的拒绝原因；返回 null 表示允许写入。
+     * 每次调用时重读（与工具权限同样的“执行期复查”语义）：编码模式中途切换后，
+     * 进行中的 run 也会立即停止保存记忆；角色会话在该回调里始终返回只读。
+     */
+    private val memoryWriteBlockedReason: () -> String? = { null },
     private val screenshotExcludedPackages: () -> Set<String> = { emptySet() },
     private val screenObservationProvider: (
         (AgentScreenObservationContract.Options) -> RootShellDeviceController.Observation
@@ -275,11 +299,13 @@ internal class AgentLocalTools(
     }
 
     private fun memoryToolPermissionError(toolName: String): AgentModelClient.ToolResult? {
-        if (toolName == "memory_write" && !memoryWritable) {
-            return AgentModelClient.ToolResult(
-                content = errorResult("REAL_MEMORY_READ_ONLY", "角色会话的现实记忆只读；剧情请使用角色记忆工具"),
-                sensitive = true,
-            )
+        if (toolName == "memory_write") {
+            memoryWriteBlockedReason()?.let { reason ->
+                return AgentModelClient.ToolResult(
+                    content = errorResult("REAL_MEMORY_READ_ONLY", reason),
+                    sensitive = true,
+                )
+            }
         }
         if (toolName !in MEMORY_TOOL_NAMES || memoryToolsEnabled()) return null
         return AgentModelClient.ToolResult(
@@ -701,10 +727,22 @@ internal class AgentLocalTools(
             offsetChars = args.optInt("offset_chars", 0),
             maxChars = args.optInt("max_chars", 8_000),
             closeIfDone = args.optBoolean("close_if_done", false),
-            environment = args.optString("environment", "android"),
+            environment = args.optString("environment").ifBlank { defaultTerminalEnvironment() },
             taskId = args.optString("task_id").ifBlank { null },
         )
     }
+
+    /**
+     * 未显式指定 environment 时的默认环境，运行期决定，不写死：
+     * Linux 工具环境已安装即默认 linux（找代码/处理数据的默认工作环境），否则回退 android。
+     * 设备数据获取应由模型按提示显式传 environment=android。
+     */
+    private fun defaultTerminalEnvironment(): String =
+        if (runCatching { LinuxEnvironmentSettingsRepository.isEnvironmentReady(context) }.getOrDefault(false)) {
+            "linux"
+        } else {
+            "android"
+        }
 
     private fun readFile(args: JSONObject): String =
         terminalController.readFile(

@@ -33,6 +33,7 @@ import io.github.mangi.eta.agent.device.ScrollEvidence
 import io.github.mangi.eta.agent.device.ScrollEvidenceContract
 import io.github.mangi.eta.agent.device.ScrollMovementSource
 import io.github.mangi.eta.agent.device.RootScrollMotionContract
+import io.github.mangi.eta.agent.overlay.GestureIndicator
 import io.github.mangi.eta.core.AndroidAgentLogger
 import java.util.ArrayDeque
 import java.util.concurrent.ArrayBlockingQueue
@@ -109,6 +110,7 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private fun clearCurrentInstance() {
         if (instance === this) instance = null
+        GestureIndicator.dismiss()
         scrollEventObservationGate.clear()
         signalWindowChanged()
     }

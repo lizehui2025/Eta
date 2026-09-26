@@ -65,7 +65,8 @@ internal class DetachedTaskSupervisor(
     private val releaseUserLease: (String) -> Unit = TerminalRuntime::releaseUserTask,
 ) {
     companion object {
-        const val DEFAULT_DAEMON_DIR = "/data/local/tmp/eta/daemon"
+        /** 与 TerminalRuntime.HOST_WORKSPACE_PATH（chroot 的 /workspace 宿主映射）同源，避免路径漂移。 */
+        const val DEFAULT_DAEMON_DIR = TerminalRuntime.HOST_WORKSPACE_PATH + "/daemon"
         const val LINUX_DAEMON_DIR = "/workspace/daemon"
         const val MAX_TASKS = 8
         const val MAX_RETAINED_RECORDS = 32

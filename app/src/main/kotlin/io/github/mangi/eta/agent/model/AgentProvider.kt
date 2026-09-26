@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
+import io.github.mangi.eta.data.model.ReasoningEffort
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -45,10 +46,35 @@ internal data class ProviderRequest(
     val sessionId: String = java.util.UUID.randomUUID().toString(),
     val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
 ) {
+    /**
+     * 内部调用（压缩摘要、改写回复）不面向用户，不该继承主对话的思考档位：
+     * 之前只关掉了联网/额外请求体，reasoningEffort/thinkingEnabled 原样带入，
+     * 于是一次压缩的每个分片都按用户的 High/Max 档做长思考，N 个分片就是 N 段长思考——
+     * 这是“压缩准备超级长”的首要原因。这里降到该模型可选的最低档（强制思考的模型取最低可选档）。
+     */
     val effectiveConfig: AgentModelClient.ModelConfig get() = if (!purpose.allowsTools) {
-        config.copy(hostedWebSearchEnabled = false, extraBodyJson = "", customBody = emptyList())
+        // 内部调用（压缩摘要、改写回复）不携带用户采样参数：与 extraBodyJson/customBody 同步清空。
+        config.copy(
+            hostedWebSearchEnabled = false,
+            extraBodyJson = "",
+            customBody = emptyList(),
+            requestOptions = null,
+        )
+            .withCheapestReasoning()
     } else config
     val effectiveTools: JSONArray get() = if (purpose.allowsTools) tools else JSONArray()
+}
+
+/** 降到模型允许的最低思考档；已经是更低档位则保持不变，不把用户特意设的 Off 又拉高。 */
+private fun AgentModelClient.ModelConfig.withCheapestReasoning(): AgentModelClient.ModelConfig {
+    val capabilities = reasoningCapabilities
+    val cheapest = if (capabilities != null) {
+        capabilities.selectableEfforts.minByOrNull { it.rank } ?: ReasoningEffort.DEFAULT
+    } else {
+        ReasoningEffort.OFF
+    }
+    if (effectiveReasoningEffort.rank <= cheapest.rank) return this
+    return copy(reasoningEffort = cheapest, thinkingEnabled = cheapest.enablesReasoning)
 }
 
 internal data class ProviderResponse(

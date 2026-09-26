@@ -12,6 +12,7 @@ import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.data.model.CustomBody
 import io.github.mangi.eta.data.model.CustomHeader
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
+import io.github.mangi.eta.data.model.ModelRequestOptions
 import io.github.mangi.eta.data.model.ReasoningEffort
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
@@ -112,6 +113,7 @@ internal object AgentRuntimeWire {
     private const val KEY_EXTRA_BODY_JSON = "extra_body_json"
     private const val KEY_CUSTOM_HEADERS_JSON = "custom_headers_json"
     private const val KEY_CUSTOM_BODY_JSON = "custom_body_json"
+    private const val KEY_REQUEST_OPTIONS_JSON = "request_options_json"
     private const val KEY_IMAGES = "images"
     private const val KEY_HISTORY = "history"
     private const val KEY_CONTENT_JSON = "content_json"
@@ -305,6 +307,10 @@ internal object AgentRuntimeWire {
         putString(KEY_EXTRA_BODY_JSON, request.config.extraBodyJson)
         putString(KEY_CUSTOM_HEADERS_JSON, json.encodeToString(request.config.customHeaders))
         putString(KEY_CUSTOM_BODY_JSON, json.encodeToString(request.config.customBody))
+        // 采样参数仅非 null 时写入本项目自定义键；读取端缺失/损坏回退 null，语义等价于未配置。
+        request.config.requestOptions?.let {
+            putString(KEY_REQUEST_OPTIONS_JSON, json.encodeToString(it))
+        }
         request.handoff?.let { putBundle(KEY_HANDOFF, toBundle(it)) }
         putParcelableArrayList(
             KEY_HISTORY,
@@ -447,7 +453,8 @@ internal object AgentRuntimeWire {
                 ),
                 extraBodyJson = bundle.getString(KEY_EXTRA_BODY_JSON).orEmpty(),
                 customHeaders = decodeCustomHeaders(bundle.getString(KEY_CUSTOM_HEADERS_JSON)),
-                customBody = decodeCustomBody(bundle.getString(KEY_CUSTOM_BODY_JSON))
+                customBody = decodeCustomBody(bundle.getString(KEY_CUSTOM_BODY_JSON)),
+                requestOptions = decodeRequestOptions(bundle.getString(KEY_REQUEST_OPTIONS_JSON))
             ),
             history = if (!readText) emptyList() else AgentWireText.read(bundle, "history_json")?.let(AgentConversationCodec::decodeTranscript)
                 ?: bundle.getParcelableArrayList(KEY_HISTORY, Bundle::class.java).orEmpty().map { message ->
@@ -1064,6 +1071,11 @@ internal object AgentRuntimeWire {
     private fun decodeCustomBody(raw: String?): List<CustomBody> =
         if (raw.isNullOrBlank()) emptyList()
         else runCatching { json.decodeFromString<List<CustomBody>>(raw) }.getOrDefault(emptyList())
+
+    /** 采样参数：缺键/空白/解析失败一律回退 null（等价于未配置），坏值不阻断请求。 */
+    private fun decodeRequestOptions(raw: String?): ModelRequestOptions? =
+        if (raw.isNullOrBlank()) null
+        else runCatching { json.decodeFromString<ModelRequestOptions>(raw) }.getOrNull()
 
     private fun decodeReasoningCapabilities(raw: String?): ModelReasoningCapabilities? =
         if (raw.isNullOrBlank()) null

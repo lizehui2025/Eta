@@ -238,6 +238,47 @@ class AgentPromptBuilderTest {
     }
 
     @Test
+    fun codingModeMemoryMessageIsReadOnlyAndPointsBackToChatMode() {
+        val memoryContext = AgentMemoryContext(
+            enabled = true,
+            revision = "c".repeat(64),
+            byteSize = 64,
+            coreContent = "# 核心记忆\n用户偏好中文",
+            coreTruncated = false,
+            headingIndex = "# 核心记忆",
+            coreBudgetChars = 8_000,
+        )
+        val coding = AgentPromptBuilder.buildInitialMessages(
+            config = modelConfig("", terminalTools = false, browserTools = false),
+            prompt = "继续编码",
+            images = emptyList(),
+            history = emptyList(),
+            skillContext = SkillContext.EMPTY,
+            memoryContext = memoryContext,
+            memoryWritable = false,
+        )
+        val codingMemory = coding.systemContents().single { it.contains("持久记忆已启用") }
+        assertTrue(codingMemory.contains("编码模式"))
+        assertTrue(codingMemory.contains("不主动保存"))
+        assertFalse(codingMemory.contains("需要更新时调用 memory_write"))
+        // 只读模式下核心记忆仍然注入，读取与检索保持可用。
+        assertTrue(codingMemory.contains("用户偏好中文"))
+
+        val chat = AgentPromptBuilder.buildInitialMessages(
+            config = modelConfig("", terminalTools = false, browserTools = false),
+            prompt = "继续聊",
+            images = emptyList(),
+            history = emptyList(),
+            skillContext = SkillContext.EMPTY,
+            memoryContext = memoryContext,
+            memoryWritable = true,
+        )
+        val chatMemory = chat.systemContents().single { it.contains("持久记忆已启用") }
+        assertTrue(chatMemory.contains("需要更新时调用 memory_write"))
+        assertFalse(chatMemory.contains("编码模式"))
+    }
+
+    @Test
     fun skillIndexFieldsAreCollapsedToSingleLineAndDescriptionStaysSurrogateSafe() {
         val longDescription = "a".repeat(179) + "😀" + "尾部"
         val messages = AgentPromptBuilder.buildSystemMessages(

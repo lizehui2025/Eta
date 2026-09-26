@@ -5,6 +5,7 @@ import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.data.db.EtaDatabase
 import io.github.mangi.eta.data.model.AnthropicProviderSetting
 import io.github.mangi.eta.data.model.CustomHeader
+import io.github.mangi.eta.data.model.ModelRequestOptions
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
 import io.github.mangi.eta.data.model.ModelSource
 import io.github.mangi.eta.data.model.ProviderSetting
@@ -116,6 +117,37 @@ class ProviderRepositoryTest {
         val restored = ProviderRepository.providerById(BuiltinProviders.OPENAI_ID)!!
         assertEquals(listOf("x-provider"), restored.customHeaders.map { it.name })
         assertEquals(listOf("x-model"), restored.models.first().customHeaders.map { it.name })
+    }
+
+    @Test
+    fun providerAndModelRequestOptionsSurviveRoomRoundTrip() = runBlocking {
+        ProviderRepository.ensureBuiltInsMerged()
+        val provider = ProviderRepository.providerById(BuiltinProviders.OPENAI_ID)!!
+        val options = ModelRequestOptions(
+            temperature = 0.7,
+            topP = 0.9,
+            topK = 40,
+            maxOutputTokens = 4096,
+            presencePenalty = 0.1,
+            frequencyPenalty = 0.2,
+            seed = 42L,
+        )
+
+        ModelRepository.saveModel(
+            provider.id,
+            provider.models.first().copy(requestOptions = options),
+        )
+
+        val restored = ProviderRepository.providerById(BuiltinProviders.OPENAI_ID)!!
+        assertEquals(options, restored.models.first().requestOptions)
+
+        // 空配置入库时归一化为 null。
+        ModelRepository.saveModel(
+            provider.id,
+            restored.models.first().copy(requestOptions = ModelRequestOptions()),
+        )
+        val cleared = ProviderRepository.providerById(BuiltinProviders.OPENAI_ID)!!
+        assertEquals(null, cleared.models.first().requestOptions)
     }
 
     @Test

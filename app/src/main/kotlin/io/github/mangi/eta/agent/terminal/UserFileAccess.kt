@@ -12,10 +12,11 @@ internal object UserFileAccess {
     private const val MAX_LIST_SCAN = 5_000
     fun resolve(path: String): File {
         // Linux 视图先翻译为 Android 视图：/workspace/... 与 /workspace/mounts/<name>/...
-        // 在 Android 侧不存在，不翻译会让子代理批量看不见文件。
+        // 在 Android 侧不存在，不翻译会让子代理批量看不见文件；翻译根随当前后端解析
+        // （chroot 为宿主工作区），普通模式（无 Root）下解析结果仍是私有工作区，与既有行为一致。
         val mounts = runCatching { SharedFolderMounts.current().map { it.name to it.sourcePath } }
             .getOrDefault(emptyList())
-        val translated = AgentFilePathMapper.toAndroidPath(path, mounts, TerminalRuntime.userWorkspacePath)
+        val translated = AgentFilePathMapper.toAndroidPath(path, mounts, TerminalRuntime.currentLinuxWorkspaceRoot())
         val workspace = File(TerminalRuntime.userWorkspacePath)
         val raw = translated.trim().ifBlank { workspace.absolutePath }
         val file = when {
@@ -96,6 +97,11 @@ internal object UserFileAccess {
         glob: String = "",
         recursive: Boolean = false,
     ): String = operation {
+        // `/workspace/mounts` 是合成的枚举视图（Android 命名空间不存在该目录）：按当前共享
+        // 配置合成列表，与 Root 实现同一口径，便于发现挂载后再深入 /workspace/mounts/<name>/...
+        if (path.trim().trimEnd('/') == AgentFilePathMapper.LINUX_MOUNTS_ROOT) {
+            return@operation mountsListing(limit, offset)
+        }
         val directory = resolve(path)
         val globs = AgentCodeSearch.compileGlobs(glob)
         val skip = offset.coerceAtLeast(0)
@@ -205,6 +211,22 @@ internal object UserFileAccess {
             .put("pattern", trimmed).put("glob", glob.orEmpty()).put("count", capped.size)
             .put("truncated", capped.size < entries.size)
             .put("results", JSONArray(capped))
+    }
+
+    /** 共享挂载枚举视图：只暴露挂载名与 Android 侧源路径，不做文件系统访问。 */
+    private fun mountsListing(limit: Int, offset: Int): JSONObject {
+        val mounts = runCatching { SharedFolderMounts.current() }.getOrDefault(emptyList())
+        val entries = mounts.map { "d ${it.name} -> ${it.sourcePath}" }
+        val max = limit.coerceIn(1, 200)
+        val skip = offset.coerceAtLeast(0)
+        val page = entries.drop(skip).take(max)
+        return JSONObject().put("ok", true).put("tool", "list_directory")
+            .put("path", AgentFilePathMapper.LINUX_MOUNTS_ROOT)
+            .put("exit_code", 0)
+            .put("virtual", true)
+            .put("total", entries.size).put("offset", skip).put("count", page.size)
+            .put("truncated", skip + page.size < entries.size)
+            .put("entries_text", page.joinToString("\n")).put("stderr", "")
     }
 
     private fun collectMatches(root: File, regex: Regex, globs: List<Regex>, max: Int): List<String> {

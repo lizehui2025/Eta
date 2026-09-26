@@ -4,6 +4,7 @@ import android.content.Context
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityKeeper
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentConversationToolCatalog
+import io.github.mangi.eta.agent.model.AgentMode
 import io.github.mangi.eta.agent.tool.ConversationHistoryTool
 import io.github.mangi.eta.data.db.EtaDatabase
 import io.github.mangi.eta.agent.model.AgentModelClient
@@ -27,6 +28,7 @@ import io.github.mangi.eta.agent.skill.SkillResourceReader
 import io.github.mangi.eta.agent.skill.SkillRuntime
 import io.github.mangi.eta.agent.skill.PublicGitHubSkillSource
 import io.github.mangi.eta.agent.tool.AgentLocalTools
+import io.github.mangi.eta.agent.tool.memoryWriteBlockedReasonFor
 import io.github.mangi.eta.agent.tool.AgentToolRequirements
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
 import io.github.mangi.eta.agent.tool.PendingSkillConflictCapabilityParser
@@ -151,6 +153,16 @@ internal class AgentRuntimeRunExecutor(
                 },
             )
             val memoryEnabled = runBlocking { AgentMemoryRepository.isEnabled() }
+            // 交互模式在 run 开始时快照：决定本次 run 的提示词与工具表；
+            // 记忆写入许可在执行期还会动态复查（见 AgentLocalTools 的 memoryWriteBlockedReason）。
+            val agentMode = AgentMode.current()
+            // 编码模式在 run 开始时快照：主循环、子代理与内部调用一致生效（temperature=0.1）；
+            // 其余 request.config 用途（工具开关等）不受影响。
+            val runConfig = if (agentMode == AgentMode.CODING) {
+                request.config.copy(codingMode = true)
+            } else {
+                request.config
+            }
             val uiPayload = request.handoff
                 ?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
                 ?.let { AgentUiHandoffPayload.from(it.payload) }
@@ -230,7 +242,12 @@ internal class AgentRuntimeRunExecutor(
                 memoryToolsEnabled = {
                     runBlocking { AgentMemoryRepository.isEnabled() }
                 },
-                memoryWritable = roleplayContext == null,
+                memoryWriteBlockedReason = {
+                    memoryWriteBlockedReasonFor(
+                        roleplay = roleplayContext != null,
+                        mode = AgentMode.current(),
+                    )
+                },
                 screenshotExcludedPackages = {
                     entrySurfaceGuard?.consumeScreenshotExcludedPackages().orEmpty()
                 },
@@ -298,12 +315,13 @@ internal class AgentRuntimeRunExecutor(
                 } else routingExecutor.execute(call)
             }
             val completedResponse = AgentModelClient.complete(
-                config = request.config,
+                config = runConfig,
                 sessionId = request.effectiveModelSessionId,
                 operationId = request.runId,
                 initialUserMessageId = uiPayload?.promptMessageId(request.runId) ?: "user-${request.runId}",
                 initialSupplementIndex = uiPayload?.lastSupplementIndex ?: 0,
                 roleplayContext = roleplayContext,
+                agentMode = agentMode,
                 rewriteReply = request.operation == AgentRuntimeWire.OP_REWRITE_REPLY,
                 compactOnly = request.operation == AgentRuntimeWire.OP_COMPACT,
                 onContextSnapshot = { snapshot ->

@@ -55,6 +55,8 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_19_20,
                 EtaDatabase.MIGRATION_20_21,
                 EtaDatabase.MIGRATION_21_22,
+                EtaDatabase.MIGRATION_22_23,
+                EtaDatabase.MIGRATION_23_24,
             )
             .build()
         try {
@@ -128,6 +130,7 @@ class EtaDatabaseMigrationTest {
             assertEquals(null, provider.models.first().contextWindowOverride)
             assertEquals(null, provider.models.first().reasoningOverride)
             assertEquals(null, provider.models.first().reasoningCapabilitiesOverride)
+            assertEquals(null, provider.models.first().requestOptions)
             assertEquals(
                 listOf(ModelSource.CATALOG, ModelSource.MANUAL),
                 provider.models.map { it.source },
@@ -136,6 +139,126 @@ class EtaDatabaseMigrationTest {
             database.close()
             context.deleteDatabase(databaseName)
         }
+    }
+
+    @Test
+    fun migration22To23AddsMcpServerTransportColumnsWithDefaults() {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val databaseName = "migration-${UUID.randomUUID()}.db"
+        createVersion22Database(context, databaseName)
+
+        val database = Room.databaseBuilder(context, EtaDatabase::class.java, databaseName)
+            .addMigrations(
+                EtaDatabase.MIGRATION_22_23,
+                EtaDatabase.MIGRATION_23_24,
+            )
+            .build()
+        try {
+            val server = runBlocking(Dispatchers.IO) {
+                database.mcpServerDao().servers().single()
+            }
+
+            assertEquals("mcp-legacy", server.id)
+            assertEquals("Legacy MCP", server.name)
+            assertEquals("http://127.0.0.1:8787/mcp", server.url)
+            assertEquals(true, server.enabled)
+            assertEquals("auto", server.protocolMode)
+            assertEquals("none", server.authorizationType)
+            assertEquals("[]", server.toolsJson)
+            assertEquals("[]", server.enabledToolNamesJson)
+            assertEquals(null, server.toolsExpireAt)
+            assertEquals("remote", server.transport)
+            assertEquals("", server.command)
+            assertEquals("[]", server.argsJson)
+            assertEquals("{}", server.envJson)
+            assertEquals("", server.workingDir)
+        } finally {
+            database.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun migration23To24AddsRequestOptionsColumn() {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val databaseName = "migration-${UUID.randomUUID()}.db"
+        createVersion23Database(context, databaseName)
+
+        val database = Room.databaseBuilder(context, EtaDatabase::class.java, databaseName)
+            .addMigrations(
+                EtaDatabase.MIGRATION_23_24,
+            )
+            .build()
+        try {
+            val provider = runBlocking(Dispatchers.IO) {
+                database.providerDao().providerById("provider-1")!!.toDomain()
+            }
+            assertEquals(listOf("built-in"), provider.models.map { it.modelId })
+            assertEquals(null, provider.models.first().requestOptions)
+
+            database.openHelper.writableDatabase.execSQL(
+                "UPDATE provider_models SET request_options_json = '{\"temperature\":0.7}' " +
+                    "WHERE id = 'model-1'"
+            )
+            val updated = runBlocking(Dispatchers.IO) {
+                database.providerDao().providerById("provider-1")!!.toDomain()
+            }
+            val options = requireNotNull(updated.models.first().requestOptions)
+            assertEquals(0.7, options.temperature)
+        } finally {
+            database.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    private fun createVersion23Database(
+        context: Context,
+        databaseName: String,
+    ) {
+        val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(databaseName)
+            .callback(
+                object : SupportSQLiteOpenHelper.Callback(23) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        VERSION_22_SCHEMA.forEach(db::execSQL)
+                        EtaDatabase.MIGRATION_22_23.migrate(db)
+                        db.execSQL(
+                            "INSERT INTO model_providers " +
+                                "(id, type, name, base_url, api_key, is_enabled, is_built_in, sort_order, " +
+                                "system_prompt, custom_headers_json, custom_body_json, created_at, " +
+                                "endpoint_mode, hosted_web_search_enabled, anthropic_version) " +
+                                "VALUES ('provider-1', 'openai_compatible', 'Provider', " +
+                                "'https://example.com/v1', '', 1, 0, 0, NULL, '[]', '[]', 1, " +
+                                "'chat_completions', 0, '2023-06-01')"
+                        )
+                        db.execSQL(
+                            "INSERT INTO provider_models " +
+                                "(id, provider_id, model_id, display_name, is_enabled, is_built_in, " +
+                                "sort_order, owned_by, context_window, context_window_override, " +
+                                "input_modalities_json, output_modalities_json, attachment, tool_call, " +
+                                "reasoning, reasoning_capabilities_json, reasoning_override, " +
+                                "reasoning_capabilities_override_json, structured_output, " +
+                                "supports_temperature, custom_headers_json, custom_body_json, source, " +
+                                "created_at) VALUES ('model-1', 'provider-1', 'built-in', 'Model', 1, 1, " +
+                                "0, NULL, NULL, NULL, '[\"text\"]', '[\"text\"]', NULL, NULL, NULL, " +
+                                "'null', NULL, 'null', NULL, NULL, '[]', '[]', 'catalog', 1)"
+                        )
+                    }
+
+                    override fun onUpgrade(
+                        db: SupportSQLiteDatabase,
+                        oldVersion: Int,
+                        newVersion: Int,
+                    ) = Unit
+                }
+            )
+            .build()
+        FrameworkSQLiteOpenHelperFactory()
+            .create(configuration)
+            .also { helper ->
+                helper.writableDatabase
+                helper.close()
+            }
     }
 
     private fun createVersion6Database(
@@ -233,6 +356,43 @@ class EtaDatabaseMigrationTest {
             }
     }
 
+    private fun createVersion22Database(
+        context: Context,
+        databaseName: String,
+    ) {
+        val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(databaseName)
+            .callback(
+                object : SupportSQLiteOpenHelper.Callback(22) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        VERSION_22_SCHEMA.forEach(db::execSQL)
+                        db.execSQL(
+                            "INSERT INTO mcp_servers " +
+                                "(id, name, url, enabled, protocol_mode, authorization_type, " +
+                                "tools_json, enabled_tool_names_json, created_at, sort_order, " +
+                                "last_refreshed_at, last_protocol_version, tools_expire_at) " +
+                                "VALUES ('mcp-legacy', 'Legacy MCP', " +
+                                "'http://127.0.0.1:8787/mcp', 1, 'auto', 'none', " +
+                                "'[]', '[]', 1, 0, NULL, NULL, NULL)"
+                        )
+                    }
+
+                    override fun onUpgrade(
+                        db: SupportSQLiteDatabase,
+                        oldVersion: Int,
+                        newVersion: Int,
+                    ) = Unit
+                }
+            )
+            .build()
+        FrameworkSQLiteOpenHelperFactory()
+            .create(configuration)
+            .also { helper ->
+                helper.writableDatabase
+                helper.close()
+            }
+    }
+
     private companion object {
         fun providerModelInsert(id: String, modelId: String, builtIn: Int, sortOrder: Int): String =
             "INSERT INTO provider_models " +
@@ -260,6 +420,37 @@ class EtaDatabaseMigrationTest {
             "CREATE TABLE skill_registry (skill_id TEXT NOT NULL, enabled INTEGER NOT NULL, source TEXT NOT NULL, install_state TEXT NOT NULL, PRIMARY KEY(skill_id))",
             "CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)",
             "INSERT OR REPLACE INTO room_master_table (id, identity_hash) VALUES (42, 'bd87dd0053b011246cba304c35316f07')",
+        )
+
+        // Version 22 schema: the current schema with the mcp_servers columns added by
+        // MIGRATION_22_23 (transport, command, args_json, env_json, working_dir) removed.
+        val VERSION_22_SCHEMA = listOf(
+            "CREATE TABLE agent_text_chunks (owner_table TEXT NOT NULL, owner_id TEXT NOT NULL, field TEXT NOT NULL, chunk_index INTEGER NOT NULL, content TEXT NOT NULL, PRIMARY KEY(owner_table, owner_id, field, chunk_index))",
+            "CREATE TABLE conversations (id TEXT NOT NULL, title TEXT NOT NULL, thinking_enabled INTEGER NOT NULL, reasoning_effort TEXT NOT NULL DEFAULT 'default', history_json TEXT NOT NULL, applied_runtime_run_ids_json TEXT NOT NULL, roleplay_json TEXT NOT NULL DEFAULT '', revisions_json TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(id))",
+            "CREATE TABLE conversation_context_checkpoints (conversation_id TEXT NOT NULL, history_json TEXT NOT NULL, journal_json TEXT NOT NULL DEFAULT '', PRIMARY KEY(conversation_id), FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE TABLE conversation_messages (id TEXT NOT NULL, conversation_id TEXT NOT NULL, sort_index INTEGER NOT NULL, type TEXT NOT NULL, content TEXT NOT NULL, images_json TEXT NOT NULL, is_edited INTEGER NOT NULL DEFAULT 0, render_markdown INTEGER, context_tokens INTEGER, input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER, cached_tokens INTEGER, elapsed_seconds INTEGER, tool_name TEXT, tool_status TEXT, arguments_summary TEXT, result_summary TEXT, detail TEXT, steps_json TEXT NOT NULL DEFAULT '[]', image_count INTEGER NOT NULL, tools_json TEXT NOT NULL, PRIMARY KEY(id), FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE INDEX index_conversation_messages_conversation_id ON conversation_messages(conversation_id)",
+            "CREATE UNIQUE INDEX index_conversation_messages_conversation_id_sort_index ON conversation_messages(conversation_id, sort_index)",
+            "CREATE TABLE conversation_state (id TEXT NOT NULL, selected_conversation_id TEXT NOT NULL, PRIMARY KEY(id))",
+            "CREATE TABLE model_providers (id TEXT NOT NULL, type TEXT NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL, api_key TEXT NOT NULL, is_enabled INTEGER NOT NULL, is_built_in INTEGER NOT NULL, sort_order INTEGER NOT NULL, system_prompt TEXT, custom_headers_json TEXT NOT NULL, custom_body_json TEXT NOT NULL, created_at INTEGER NOT NULL, endpoint_mode TEXT NOT NULL, hosted_web_search_enabled INTEGER NOT NULL DEFAULT 0, anthropic_version TEXT NOT NULL, PRIMARY KEY(id))",
+            "CREATE TABLE provider_models (id TEXT NOT NULL, provider_id TEXT NOT NULL, model_id TEXT NOT NULL, display_name TEXT NOT NULL, is_enabled INTEGER NOT NULL, is_built_in INTEGER NOT NULL, sort_order INTEGER NOT NULL, owned_by TEXT, context_window INTEGER, context_window_override INTEGER, input_modalities_json TEXT NOT NULL, output_modalities_json TEXT NOT NULL, attachment INTEGER, tool_call INTEGER, reasoning INTEGER, reasoning_capabilities_json TEXT NOT NULL DEFAULT 'null', reasoning_override INTEGER, reasoning_capabilities_override_json TEXT NOT NULL DEFAULT 'null', structured_output INTEGER, supports_temperature INTEGER, custom_headers_json TEXT NOT NULL, custom_body_json TEXT NOT NULL, source TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(id), FOREIGN KEY(provider_id) REFERENCES model_providers(id) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE INDEX index_provider_models_provider_id ON provider_models(provider_id)",
+            "CREATE INDEX index_provider_models_provider_id_sort_order ON provider_models(provider_id, sort_order)",
+            "CREATE TABLE runtime_results (run_id TEXT NOT NULL, handoff_id TEXT NOT NULL, handoff_source TEXT NOT NULL, handoff_payload TEXT NOT NULL, dismiss_entry_surface INTEGER NOT NULL, ok INTEGER NOT NULL, content TEXT NOT NULL, error TEXT, reasoning_content TEXT NOT NULL, transcript_json TEXT NOT NULL, context_snapshot_json TEXT NOT NULL DEFAULT '', operation TEXT NOT NULL DEFAULT 'chat', rewrite_target_message_id TEXT, created_at INTEGER NOT NULL, PRIMARY KEY(run_id))",
+            "CREATE TABLE runtime_archive_runs (archive_run_id TEXT NOT NULL, run_id TEXT NOT NULL, handoff_id TEXT NOT NULL, handoff_source TEXT NOT NULL, handoff_payload TEXT NOT NULL, dismiss_entry_surface INTEGER NOT NULL, ok INTEGER NOT NULL, content TEXT NOT NULL, error TEXT, reasoning_content TEXT NOT NULL, transcript_json TEXT NOT NULL, context_snapshot_json TEXT NOT NULL DEFAULT '', operation TEXT NOT NULL DEFAULT 'chat', rewrite_target_message_id TEXT, user_image_previews_json TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(archive_run_id))",
+            "CREATE TABLE runtime_archive_events (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, archive_run_id TEXT NOT NULL, sort_index INTEGER NOT NULL, event_json TEXT NOT NULL, FOREIGN KEY(archive_run_id) REFERENCES runtime_archive_runs(archive_run_id) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE INDEX index_runtime_archive_events_archive_run_id ON runtime_archive_events(archive_run_id)",
+            "CREATE UNIQUE INDEX index_runtime_archive_events_archive_run_id_sort_index ON runtime_archive_events(archive_run_id, sort_index)",
+            "CREATE TABLE runtime_inflight_runs (transcript_json TEXT NOT NULL DEFAULT '[]', run_id TEXT NOT NULL, owner_instance_id TEXT NOT NULL, context_snapshot_json TEXT NOT NULL DEFAULT '', operation TEXT NOT NULL DEFAULT 'chat', rewrite_target_message_id TEXT, handoff_id TEXT NOT NULL, handoff_source TEXT NOT NULL, handoff_payload TEXT NOT NULL, dismiss_entry_surface INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(run_id))",
+            "CREATE TABLE runtime_inflight_events (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, run_id TEXT NOT NULL, sort_index INTEGER NOT NULL, event_json TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES runtime_inflight_runs(run_id) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE INDEX index_runtime_inflight_events_run_id ON runtime_inflight_events(run_id)",
+            "CREATE UNIQUE INDEX index_runtime_inflight_events_run_id_sort_index ON runtime_inflight_events(run_id, sort_index)",
+            "CREATE TABLE skill_registry (skill_id TEXT NOT NULL, enabled INTEGER NOT NULL, source TEXT NOT NULL, install_state TEXT NOT NULL, PRIMARY KEY(skill_id))",
+            "CREATE TABLE mcp_servers (id TEXT NOT NULL, name TEXT NOT NULL, url TEXT NOT NULL, enabled INTEGER NOT NULL, protocol_mode TEXT NOT NULL, authorization_type TEXT NOT NULL, tools_json TEXT NOT NULL, enabled_tool_names_json TEXT NOT NULL, created_at INTEGER NOT NULL, sort_order INTEGER NOT NULL, last_refreshed_at INTEGER, last_protocol_version TEXT, tools_expire_at INTEGER, PRIMARY KEY(id))",
+            "CREATE TABLE roleplay_characters (id TEXT NOT NULL, name TEXT NOT NULL, card_json TEXT NOT NULL, avatar_path TEXT, archived INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(id))",
+            "CREATE TABLE roleplay_user_persona (id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL, PRIMARY KEY(id))",
+            "CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)",
+            "INSERT OR REPLACE INTO room_master_table (id, identity_hash) VALUES (42, 'ca4ed66e0db55783d06c6644d8651bdd')",
         )
     }
 }

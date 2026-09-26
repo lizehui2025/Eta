@@ -121,6 +121,14 @@ object GestureIndicator {
             }
     }
 
+    /**
+     * 幂等兜底清理：取消动画、移除当前浮层并清空静态引用。
+     * 可从任意线程调用，实际清理投递到主线程执行；重复调用为无操作。
+     */
+    fun dismiss() {
+        mainHandler.post { dismissActiveIndicator() }
+    }
+
     private fun dismissActiveIndicator() {
         activeIndicator?.let(::finishIndicator)
     }

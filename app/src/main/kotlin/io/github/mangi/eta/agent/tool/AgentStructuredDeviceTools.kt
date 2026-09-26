@@ -25,6 +25,7 @@ import io.github.mangi.eta.agent.device.AgentNotificationHistoryService
 import io.github.mangi.eta.data.repository.NotificationHistoryRepository
 import java.util.Calendar
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -496,18 +497,25 @@ internal class AgentStructuredDeviceTools(
         if (!rootAvailable()) return listenerNotifications(packageFilter, limit)
         val listed = root.execute("cmd notification list", maxOutputBytes = 256 * 1024)
         if (!listed.ok) return rootError(listed)
-        val items = JSONArray()
-        listed.stdout.lineSequence()
+        val keys = listed.stdout.lineSequence()
             .map(String::trim)
             .filter { it.isNotBlank() && (!packageFilter.isNotBlank() || "|$packageFilter|" in it) }
             .take(limit)
-            .forEach { key ->
-                val detail = root.execute(
-                    "cmd notification get ${shellQuote(key)}",
-                    maxOutputBytes = 128 * 1024,
-                )
-                if (!detail.ok) return@forEach
-                val text = detail.stdout
+            .toList()
+        val items = JSONArray()
+        if (keys.isNotEmpty()) {
+            // 逐条 `cmd notification get` 每次都要起一个 su 进程（最多 20 次）；这里合并成
+            // 单条 shell 循环，用固定分隔符切回每条记录并带上各自的退出码，解析口径与逐条执行一致。
+            val batch = root.execute(
+                notificationDetailBatchCommand(keys),
+                timeoutMillis = (keys.size * NOTIFICATION_DETAIL_TIMEOUT_MS)
+                    .coerceIn(NOTIFICATION_BATCH_MIN_TIMEOUT_MS, NOTIFICATION_BATCH_MAX_TIMEOUT_MS),
+                maxOutputBytes = NOTIFICATION_BATCH_MAX_OUTPUT_BYTES,
+            )
+            parseNotificationDetails(batch.stdout).forEach { detail ->
+                // 与原逐条执行一致：单条命令失败（含超时）时跳过该条，不影响其余结果。
+                if (detail.exitCode != 0) return@forEach
+                val text = detail.text
                 items.put(
                     JSONObject()
                         .put("package_name", NOTIFICATION_PACKAGE.find(text)?.groupValues?.get(1).orEmpty())
@@ -516,6 +524,7 @@ internal class AgentStructuredDeviceTools(
                         .put("sub_text", notificationExtra(text, "android.subText")),
                 )
             }
+        }
         return ok("recent_notifications").put("items", items).put("count", items.length()).toString()
     }
 
@@ -625,9 +634,58 @@ internal class AgentStructuredDeviceTools(
         return (0 until array.length()).map { array.optLong(it) }
     }
 
-    private fun notificationExtra(source: String, key: String): String? =
-        Regex("""(?m)^\s*${Regex.escape(key)}=[^(]+\((.*)\)\s*$""")
-            .find(source)?.groupValues?.get(1)?.takeUnless { it == "null" }
+    /** 通知扩展字段的按键缓存正则：原先每次调用都要重新编译一次。 */
+    private fun notificationExtra(source: String, key: String): String? {
+        val pattern = NOTIFICATION_EXTRA_PATTERNS.getOrPut(key) {
+            Regex("""(?m)^\s*${Regex.escape(key)}=[^(]+\((.*)\)\s*$""")
+        }
+        return pattern.find(source)?.groupValues?.get(1)?.takeUnless { it == "null" }
+    }
+
+    /** 单条 `cmd notification get` 的输出与退出码。 */
+    private data class NotificationDetail(val exitCode: Int, val text: String)
+
+    /**
+     * 把多条 `cmd notification get` 合并成一条 shell 循环：每个 key 前打印记录分隔符，
+     * 之后打印「分隔符 + 该条命令退出码」，交给 [parseNotificationDetails] 还原成等价的逐条结果。
+     */
+    private fun notificationDetailBatchCommand(keys: List<String>): String =
+        keys.joinToString(separator = " ") { key ->
+            "echo ${shellQuote(NOTIFICATION_DETAIL_MARKER)}; " +
+                "cmd notification get ${shellQuote(key)}; " +
+                "echo ${shellQuote(NOTIFICATION_EXIT_MARKER)}\"\$?\""
+        }
+
+    /**
+     * 解析批量输出：记录以 [NOTIFICATION_DETAIL_MARKER] 行开始，以 [NOTIFICATION_EXIT_MARKER] 行结束。
+     * 缺少结束行的记录（输出被截断或命令超时）直接丢弃，不把半条记录当成有效通知；
+     * 其余记录的文本与逐条执行时的 stdout 相同（按行拼接）。
+     */
+    private fun parseNotificationDetails(stdout: String): List<NotificationDetail> {
+        val details = mutableListOf<NotificationDetail>()
+        var current: StringBuilder? = null
+        var exitCode: Int? = null
+        fun flush() {
+            val text = current
+            val code = exitCode
+            current = null
+            exitCode = null
+            if (text != null && code != null) details += NotificationDetail(code, text.toString())
+        }
+        for (line in stdout.lineSequence()) {
+            val trimmed = line.trimEnd()
+            if (trimmed == NOTIFICATION_DETAIL_MARKER) {
+                flush()
+                current = StringBuilder()
+            } else if (trimmed.startsWith(NOTIFICATION_EXIT_MARKER)) {
+                exitCode = trimmed.removePrefix(NOTIFICATION_EXIT_MARKER).trim().toIntOrNull()
+            } else {
+                current?.append(line)?.append('\n')
+            }
+        }
+        flush()
+        return details
+    }
 
     private fun String.toCalendarDay(): Int = when (lowercase(Locale.ROOT)) {
         "sun" -> Calendar.SUNDAY
@@ -678,6 +736,22 @@ internal class AgentStructuredDeviceTools(
             "酒店", "电影票",
         )
         const val COLOROS_CLOCK_PACKAGE = "com.coloros.alarmclock"
+
+        /** 通知明细批量命令的记录分隔符；取值刻意生僻，避免与 `cmd notification get` 的输出行冲突。 */
+        const val NOTIFICATION_DETAIL_MARKER = "__eta_notification_detail__"
+        const val NOTIFICATION_EXIT_MARKER = "__eta_notification_exit__"
+
+        /** 单条 `cmd notification get` 的超时预算（与逐条执行的 8s 一致），整体按条数放宽后封顶。 */
+        const val NOTIFICATION_DETAIL_TIMEOUT_MS = 8_000L
+        const val NOTIFICATION_BATCH_MIN_TIMEOUT_MS = 8_000L
+        const val NOTIFICATION_BATCH_MAX_TIMEOUT_MS = 30_000L
+
+        /** 批量输出上限：原先逐条 128KB × 最多 20 条，这里取执行器允许的最大值 2MB。 */
+        const val NOTIFICATION_BATCH_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
+
+        /** 通知扩展字段正则缓存，避免每次调用重复编译同一个 key 的 Pattern。 */
+        val NOTIFICATION_EXTRA_PATTERNS = ConcurrentHashMap<String, Regex>()
+
         val PACKAGE_NAME = Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
         val NETWORK_BLOCK = Regex("<Network>.*?</Network>", setOf(RegexOption.DOT_MATCHES_ALL))
         val XML_SSID = Regex("""<string name="SSID">(.*?)</string>""")

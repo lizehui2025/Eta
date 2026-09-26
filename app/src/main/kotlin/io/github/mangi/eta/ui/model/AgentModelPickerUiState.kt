@@ -9,6 +9,7 @@ import io.github.mangi.eta.data.model.ProviderSetting
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
 import java.text.NumberFormat
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @Immutable
 internal data class AgentModelPickerUiState(
@@ -46,9 +47,22 @@ internal data class AgentContextUsageUi(
      * 与压缩判据同一 token 口径；读文件抓到的内容落在“代码”项，可直接对账。
      */
     val breakdown: AgentContextBreakdown? = null,
+    /** 最近一轮实际请求的输入 token 数；没有实测数据时为 null。 */
+    val lastInputTokens: Int? = null,
+    /** 最近一轮输入中被提示缓存的 token 数；没有实测数据时为 null。 */
+    val lastCachedTokens: Int? = null,
 ) {
     val progress: Float?
         get() = contextUsageProgress(contextTokens, contextWindow)
+
+    /** 缓存命中率（百分比，0..100）：input/cached 缺失或数值无效时返回 null。 */
+    val cacheHitPercent: Int?
+        get() {
+            val input = lastInputTokens ?: return null
+            val cached = lastCachedTokens ?: return null
+            if (input <= 0 || cached < 0) return null
+            return (cached * 100.0 / input).roundToInt().coerceIn(0, 100)
+        }
 }
 
 internal object AgentModelPickerProjector {
@@ -116,22 +130,48 @@ internal object AgentModelPickerProjector {
 internal fun defaultExpandedModelProviderIds(selectedModel: AgentModelOptionUi?): Set<String> =
     selectedModel?.providerId?.let(::setOf).orEmpty()
 
+/** 最近一条被采纳的实测用量：contextTokens 决定是否采纳，input/cached 与它同源。 */
+private data class LastContextUsage(
+    val contextTokens: Int,
+    val estimated: Boolean,
+    val inputTokens: Int?,
+    val cachedTokens: Int?,
+)
+
 internal fun latestContextUsage(
     messages: List<AgentChatMessageUi>,
     selectedModel: AgentModelOptionUi?,
 ): AgentContextUsageUi {
     val lastUsage = messages.asReversed().asSequence().mapNotNull { message ->
         when (message) {
-            is AgentMessageUi -> message.usage?.contextTokens?.let { it to false }
-            is SystemNoticeMessageUi -> message.contextTokens?.let { it to true }
+            is AgentMessageUi -> message.usage?.let { usage ->
+                usage.contextTokens?.let { contextTokens ->
+                    LastContextUsage(
+                        contextTokens = contextTokens,
+                        estimated = false,
+                        inputTokens = usage.inputTokens,
+                        cachedTokens = usage.cachedTokens,
+                    )
+                }
+            }
+            is SystemNoticeMessageUi -> message.contextTokens?.let { contextTokens ->
+                LastContextUsage(
+                    contextTokens = contextTokens,
+                    estimated = true,
+                    inputTokens = null,
+                    cachedTokens = null,
+                )
+            }
             else -> null
         }
     }.firstOrNull()
     return AgentContextUsageUi(
-        lastUsage?.first,
-        selectedModel?.contextWindow,
-        lastUsage?.second ?: false,
+        contextTokens = lastUsage?.contextTokens,
+        contextWindow = selectedModel?.contextWindow,
+        estimated = lastUsage?.estimated ?: false,
         breakdown = contextUiBreakdown(messages),
+        lastInputTokens = lastUsage?.inputTokens,
+        lastCachedTokens = lastUsage?.cachedTokens,
     )
 }
 

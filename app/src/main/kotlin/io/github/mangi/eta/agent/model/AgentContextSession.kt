@@ -18,6 +18,8 @@ internal class AgentContextSession(
     private val onContextSnapshot: (AgentContextSnapshot) -> Unit,
     private val transcriptSize: () -> Int = { 0 },
     private val roleplay: Boolean = false,
+    /** 会话路由键：压缩请求与主对话共享服务端缓存路由。 */
+    private val sessionId: String = java.util.UUID.randomUUID().toString(),
 ) {
     val budget = AgentContextBudget(config.contextWindow)
     private var compacted = false
@@ -86,19 +88,22 @@ internal class AgentContextSession(
         onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_STARTED, before))
         try {
             var candidate = messages
-            var attempts = 0
+            // 不设尝试次数上限：只要每次摘要都在缩小就继续，直到达标；
+            // 某次不再缩小即停并报错，避免无进展时无限消耗模型调用。
+            var previousTokens = before
             do {
                 candidate = AgentContextCompactor(
                     config, provider, runController,
                     estimate = { candidate -> budget.rawEstimateCached(candidate) },
                     roleplay = roleplay,
+                    sessionId = sessionId,
                 ).compact(candidate, systemCount, sensitiveIds(), force)
-                attempts++
                 val tokens = budget.effectiveTokens(candidate, roundTools)
                 if (!budget.shouldCompact(tokens)) break
-                if (attempts >= AgentContextBudget.MAX_OVERFLOW_ATTEMPTS) {
+                if (tokens >= previousTokens) {
                     throw AgentContextCompactor.failure("CONTEXT_NO_REDUCTION", "摘要后上下文仍超过容量预算。")
                 }
+                previousTokens = tokens
             } while (true)
             runController.throwIfCancelled()
             val wasCompacted = compacted
@@ -131,7 +136,9 @@ internal class AgentContextSession(
     private fun logWindowBreakdown(stage: String, roundTools: JSONArray, tokens: Int, detailed: Boolean) {
         runCatching {
             val breakdown = if (detailed) {
-                " 分类[${AgentContextBreakdownCounter.breakdown(messages, roundTools).summaryLine()}]"
+                // 超大历史下明细统计本身就是一次全量扫描，直接跳过，省下一遍大文本遍历。
+                if (isHugeHistory()) " 明细跳过(超大历史)"
+                else " 分类[${AgentContextBreakdownCounter.breakdown(messages, roundTools).summaryLine()}]"
             } else {
                 ""
             }
@@ -155,5 +162,30 @@ internal class AgentContextSession(
             if (!message.optBoolean("_eta_observation")) durable.put(message)
         }
         return AgentConversationCodec.transcript(durable, 0, sensitiveIds())
+    }
+
+    /**
+     * 超大历史快判：只加长度不扫正文，O(消息数)。超过阈值即跳过分类明细的第二遍全量扫描，
+     * 把压缩准备从“估算+明细”两遍降为一遍。
+     */
+    private fun isHugeHistory(): Boolean {
+        var total = 0L
+        for (index in systemCount until messages.length()) {
+            val message = messages.optJSONObject(index) ?: continue
+            when (val content = message.opt("content")) {
+                is String -> total += content.length
+                is JSONArray -> total += content.length() * 64L
+                else -> Unit
+            }
+            total += message.optString("reasoning_content").length
+            message.optJSONArray("tool_calls")?.let { total += it.length() * 256L }
+            if (total > HUGE_HISTORY_CHARS) return true
+        }
+        return false
+    }
+
+    companion object {
+        /** 明细跳过阈值：约 500K token 量级，超过即认为第二遍扫描不值得。 */
+        private const val HUGE_HISTORY_CHARS = 1_500_000L
     }
 }

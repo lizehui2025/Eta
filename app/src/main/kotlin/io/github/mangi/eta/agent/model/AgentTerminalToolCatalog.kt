@@ -46,7 +46,7 @@ internal object AgentTerminalToolCatalog {
                                     JSONObject()
                                         .put("type", "string")
                                         .put("enum", JSONArray().put("android").put("linux"))
-                                        .put("description", "android uses the native Android shell with BusyBox applets when available. linux uses the Alpine or Debian environment selected in Eta settings. Default android.")
+                                        .put("description", "android uses the native Android shell with BusyBox applets when available, for device data and system/root operations. linux uses the Alpine or Debian environment selected in Eta settings, for finding code, running scripts and processing data. Defaults to Linux when a Linux environment is installed, otherwise android.")
                                 )
                                 .put(
                                     "command",
