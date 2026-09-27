@@ -1,10 +1,12 @@
 package io.github.mangi.eta.agent.voice
 
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Bundle
+import android.graphics.Bitmap
 import android.service.voice.VoiceInteractionSession
 import android.view.View
 
@@ -15,6 +17,8 @@ import android.view.View
  * TYPE_APPLICATION_OVERLAY 窗口承载，避免把厂商助手动画和输入层级绑定到系统会话窗口。
  */
 internal class EtaVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
+    private var screenContext: EtaAssistantScreenContext? = null
+    private var shown = false
     private val controlReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_HIDE_FOR_FOREGROUND_OPERATION) {
@@ -35,9 +39,35 @@ internal class EtaVoiceInteractionSession(context: Context) : VoiceInteractionSe
 
     override fun onCreateContentView(): View = View(context)
 
+    override fun onPrepareShow(args: Bundle?, showFlags: Int) {
+        super.onPrepareShow(args, showFlags)
+        shown = false
+        screenContext = EtaAssistantScreenContexts.begin(
+            showFlags,
+            args?.getParcelableArrayList(KEY_FOREGROUND_ACTIVITIES, ComponentName::class.java).orEmpty(),
+        )
+    }
+
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
-        EtaAssistantOverlayService.show(context)
+        shown = true
+        EtaAssistantOverlayService.show(context, screenContext?.id)
+    }
+
+    override fun onHandleAssist(state: AssistState) {
+        screenContext?.acceptAssist(context.applicationContext, state)
+    }
+
+    override fun onHandleScreenshot(screenshot: Bitmap?) {
+        val capture = screenContext
+        if (capture == null) screenshot?.recycle() else capture.acceptScreenshot(screenshot)
+    }
+
+    override fun onHide() {
+        EtaAssistantScreenContexts.release(screenContext?.id)
+        screenContext = null
+        shown = false
+        super.onHide()
     }
 
     override fun onBackPressed() {
@@ -52,6 +82,8 @@ internal class EtaVoiceInteractionSession(context: Context) : VoiceInteractionSe
 
     override fun onDestroy() {
         // 浮窗拥有独立生命周期；系统会话重建不代表用户关闭了助理。
+        if (!shown) EtaAssistantScreenContexts.release(screenContext?.id)
+        screenContext = null
         context.unregisterReceiver(controlReceiver)
         super.onDestroy()
     }

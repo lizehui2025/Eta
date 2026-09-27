@@ -158,11 +158,12 @@ internal object AgentRuntimeImageTransfer {
                 if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
                     throw ImageTransferException("图片总大小不能超过 ${MAX_TOTAL_IMAGE_BYTES / 1024 / 1024} MiB")
                 }
-                return@mapIndexed AgentImageCodec.fromAttachmentBytes(
-                    bytes = bytes,
-                    source = image.source,
-                    mimeHint = image.mimeType,
-                ).also { materialized ->
+                val materialized = if (image.preserveOriginal) {
+                    AgentImageCodec.fromScreenBytes(bytes, image.source, image.mimeType)
+                } else {
+                    AgentImageCodec.fromAttachmentBytes(bytes, image.source, image.mimeType)
+                }
+                return@mapIndexed materialized.also {
                     AndroidAgentLogger.debug {
                         "Agent image action=materialize index=$index " +
                             "input_bytes=${bytes.size} output_bytes=${materialized.bytes} " +
@@ -184,6 +185,7 @@ internal object AgentRuntimeImageTransfer {
                     width = image.width,
                     height = image.height,
                     source = image.source,
+                    preserveOriginal = image.preserveOriginal,
                 )
             }
             if (reference.length > MAX_ENCODED_IMAGE_CHARS) {
@@ -193,6 +195,7 @@ internal object AgentRuntimeImageTransfer {
                 context = null,
                 value = reference,
                 source = image.source,
+                preserveOriginal = image.preserveOriginal,
             ) ?: throw ImageTransferException("无法读取旧协议中的图片")
         }
         request.materializeText().copy(images = images)
@@ -210,6 +213,7 @@ internal object AgentRuntimeImageTransfer {
         width = width,
         height = height,
         source = source,
+        preserveOriginal = preserveOriginal,
     )
 
     private fun copyReferenceToFile(

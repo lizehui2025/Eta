@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
+import io.github.mangi.eta.agent.media.AgentImageCodec
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -87,9 +88,8 @@ internal object AgentBrowserSession {
     private const val NAVIGATION_TIMEOUT_MS = 25_000L
     private const val JAVASCRIPT_TIMEOUT_MS = 8_000L
     private const val POST_ACTION_TIMEOUT_MS = 10_000L
-    private const val SCREENSHOT_MAX_WIDTH = 1_280
-    private const val SCREENSHOT_MAX_HEIGHT = 2_400
-    private const val SCREENSHOT_QUALITY = 75
+    private const val OFFSCREEN_VIEWPORT_MAX_WIDTH = 1_280
+    private const val OFFSCREEN_VIEWPORT_MAX_HEIGHT = 2_400
     private const val PREVIEW_MAX_WIDTH = 480
     private const val PREVIEW_MAX_HEIGHT = 900
     private const val PREVIEW_QUALITY = 60
@@ -301,20 +301,7 @@ internal object AgentBrowserSession {
         val view = webView ?: return null
         if (currentUrl.isBlank()) return null
         return runCatching {
-            val captured = captureViewport(
-                view,
-                maxWidth = PREVIEW_MAX_WIDTH,
-                maxHeight = PREVIEW_MAX_HEIGHT,
-                quality = PREVIEW_QUALITY,
-            )
-            BrowserImage(
-                dataUrl = "data:image/jpeg;base64," +
-                    Base64.encodeToString(captured.bytes, Base64.NO_WRAP),
-                mimeType = "image/jpeg",
-                bytes = captured.bytes.size,
-                width = captured.width,
-                height = captured.height,
-            )
+            captureViewport(view, preview = true)
         }.getOrNull()
     }
 
@@ -526,18 +513,8 @@ internal object AgentBrowserSession {
         val envelope = baseEnvelope("screenshot", true, "ok")
             .put("image_width", captured.width)
             .put("image_height", captured.height)
-            .put("image_bytes", captured.bytes.size)
-        val image = if (includeImage) {
-            BrowserImage(
-                dataUrl = "data:image/jpeg;base64," + Base64.encodeToString(captured.bytes, Base64.NO_WRAP),
-                mimeType = "image/jpeg",
-                bytes = captured.bytes.size,
-                width = captured.width,
-                height = captured.height,
-            )
-        } else {
-            null
-        }
+            .put("image_bytes", captured.bytes)
+        val image = captured.takeIf { includeImage }
         return toolResult(envelope, listOfNotNull(image))
     }
 
@@ -726,8 +703,8 @@ internal object AgentBrowserSession {
     private fun layoutOffscreenOnMain(view: WebView) {
         if (view.width > 0 && view.height > 0) return
         val metrics = (appContext ?: return).resources.displayMetrics
-        val width = metrics.widthPixels.coerceIn(720, SCREENSHOT_MAX_WIDTH)
-        val height = metrics.heightPixels.coerceIn(1_280, SCREENSHOT_MAX_HEIGHT)
+        val width = metrics.widthPixels.coerceIn(720, OFFSCREEN_VIEWPORT_MAX_WIDTH)
+        val height = metrics.heightPixels.coerceIn(1_280, OFFSCREEN_VIEWPORT_MAX_HEIGHT)
         view.measure(
             View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
@@ -829,36 +806,54 @@ internal object AgentBrowserSession {
         return JSONObject().put("value", value)
     }
 
-    private fun captureViewport(
-        view: WebView,
-        maxWidth: Int = SCREENSHOT_MAX_WIDTH,
-        maxHeight: Int = SCREENSHOT_MAX_HEIGHT,
-        quality: Int = SCREENSHOT_QUALITY,
-    ): CapturedImage = callOnMain {
-        layoutOffscreenOnMain(view)
-        val sourceWidth = view.width.coerceAtLeast(1)
-        val sourceHeight = view.height.coerceAtLeast(1)
-        val scale = minOf(
-            1f,
-            maxWidth.toFloat() / sourceWidth,
-            maxHeight.toFloat() / sourceHeight,
-        )
-        val width = (sourceWidth * scale).roundToInt().coerceAtLeast(1)
-        val height = (sourceHeight * scale).roundToInt().coerceAtLeast(1)
-        if (view.windowToken == null) view.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-        val bitmap = createBitmap(width, height)
-        Canvas(bitmap).also { canvas ->
-            canvas.drawColor(Color.WHITE)
-            canvas.scale(scale, scale)
-            view.draw(canvas)
+    private fun captureViewport(view: WebView, preview: Boolean = false): BrowserImage {
+        val bitmap = callOnMain {
+            layoutOffscreenOnMain(view)
+            val sourceWidth = view.width.coerceAtLeast(1)
+            val sourceHeight = view.height.coerceAtLeast(1)
+            val scale = if (preview) minOf(
+                1f,
+                PREVIEW_MAX_WIDTH.toFloat() / sourceWidth,
+                PREVIEW_MAX_HEIGHT.toFloat() / sourceHeight,
+            ) else 1f
+            val width = (sourceWidth * scale).roundToInt().coerceAtLeast(1)
+            val height = (sourceHeight * scale).roundToInt().coerceAtLeast(1)
+            if (view.windowToken == null) view.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            val captured = createBitmap(width, height)
+            try {
+                Canvas(captured).also { canvas ->
+                    if (preview) {
+                        canvas.drawColor(Color.WHITE)
+                        canvas.scale(scale, scale)
+                    }
+                    view.draw(canvas)
+                }
+                captured
+            } catch (failure: Throwable) {
+                captured.recycle()
+                throw failure
+            }
         }
-        val bytes = ByteArrayOutputStream().use { stream ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)
-            stream.toByteArray()
-        }
-        val captured = CapturedImage(bytes, bitmap.width, bitmap.height)
-        bitmap.recycle()
-        captured
+        // 主线程仅绘制，模型截图的必要编码留在浏览器执行线程；预览不参与模型输入。
+        return try {
+            if (preview) {
+                val bytes = ByteArrayOutputStream().use { stream ->
+                    check(bitmap.compress(Bitmap.CompressFormat.JPEG, PREVIEW_QUALITY, stream))
+                    stream.toByteArray()
+                }
+                BrowserImage(
+                    dataUrl = "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP),
+                    mimeType = "image/jpeg", bytes = bytes.size,
+                    width = bitmap.width, height = bitmap.height,
+                )
+            } else {
+                val image = AgentImageCodec.fromScreenBitmap(bitmap, source = "agent_browser")
+                BrowserImage(
+                    dataUrl = image.reference, mimeType = image.mimeType, bytes = image.bytes,
+                    width = bitmap.width, height = bitmap.height,
+                )
+            }
+        } finally { bitmap.recycle() }
     }
 
     private fun baseEnvelope(action: String, ok: Boolean, status: String): JSONObject {
@@ -1075,12 +1070,6 @@ internal object AgentBrowserSession {
         val selector: String?,
         val x: Int?,
         val y: Int?,
-    )
-
-    private data class CapturedImage(
-        val bytes: ByteArray,
-        val width: Int,
-        val height: Int,
     )
 
     private data class LoadOutcome(

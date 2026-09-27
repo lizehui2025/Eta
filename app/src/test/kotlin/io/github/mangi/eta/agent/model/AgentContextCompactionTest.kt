@@ -9,6 +9,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AgentContextCompactionTest {
+    @Test
+    fun automaticScreenContentIsNotCopiedIntoCompactionInput() {
+        val messages = jsonHistory()
+        val user = AgentConversationCodec.userTextMessage("保留最新问题")
+        AssistantScreenContextProjection.attach(user, "PRIVATE_AUTOMATIC_SCREEN_CONTENT")
+        messages.put(user)
+        val compacted = AgentContextCompactor(config, provider { request, _ ->
+            assertFalse(request.messages.toString().contains("PRIVATE_AUTOMATIC_SCREEN_CONTENT"))
+            response("已完成此前的任务。")
+        }, AgentRunController()).compact(messages, 1, emptySet(), force = true)
+        assertFalse(AgentConversationCodec.encodeTranscriptForStorage(
+            AgentConversationCodec.transcript(compacted, 1),
+        ).contains("PRIVATE_AUTOMATIC_SCREEN_CONTENT"))
+        assertTrue(AssistantScreenContextProjection.project(compacted).toString().contains("PRIVATE_AUTOMATIC_SCREEN_CONTENT"))
+    }
+
     private val config = AgentModelClient.ModelConfig(
         baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "固定约束",
     )

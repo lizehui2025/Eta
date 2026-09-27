@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.tool
 
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteQueryBuilder
 import io.github.mangi.eta.core.ColorOsMemoryBridgeProtocol
 import java.nio.charset.StandardCharsets
 import org.json.JSONArray
@@ -10,9 +11,17 @@ import org.json.JSONObject
 internal fun quoteColorOsMemoryIdentifier(value: String): String =
     "\"" + value.replace("\"", "\"\"") + "\""
 
-/** 在已打开的只读数据库上执行固定查询；Runtime 快照和小布进程 Hook 共用同一实现。 */
+/** 只接受查询调用，兼容宿主的加密数据库连接和普通 SQLite 快照。 */
+internal fun interface ColorOsMemoryReadDatabase {
+    fun rawQuery(sql: String, selectionArgs: Array<String>?): Cursor
+}
+
+/** Runtime 快照和小布进程 Hook 共用固定查询，不暴露任意 SQL 入口。 */
 internal object ColorOsMemoryDatabaseQuery {
-    fun execute(database: SQLiteDatabase, operation: String, args: JSONObject): String = when (operation) {
+    fun execute(database: SQLiteDatabase, operation: String, args: JSONObject): String =
+        execute(ColorOsMemoryReadDatabase(database::rawQuery), operation, args)
+
+    fun execute(database: ColorOsMemoryReadDatabase, operation: String, args: JSONObject): String = when (operation) {
         ColorOsMemoryBridgeProtocol.OPERATION_SEARCH -> searchMemories(database, args)
         ColorOsMemoryBridgeProtocol.OPERATION_ORDERS -> searchMemories(
             database = database,
@@ -25,7 +34,7 @@ internal object ColorOsMemoryDatabaseQuery {
     }
 
     private fun searchMemories(
-        database: SQLiteDatabase,
+        database: ColorOsMemoryReadDatabase,
         args: JSONObject,
         ordersOnly: Boolean = false,
         toolName: String = "search_coloros_memories",
@@ -145,7 +154,7 @@ internal object ColorOsMemoryDatabaseQuery {
             .toString()
     }
 
-    private fun searchPlaces(database: SQLiteDatabase, args: JSONObject): String {
+    private fun searchPlaces(database: ColorOsMemoryReadDatabase, args: JSONObject): String {
         val columns = database.tableColumns("memory_address")
         if ("memory_id" !in columns) {
             return error("COLOROS_PLACE_SCHEMA_UNSUPPORTED", "当前系统记忆没有可用的地点字段")
@@ -186,7 +195,7 @@ internal object ColorOsMemoryDatabaseQuery {
             .toString()
     }
 
-    private fun relatedDetails(database: SQLiteDatabase, memoryId: String): JSONObject =
+    private fun relatedDetails(database: ColorOsMemoryReadDatabase, memoryId: String): JSONObject =
         JSONObject().also { details ->
             DETAIL_SPECS.forEach { spec ->
                 val columns = database.tableColumns(spec.table)
@@ -210,7 +219,7 @@ internal object ColorOsMemoryDatabaseQuery {
             }
         }
 
-    private fun SQLiteDatabase.queryRows(
+    private fun ColorOsMemoryReadDatabase.queryRows(
         table: String,
         projection: List<String>,
         selection: String,
@@ -231,17 +240,29 @@ internal object ColorOsMemoryDatabaseQuery {
         }
     }
 
-    private fun SQLiteDatabase.tableColumns(table: String): Set<String> =
-        runCatching {
-            rawQuery("PRAGMA table_info($table)", null).use { cursor ->
-                val nameIndex = cursor.getColumnIndex("name")
-                buildSet {
-                    while (cursor.moveToNext()) {
-                        if (nameIndex >= 0) add(cursor.getString(nameIndex))
-                    }
-                }
+    private fun ColorOsMemoryReadDatabase.query(
+        table: String,
+        projection: Array<String>,
+        selection: String?,
+        selectionArgs: Array<String>?,
+        groupBy: String?,
+        having: String?,
+        orderBy: String?,
+        limit: String,
+    ): Cursor = rawQuery(
+        SQLiteQueryBuilder.buildQueryString(
+            false, table.sqlIdentifier(), projection, selection, groupBy, having, orderBy, limit,
+        ),
+        selectionArgs,
+    )
+
+    private fun ColorOsMemoryReadDatabase.tableColumns(table: String): Set<String> =
+        rawQuery("PRAGMA table_info(${table.sqlIdentifier()})", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(nameIndex))
             }
-        }.getOrDefault(emptySet())
+        }
 
     private fun Cursor.currentRow(): JSONObject = JSONObject().also { row ->
         for (index in 0 until columnCount) {

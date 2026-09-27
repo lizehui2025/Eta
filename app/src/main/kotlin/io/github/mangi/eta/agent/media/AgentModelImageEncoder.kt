@@ -41,6 +41,11 @@ internal object AgentModelImageEncoder {
     private data class TargetSize(val width: Int, val height: Int)
 
     private val screenProfile = EncodingProfile(
+        format = Bitmap.CompressFormat.PNG,
+        mimeType = "image/png",
+        quality = 100,
+    )
+    private val attachmentProfile = EncodingProfile(
         format = Bitmap.CompressFormat.JPEG,
         mimeType = "image/jpeg",
         quality = MODEL_JPEG_QUALITY,
@@ -58,7 +63,7 @@ internal object AgentModelImageEncoder {
         quality = MODEL_JPEG_QUALITY,
     )
 
-    fun screen(
+    fun attachment(
         bytes: ByteArray,
         source: String,
         mimeHint: String,
@@ -69,9 +74,9 @@ internal object AgentModelImageEncoder {
             bytes = bytes,
             source = source,
             bounds = bounds,
-            profile = screenProfile,
+            profile = attachmentProfile,
         )
-        // 所有模型输入统一使用 JPEG，避免不同服务商对 HEIF、WebP 等格式支持不一致。
+        // 普通附件保持 JPEG 兼容路径；截图不经过这里的解码与重编码。
         return encoded
     }
 
@@ -79,15 +84,8 @@ internal object AgentModelImageEncoder {
         bitmap: Bitmap,
         source: String,
     ): AgentModelClient.ModelImage =
-        encodeBitmap(bitmap, source, screenProfile, flattenAlpha = false)
-
-    /** 助理入口截图直接进入网络请求，使用视觉模型尺寸避免全屏无损图撑大请求体。 */
-    fun screenContext(
-        bitmap: Bitmap,
-        source: String,
-    ): AgentModelClient.ModelImage =
-        // GUI Agent 依赖截图像素与设备坐标一一对应，禁止缩放；仅统一编码为 JPEG。
-        encodeBitmap(bitmap, source, screenProfile, flattenAlpha = true)
+        // Bitmap 尚无文件编码，仅序列化一次 PNG；不缩放、不铺底、不转换像素。
+        encodeBitmap(bitmap, source, screenProfile, flattenAlpha = false).copy(preserveOriginal = true)
 
     /** 文件工具图片在发送模型前统一编码为 JPEG。 */
     fun toolVision(

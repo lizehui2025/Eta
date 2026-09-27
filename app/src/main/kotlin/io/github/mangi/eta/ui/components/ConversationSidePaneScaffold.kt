@@ -203,7 +203,7 @@ fun ConversationSidePaneScaffold(
         Box(
             modifier = Modifier.fillMaxSize()
                 .clipToBounds()
-                .background(MiuixTheme.colorScheme.surface)
+                .background(conversationPaneContainerColor())
                 // 手势由共同容器拥有，侧栏和聊天舞台均可拖动；子级先处理滚动与选择。
                 .anchoredDraggable(
                     state = paneDragState,

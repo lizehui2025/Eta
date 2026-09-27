@@ -183,25 +183,29 @@ internal object GoogleAppHooks {
             return
         }
 
-        runCatching {
-            field.set(null, value)
-        }.recoverCatching {
-            val unsafeClass = Class.forName("sun.misc.Unsafe")
-            val theUnsafe = unsafeClass.getDeclaredField("theUnsafe").apply {
-                isAccessible = true
-            }.get(null)
-            val base = unsafeClass.getDeclaredMethod("staticFieldBase", Field::class.java)
-                .invoke(theUnsafe, field)
-            val offset = unsafeClass.getDeclaredMethod("staticFieldOffset", Field::class.java)
-                .invoke(theUnsafe, field) as Long
-            unsafeClass.getDeclaredMethod(
-                "putObjectVolatile",
-                Any::class.java,
-                Long::class.javaPrimitiveType!!,
-                Any::class.java
-            ).invoke(theUnsafe, base, offset, value)
-        }.onFailure { throwable ->
-            logger.warn("GSA: 修改 Build.$fieldName 失败，type=${throwable.safeLogType()}")
+        try {
+            try {
+                field.set(null, value)
+            } catch (_: IllegalAccessException) {
+                // Android 17 禁止反射写入这些静态 final 字段；静态字段 API 位于内部 Unsafe。
+                val unsafeClass = Class.forName("jdk.internal.misc.Unsafe")
+                val theUnsafe = unsafeClass.getDeclaredField("theUnsafe").apply {
+                    isAccessible = true
+                }.get(null)
+                val base = unsafeClass.getDeclaredMethod("staticFieldBase", Field::class.java)
+                    .invoke(theUnsafe, field)
+                val offset = unsafeClass.getDeclaredMethod("staticFieldOffset", Field::class.java)
+                    .invoke(theUnsafe, field) as Long
+                unsafeClass.getDeclaredMethod(
+                    "putReferenceVolatile",
+                    Any::class.java,
+                    Long::class.javaPrimitiveType!!,
+                    Any::class.java
+                ).invoke(theUnsafe, base, offset, value)
+            }
+            check(field.get(null) == value) { "build_field_write_not_applied" }
+        } catch (exception: Exception) {
+            logger.warn("GSA: 修改 Build.$fieldName 失败，type=${exception.safeLogType()}")
         }
     }
 }

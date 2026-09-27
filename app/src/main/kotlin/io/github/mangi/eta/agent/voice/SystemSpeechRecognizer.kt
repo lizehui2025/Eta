@@ -5,22 +5,38 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import android.provider.Settings
 import android.speech.RecognitionService
 import android.speech.SpeechRecognizer
 
 internal object SystemSpeechRecognizer {
-    fun create(context: Context): SpeechRecognizer? {
+    internal data class Source(val component: ComponentName?) {
+        val label: String get() = component?.flattenToShortString() ?: "on_device"
+    }
+
+    internal data class Selection(val recognizer: SpeechRecognizer, val source: Source)
+
+    fun create(context: Context): SpeechRecognizer? = select(context)?.recognizer
+
+    fun select(context: Context): Selection? {
         val appContext = context.applicationContext
         resolveExternalService(appContext)?.let { component ->
-            return SpeechRecognizer.createSpeechRecognizer(appContext, component)
+            return Selection(SpeechRecognizer.createSpeechRecognizer(appContext, component), Source(component))
         }
         return if (SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
+            Selection(SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext), Source(null))
         } else {
             null
         }
     }
+
+    fun create(context: Context, source: Source): SpeechRecognizer =
+        if (source.component == null) {
+            SpeechRecognizer.createOnDeviceSpeechRecognizer(context.applicationContext)
+        } else {
+            SpeechRecognizer.createSpeechRecognizer(context.applicationContext, source.component)
+        }
 
     internal fun resolveExternalService(context: Context): ComponentName? {
         val configured = Settings.Secure.getString(
@@ -31,11 +47,25 @@ internal object SystemSpeechRecognizer {
             Intent(RecognitionService.SERVICE_INTERFACE),
             PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong()),
         )
-        return services
+        return selectExternalService(services, context.packageName, configured)
+    }
+
+    internal fun selectExternalService(
+        services: List<ResolveInfo>,
+        ownPackage: String,
+        configured: ComponentName?,
+    ): ComponentName? = services
             .asSequence()
             .mapNotNull { it.serviceInfo }
-            .filter { it.packageName != context.packageName }
-            .filter { it.permission == "android.permission.BIND_SPEECH_RECOGNITION_SERVICE" }
+            .filter {
+                it.packageName != ownPackage && it.exported && it.enabled &&
+                    it.applicationInfo?.enabled != false
+            }
+            .filter {
+                val component = ComponentName(it.packageName, it.name)
+                component == configured ||
+                    it.permission == "android.permission.BIND_SPEECH_RECOGNITION_SERVICE"
+            }
             .sortedWith(
                 compareByDescending<android.content.pm.ServiceInfo> {
                     ComponentName(it.packageName, it.name) == configured
@@ -45,7 +75,6 @@ internal object SystemSpeechRecognizer {
             )
             .map { ComponentName(it.packageName, it.name) }
             .firstOrNull()
-    }
 
     private const val VOICE_RECOGNITION_SERVICE = "voice_recognition_service"
 }

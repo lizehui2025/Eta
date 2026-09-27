@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.runtime
 
 import io.github.mangi.eta.agent.model.AgentContextSnapshot
+import io.github.mangi.eta.agent.model.AssistantScreenContextProjection
 
 import android.content.ComponentName
 import android.content.Intent
@@ -88,6 +89,7 @@ internal object AgentRuntimeWire {
     private const val KEY_TYPE = "type"
     private const val KEY_RUN_ID = "run_id"
     private const val KEY_PROMPT = "prompt"
+    private const val KEY_ASSISTANT_SCREEN_CONTEXT = "assistant_screen_context"
     private const val KEY_MODEL_SESSION_ID = "model_session_id"
     private const val KEY_PROVIDER_ID = "provider_id"
     private const val KEY_PROVIDER_NAME = "provider_name"
@@ -128,6 +130,7 @@ internal object AgentRuntimeWire {
     private const val KEY_WIDTH = "width"
     private const val KEY_HEIGHT = "height"
     private const val KEY_SOURCE = "source"
+    private const val KEY_PRESERVE_ORIGINAL = "preserve_original"
     private const val KEY_OK = "ok"
     private const val KEY_CONTENT = "content"
     private const val KEY_REASONING_CONTENT = "reasoning_content"
@@ -160,6 +163,7 @@ internal object AgentRuntimeWire {
         val modelSessionId: String = "",
         val operation: String = OP_CHAT,
         val rewriteTargetMessageId: String? = null,
+        val assistantScreenContext: String = "",
     ) {
         // 旧入口沿用会话 handoff；无持久会话的入口以首个 run 为会话起点。
         val effectiveModelSessionId: String
@@ -181,6 +185,7 @@ internal object AgentRuntimeWire {
         val width: Int? = null,
         val height: Int? = null,
         val source: String = "unknown",
+        val preserveOriginal: Boolean = false,
     )
 
     /** 接收端在后台完成图片物化前持有文件描述符；关闭后不可再次使用。 */
@@ -254,6 +259,7 @@ internal object AgentRuntimeWire {
                 image.width?.let { putInt(KEY_WIDTH, it) }
                 image.height?.let { putInt(KEY_HEIGHT, it) }
                 putString(KEY_SOURCE, image.source)
+                putBoolean(KEY_PRESERVE_ORIGINAL, image.preserveOriginal)
             }
         }
         return requestBundle(request, imageBundles, payloadDirectory)
@@ -270,14 +276,19 @@ internal object AgentRuntimeWire {
                 image.width?.let { putInt(KEY_WIDTH, it) }
                 image.height?.let { putInt(KEY_HEIGHT, it) }
                 putString(KEY_SOURCE, image.source)
+                putBoolean(KEY_PRESERVE_ORIGINAL, image.preserveOriginal)
             }
         },
     )
 
     private fun requestBundle(request: RunRequest, imageBundles: List<Bundle>, payloadDirectory: File? = null): Bundle = Bundle().apply {
+        require(request.assistantScreenContext.length <= AssistantScreenContextProjection.MAX_CHARS) {
+            "助理屏幕上下文超过容量预算"
+        }
         AgentWireText.put(this, "history_json", AgentConversationCodec.encodeTranscriptForStorage(request.history), payloadDirectory)
         putString(KEY_RUN_ID, request.runId)
         AgentWireText.put(this, KEY_PROMPT, request.prompt, payloadDirectory)
+        putString(KEY_ASSISTANT_SCREEN_CONTEXT, request.assistantScreenContext)
         putString(KEY_MODEL_SESSION_ID, request.modelSessionId)
         putString(KEY_PROVIDER_ID, request.config.providerId)
         putString(KEY_PROVIDER_NAME, request.config.providerName)
@@ -354,6 +365,7 @@ internal object AgentRuntimeWire {
                     width = image.optionalInt(KEY_WIDTH),
                     height = image.optionalInt(KEY_HEIGHT),
                     source = image.getString(KEY_SOURCE).orEmpty(),
+                    preserveOriginal = image.getBoolean(KEY_PRESERVE_ORIGINAL, false),
                 )
             }
             return IncomingRunRequest(
@@ -392,6 +404,7 @@ internal object AgentRuntimeWire {
                         width = image.width,
                         height = image.height,
                         source = image.source,
+                        preserveOriginal = image.preserveOriginal,
                     )
                 },
             )
@@ -404,6 +417,9 @@ internal object AgentRuntimeWire {
     ): RunRequest = RunRequest(
             runId = bundle.getString(KEY_RUN_ID).orEmpty(),
             prompt = if (readText) AgentWireText.read(bundle, KEY_PROMPT).orEmpty() else bundle.getString(KEY_PROMPT).orEmpty(),
+            assistantScreenContext = bundle.getString(KEY_ASSISTANT_SCREEN_CONTEXT).orEmpty().also {
+                require(it.length <= AssistantScreenContextProjection.MAX_CHARS) { "助理屏幕上下文超过容量预算" }
+            },
             operation = bundle.getString("operation")?.also { require(it in setOf(OP_CHAT, OP_COMPACT, OP_REWRITE_REPLY)) } ?: OP_CHAT,
             rewriteTargetMessageId = bundle.getString("rewrite_target_message_id")?.also {
                 require(it.isNotBlank() && it.length <= 256) { "Invalid rewrite target" }

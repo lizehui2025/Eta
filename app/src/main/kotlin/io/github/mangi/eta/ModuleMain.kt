@@ -83,19 +83,25 @@ class ModuleMain : XposedModule() {
 
             ModuleConfig.COLOR_DIRECT_PACKAGE -> {
                 if (isCurrentPackageProcess(ModuleConfig.COLOR_DIRECT_PACKAGE)) {
-                    recordInstallation(ColorDirectHooks.install(this, logger, param.classLoader))
+                    recordInstallation(
+                        ColorDirectHooks.install(this, logger, param.classLoader, param.applicationInfo)
+                    )
                 }
             }
 
             ModuleConfig.BREENO_PACKAGE -> {
                 if (isCurrentPackageProcess(ModuleConfig.BREENO_PACKAGE)) {
-                    recordInstallation(BreenoHooks.install(this, logger, param.classLoader))
+                    recordInstallation(
+                        BreenoHooks.install(this, logger, param.classLoader, param.applicationInfo)
+                    )
                 }
             }
 
             ModuleConfig.COLOROS_MEMORY_PACKAGE -> {
                 if (currentProcessName == ModuleConfig.COLOROS_MEMORY_PACKAGE) {
-                    recordInstallation(ColorOsMemoryHooks.install(this, logger, param.classLoader))
+                    recordInstallation(
+                        ColorOsMemoryHooks.install(this, logger, param.classLoader, param.applicationInfo)
+                    )
                 }
             }
 

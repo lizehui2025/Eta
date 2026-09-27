@@ -8,6 +8,8 @@
 - 安装结果区分 `INSTALLED`、`MISSING`、`FAILED`、`SKIPPED`，保留 `HookHandle`，便于定位 ROM 或目标 App 升级后的签名漂移。
 - 普通目标缺失与反射异常按功能域失败开放；`HookFailedError` 等框架级 `Error` 不会被普通异常隔离层吞掉。
 - `ModuleMain` 会尽早过滤无关进程并调用 `detach()`，避免在不需要的进程中继续保留生命周期回调。
+- 小布和双指识屏的混淆目标在安装期通过 DexKit 的字符串、签名和调用关系定位；签名足够唯一的接口使用结构反射。零候选或多个候选均放弃接管，不选择第一个结果。描述符缓存随 APK 的 DEX 校验值和查询规则版本失效，缓存命中后仍校验反射签名；解析桥在安装结束时关闭，运行回调不扫描 DEX。
+- DexKit 原生库先使用框架标准加载及模块安装目录；两者不可用时，从模块 APK 提取与当前进程位数匹配的原生库到宿主私有缓存。缓存按库内容的 SHA-256 隔离，复用前与 APK 字节校验，写入后设为只读并原子替换。库始终由模块 ClassLoader 加载，兼容压缩打包；日志分别报告原生库加载和 JNI 初始化失败，不记录 linker 消息中的文件路径。
 
 ## 日志与 Release 裁剪
 
@@ -35,11 +37,17 @@ Release 裁剪以 `app/proguard-rules.pro` 为唯一可执行事实来源，规�
 
 ## Eta 原生数字助理
 
-Manifest 注册 `VoiceInteractionService`、独立进程的 `VoiceInteractionSessionService`、全屏 `TYPE_APPLICATION_OVERLAY` 助理浮窗以及 Android 助理角色资格要求的 `RecognitionService`。设置页只负责打开系统数字助理选择界面；当前浮窗不请求麦克风权限。
+Manifest 注册 `VoiceInteractionService`、与浮窗同进程的 `VoiceInteractionSessionService`、全屏 `TYPE_APPLICATION_OVERLAY` 助理浮窗以及 Android 助理角色资格要求的 `RecognitionService`。设置页只负责打开系统数字助理选择界面；浮窗使用已授予的麦克风权限；未授权时提供应用权限设置入口并保留键盘输入。
 
-`VoiceInteractionSession` 只承接系统入口并关闭自身 UI；`EtaAssistantOverlayService` 持有全屏窗口、彩色边缘动画和键盘输入。窗口通过 `setFitInsetsTypes(0)` 绘制到状态栏、导航栏与显示开孔后方，可交互内容再通过 `WindowInsetsRulers.SafeDrawing` 与 `Ime` 保持可触达，避免给根容器增加 Insets 后截断 edge-to-edge 背景。用户提交的文本交给 `AgentRuntimeClient`；请求、流式结果、前台工具收起、取消与归档沿用既有 Runtime 协议。前台工具执行前，Eta 自有入口在主线程定向移除窗口并通知系统会话 `hide()`，Runtime 等待该 View 真正 detach 后才继续；小布与超级小爱等外部入口仍使用返回动作和目标包窗口确认。当前不执行语音识别或语音朗读。
+`VoiceInteractionSession` 承接系统入口及系统提供的 Assist 数据，关闭自身 UI；`EtaAssistantOverlayService` 持有全屏窗口、语音序列动画、语音输入和键盘输入。窗口通过 `setFitInsetsTypes(0)` 绘制到状态栏、导航栏与显示开孔后方，可交互内容再通过状态栏、导航栏与 IME Insets 保持可触达，避免给根容器增加 Insets 后截断 edge-to-edge 背景。用户提交的文本交给 `AgentRuntimeClient`；请求、流式结果、前台工具收起、取消与归档沿用既有 Runtime 协议。前台工具执行前，Eta 自有入口在主线程定向移除窗口并通知系统会话 `hide()`，Runtime 等待该 View 真正 detach 后才继续；外部助手入口仍使用返回动作和目标包窗口确认。唤醒时已获麦克风权限就启动一次系统语音识别，最终识别结果直接提交；部分结果只显示在输入区。启动前限时查询当前语言的支持情况；服务不支持查询或超时时继续尝试识别，识别本身有 30 秒超时。可下载语音包时由用户点击请求系统下载，其他失败按网络、服务、麦克风、语言等原因提示并提供键盘输入。切换键盘、关闭、再次唤醒和前台工具收起都会销毁识别器并隔离迟到回调；当前不执行语音朗读。
 
-`:voice`、`:voice_session` 与 `:recognition` 进程只初始化本地偏好，不预热数据库、Skills 或 Xposed UI 服务。`RecognitionService` 仅保留 Android 数字助理角色资格所需声明，不由当前浮窗调用；HyperOS 按键适配不在当前实现范围内。
+`:voice` 与 `:recognition` 进程只初始化本地偏好，不预热数据库、Skills 或 Xposed UI 服务。`RecognitionService` 仅保留 Android 数字助理角色资格所需声明，不由当前浮窗调用；HyperOS 按键适配不在当前实现范围内。
+
+助理上下文通过 `SHOW_WITH_ASSIST`、`SHOW_WITH_SCREENSHOT` 请求，Android 17 同时请求结构化屏幕内容并声明对应权限及服务 XML 属性。Session 与浮窗在主进程共享单次唤醒对象，Intent 只携带关联 ID；新唤醒替换旧对象，关闭窗口或系统会话隐藏后释放上下文，迟到的异步结果不写回新入口。截图与应用文本独立处理；提交时最多等待剩余的两秒采集窗口，缺失部分不阻塞普通提问。同一次浮窗内的追问沿用该次唤醒快照，并明确标注采集时间；前台工具改变界面后不把旧快照当作实时屏幕。
+
+应用内容按可见窗口、节点数、深度和文本容量限制，跳过密码输入节点；截断会附带标记。屏幕正文以独立可选字段进入 Runtime，仅投影到当前模型请求，不改写用户原话、不写入持久上下文或日志；截图继续通过既有文件描述符链路进入 Runtime。系统共享开关、受保护窗口或应用未提供内容时允许部分数据或空结果，GUI 操作本身仍遵循无障碍工具的能力要求。
+
+GUI、Root、数字助理与内置浏览器的模型截图保持原尺寸与像素。已有编码的截图直接上传原始字节；Bitmap 只在采集端编码一次 PNG，Runtime 不再重复转码。浏览器只在主线程绘制视口，编码在执行线程完成。聊天卡片的小预览单独生成，不参与模型输入；普通附件和文件图片继续使用 JPEG 兼容编码。
 
 ## system_server
 
@@ -77,15 +85,21 @@ adb shell settings delete global eta_app_signer_sha256
 
 ## ColorDirectService
 
-拦截 `com.coloros.directui.ui.CollectInfoActivity.M(Intent)`，读取 `startInfo.directExt` 中的 `fingerTrigger` 与 `touchInfo.fingerCount`。确认是双指识屏后，直接调用 `contextual_search` 服务触发一圈即搜，并关闭小布识屏页面；调用失败才回退小布原逻辑。
+在 `com.coloros.directui.ui.CollectInfoActivity` 中按 `Intent → void` 签名和输入诊断字符串定位识屏入口，不依赖混淆方法名。读取 `startInfo.directExt` 中的 `fingerTrigger` 与 `touchInfo.fingerCount`，确认是双指识屏后，直接调用 `contextual_search` 服务触发一圈即搜，并关闭小布识屏页面；调用失败才回退小布原逻辑。
+
+## 小布助手
+
+消息处理、文本入口、聊天派发、当前房间、Agent、快速模式和历史序列化等目标按语义定位；历史读取、写入及指令派发按唯一签名定位。快速模式与深度思考保持取反关系，不把其他布尔状态当作思考开关。交付结果所需接口不完整时，不认领请求，避免请求被接管后无法回写小布。
 
 ## 小布记忆
 
-ColorOS 系统记忆存在 `com.oplus.aimemory` 的 `ai_memory` 数据库中。Eta 只在小布记忆默认进程保留模块生命周期，Hook 其 `DataShareProvider.call(String, String, Bundle)` 安装内部查询桥。Runtime 通过 Root 以固定 method 调用该 Provider，Hook 在拥有数据库权限的目标进程内以只读模式执行固定查询。非 Eta method 会原样进入小布记忆自身逻辑；内部 method 只接受 UID 0，不向模型暴露任意 URI、表名或 SQL。
+ColorOS 系统记忆存在 `com.oplus.aimemory` 的 `ai_memory` 数据库中。Eta 只在小布记忆默认进程保留模块生命周期，Hook 其 `DataShareProvider.call(String, String, Bundle)` 安装内部查询桥。Runtime 通过 Root 以固定 method 调用该 Provider，Hook 在拥有数据库权限的目标进程内执行固定只读查询。非 Eta method 会原样进入小布记忆自身逻辑；内部 method 只接受 UID 0，校验后以宿主身份查询，不向模型暴露任意 URI、表名或 SQL。
+
+ColorOS 17 的小布记忆使用加密数据库时，Eta 优先校验已知 Room 数据库类型，按类型获取唯一的静态单例字段和现存连接字段；已知类型不再匹配时，才通过 DexKit 的数据库工厂特征重新定位。因此当前已知版本的记忆查询不依赖 DexKit 原生库加载成功。Eta 不调用工厂创建数据库，不提取密钥，也不关闭宿主持有的连接。未初始化时提示打开小布记忆后重试。普通 SQLite 文件继续以只读方式打开，两种连接共用固定查询引擎。读取异常与确实缺少表或字段分别报告，避免把加密读取失败误报成不支持的表结构。
 
 查询协议只允许系统记忆、个人订单和已保存地点三种操作，请求与结果都有 UTF-8 字节上限。数据库层只查询预定义的表和字段，SQLite 标识符统一引用，以兼容 `shipments.order` 等与 SQL 保留字重名的字段。结果继续按敏感工具处理，不写入持久会话。
 
-进程内查询桥不可用时，Runtime 才回退到 Root 快照路径：将主数据库及存在的 WAL、SHM 或 journal 边车文件限大复制到 Eta 缓存，用同一查询引擎只读打开，并在查询结束后立即删除。
+进程内查询桥不可用时，Runtime 才回退到 Root 快照路径：将主数据库及存在的 WAL、SHM 或 journal 边车文件限大复制到 Eta 缓存，用同一查询引擎只读打开，并在查询结束后立即删除。快照不是普通 SQLite 格式时，明确提示需要小布记忆 Hook，不尝试将加密文件作为普通数据库读取。
 
 ## 超级小爱
 
@@ -104,6 +118,8 @@ ColorOS 系统记忆存在 `com.oplus.aimemory` 的 `ai_memory` 数据库中。E
 ## Google App
 
 伪装设备为 Samsung S24 Ultra，使 Google 启用一圈即搜能力；同时拦截 `SystemProperties` 和 `PackageManager.hasSystemFeature()` 的关键查询，让 Google App 看到 `ro.opa.eligible_device=true`、`GOOGLE_BUILD` 与 `GOOGLE_EXPERIENCE`。这对应现成 Google App Magisk 模块和 OpenGApps 常用的 OPA eligibility 做法，但限定在 Google App 进程内，不改系统文件。机型伪装与资格补齐作为一圈即搜的底层依赖始终执行，不可关闭。
+
+机型字段优先使用反射写入；Android 拒绝写入静态 final 字段时，使用 `jdk.internal.misc.Unsafe` 的静态字段接口，并读回校验，兼容 Android 17 的字段写保护。
 
 锁屏唤起 Gemini 浮窗后，Google 偶发只显示输入框、不启动录音。模块优先直接 Hook `FloatyActivity.onResume()`，找不到目标类时才回退到全局 `Activity.onResume()`；确认仍处于锁屏后，带去重地补发一次 `ACTION_VOICE_COMMAND`，避免用户还要手动点麦克风。亮屏（解锁态）唤起时同样存在该偶发问题，因此在同一 hook 点对称增加亮屏分支：确认仍处于解锁态后同样补发一次 `ACTION_VOICE_COMMAND`。去重粒度限定在同一个 `FloatyActivity` 实例，防止同一浮窗 `onResume` 短时间内重复补发，但关闭后立刻新开浮窗不会被上一次全局冷却挡住；两分支各自在延迟任务执行前复查对应开关与锁屏状态是否仍匹配。
 
@@ -159,7 +175,7 @@ Runtime 提示要求模型在用户目标会明显受益于本机上下文时主
 
 ## 文件视觉
 
-`read_image` 属于通用文件视觉能力，随“终端/文件工具”开关公开，不依赖个人数据直达。它接受用户或其他工具已明确提供的任意本地绝对路径、file URI 或系统相册 URI；本机路径由 Root 读取。Root 将单张、大小受限的文件复制到 Eta 临时缓存，符号链接按实际目标读取；发送给模型前会仅为视觉请求缩放压缩，以避免多张原图撑大 OpenAI 兼容请求体，原始文件不会被修改。当前回合结束后立即删除临时文件。QQ/微信检索工具只负责提供可传入的图片路径。
+`read_image` 属于通用文件视觉能力，随“终端/文件工具”开关公开，不依赖个人数据直达。它接受用户或其他工具已明确提供的任意本地绝对路径、file URI 或系统相册 URI；本机路径由 Root 读取。Root 将单张、大小受限的文件复制到 Eta 临时缓存，符号链接按实际目标读取；发送给模型前按原始尺寸编码为 JPEG，原始文件不会被修改。当前回合结束后立即删除临时文件。QQ/微信检索工具只负责提供可传入的图片路径。
 
 运行时提示与工具描述共同要求模型每轮最多调用一次 `read_image`。需要查看多张图片时，模型必须先消费当前图片的视觉结果，再在下一轮读取下一张，避免同一请求携带多张工具图片导致部分 OpenAI 兼容服务长时间无响应。
 
@@ -208,6 +224,11 @@ rootfs 内文件归 root 所有，Linux 工具环境页还提供只读的文件�
 能力解析依次采用远端精确元数据、内置模型目录、Provider 与模型家族规则，最后安全降级。`Default` 保留供应商或高级自定义请求体的默认行为；显式档位在请求体合并完成后应用，因此会话选择是最终覆盖。Room、Runtime Bundle、RemotePreferences JSON 和外部归档同时保留旧 `thinkingEnabled` 布尔投影，旧 `true/false` 分别解释为 `Default/Off`；强制推理模型收到 `Off` 时直接报告配置错误。
 
 模型级可配置底层请求参数（temperature、top_p、top_k、最大输出 token、presence/frequency penalty、seed）保存在 `provider_models.request_options_json`（数据库版本 24 起），随 Runtime 配置进入请求构建：请求体先写入 typed 参数，再依次合并 `extraBody` 与自定义请求体，最后应用推理运行时字段，同名键优先级为 typed < extraBody < customBody < 推理档位。各协议只发送自身支持的键：Chat Completions 发 temperature/top_p/presence_penalty/frequency_penalty/seed，最大输出 token 对 OpenAI 官方来源写 `max_completion_tokens`、其余写 `max_tokens`；Responses 发 temperature/top_p/max_output_tokens；Anthropic 发 temperature/top_p/top_k/max_tokens（覆盖默认 4096，仍可被高思考档位提升）。模型编辑弹窗提供留空即不发送的输入，以及原始 JSON 自定义请求体编辑；压缩、摘要与改写等内部用途与自定义请求体使用同一套裁剪规则，不携带用户采样参数。编码模式在 run 开始时把快照写入运行配置（codingMode），全链路请求统一 temperature=0.1；用户自定义请求体仍可覆盖。
+唤醒态由独立的全屏透明边缘光层和底部波纹层组成；竖屏入场先从右侧电源键高度向周围扩散半透明光晕，再由亮光沿右边缘快速下行，抵达底部后展开彩光与波纹。光晕先快后缓地扩展，在右侧光带抵达底部后继续渐退。首次边缘入场独立于语音识别状态播放，波纹按边缘抵达时间启动；底部彩光的顶部自然淡出，入场描边随后消失，避免形成固定高度的亮色背景。同一浮窗内重新切回语音直接恢复底部效果。三条建议在输入区上方错时入场，随 IME 和输入区一起移动。键盘态在首次入场结束后隐藏聆听光效并保留建议。语音态只在左侧显示白色“聆听中”或识别中的临时文字。底部波纹使用打包的着色器、配色纹理和数值动画轨道，通过 Android RuntimeShader 在硬件画布绘制；音量只在绘制阶段消费。软件画布或效果加载失败时跳过波纹并记录受控错误，不影响语音和文本交互。系统明确配置的识别服务即使没有声明绑定权限也可使用，未配置的外部服务仍要求绑定权限。
+
+浮窗回复区按可用窗口高度提供稳定视口，正文增量只更新列表，不按字数反复启动面板缩放。回复中实际内容超出视口且面板停稳后，浮窗才用无回弹的弹簧从初始高度逐级升高；回复结束且首尾条目都可测量时，按实际内容高度平滑拟合并锁定本轮目标，避免旧滚动偏移再触发升高。用户一旦拖动或滚动，自动调高和拟合停止，改由手动锚点决定高度；键盘显示时也暂停自动调高和拟合。文本与思考增量复用聊天页的 50 毫秒合并策略，块边界、完成和取消先刷新待处理增量。程序化跟底不参与面板拖动；用户上滑展开与接管仍保留。输入区不再对系统 IME Insets 叠加弹簧尺寸动画。窗口移除时显式销毁 Composition，停止不可见动画。
+
+浮窗按聆听、键盘输入和已有回复分别呈现文字与实色圆形按钮、浅色输入栏、回复卡片与独立输入胶囊。输入栏聚焦或键盘升起时使用更清晰的实色底面和边框，语音错误以邻近输入栏的状态标签提示。回复卡片采用顶部圆角和细描边，用户消息收在右侧小气泡，思考与工具步骤收成可展开的状态行，回答正文保留原有 Markdown 流式渲染；键盘升起时卡片高度随 IME 连续收缩。
 
 ## 聊天流式渲染
 
@@ -239,7 +260,7 @@ Markdown 空行只参与块结构解析，不按源码数量累加可见高度�
 
 ## 预期行为
 
-电源键目标为小布时，ColorOS 长按电源键保持厂商原始行为且不修改当前默认助理。目标为 Gemini 时，长按恢复 Google 原有系统助手与 Activity 兜底链路。目标为 Eta 且 Eta 已是默认数字助理时，长按会打开 edge-to-edge 全屏助理浮窗并自动聚焦键盘输入框；入口会在浮窗与 IME 出现前准备一张屏幕截图，只有用户选择后才作为下一条消息的图片上下文发送。用户提交文本后，工具执行、流式结果和归档仍由主进程中的 Agent Runtime 负责，当前流程不执行 ASR 或 TTS。
+电源键目标为 Gemini 时，长按恢复 Google 原有系统助手与 Activity 兜底链路。目标为 Eta 且 Eta 已是默认数字助理时，长按会打开 edge-to-edge 全屏助理浮窗并优先开始单次语音输入，可切换键盘；系统在唤醒时采集截图、前台应用和页面内容，Session 异步接收后由浮窗自动随提问发送，不再显示手动添加屏幕按钮，也不依赖无障碍截图。用户提交文本后，工具执行、流式结果和归档仍由主进程中的 Agent Runtime 负责，语音转写复用系统可用识别服务，不执行 TTS。
 
 Eta 尚未成为默认助理且自动设置关闭时，按既定策略直接回到小布，不创建平行 Activity 会话。自动设置开启时，失败触发只在后台修复当前选择，当前长按仍立即回退；后续触发使用修复后的主路径。HyperOS 后续只需把厂商按键事件接到同一目标分发边界，不需要修改文本会话和 Runtime。
 

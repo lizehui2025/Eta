@@ -1,107 +1,72 @@
 package io.github.mangi.eta.agent.voice
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowForward
-import androidx.compose.material.icons.rounded.CancelPresentation
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.DesktopWindows
-import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import io.github.mangi.eta.R
 import io.github.mangi.eta.ui.components.AgentConversationMessages
-import io.github.mangi.eta.ui.components.rememberDataUrlBitmap
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
-import io.github.mangi.eta.ui.model.AgentMessageUi
-import io.github.mangi.eta.ui.model.ThinkingMessageUi
-import io.github.mangi.eta.ui.model.ToolActivityMessageUi
-import io.github.mangi.eta.ui.model.UserMessageUi
-import kotlin.math.ceil
+import kotlin.math.abs
 import kotlin.math.max
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.anim.folmeSpring
-import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
-import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
-import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.squircle.squircleBackground
-import top.yukonga.miuix.kmp.squircle.squircleClip
-import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal enum class EtaVoicePhase {
@@ -114,7 +79,6 @@ internal data class EtaVoiceUiState(
     val messages: List<AgentChatMessageUi> = emptyList(),
     val phase: EtaVoicePhase = EtaVoicePhase.READY,
     val status: EtaVoiceStatus = EtaVoiceStatus.InputRequest,
-    val screenContext: EtaScreenContextUiState = EtaScreenContextUiState(),
 )
 
 internal sealed interface EtaVoiceStatus {
@@ -126,74 +90,44 @@ internal sealed interface EtaVoiceStatus {
     data object Stopped : EtaVoiceStatus
 }
 
-internal enum class EtaScreenContextPhase {
-    CAPTURING,
-    AVAILABLE,
-    UNAVAILABLE,
-    CONSUMED,
-}
-
-internal data class EtaScreenContextUiState(
-    val phase: EtaScreenContextPhase = EtaScreenContextPhase.CONSUMED,
-    val previewDataUrl: String? = null,
-    val selected: Boolean = false,
-)
-
-internal object EtaScreenContextStateReducer {
-    fun select(
-        state: EtaScreenContextUiState,
-        enabled: Boolean,
-        hasAttachment: Boolean,
-    ): EtaScreenContextUiState =
-        if (enabled && hasAttachment && state.phase == EtaScreenContextPhase.AVAILABLE) {
-            state.copy(selected = true)
-        } else {
-            state
-        }
-
-    fun remove(
-        state: EtaScreenContextUiState,
-        enabled: Boolean,
-    ): EtaScreenContextUiState =
-        if (enabled && state.selected) state.copy(selected = false) else state
-
-    fun consume(): EtaScreenContextUiState = EtaScreenContextUiState(
-        phase = EtaScreenContextPhase.CONSUMED,
-    )
-}
-
-private data class EtaVoicePanelColors(
+internal data class EtaVoicePanelColors(
     val content: Color,
     val input: Color,
+    val focusedInput: Color,
     val inputPrimary: Color,
     val inputSecondary: Color,
     val inputTertiary: Color,
     val tertiary: Color,
+    val panelStroke: Color,
     val scrim: Color,
 )
 
 @Composable
 private fun rememberEtaVoicePanelColors(): EtaVoicePanelColors {
-    val dark = isSystemInDarkTheme()
+    val dark = MiuixTheme.colorScheme.background.luminance() < 0.5f
     return remember(dark) {
         if (dark) {
             EtaVoicePanelColors(
-                content = Color(0xF52B2C2F),
-                input = Color(0xF2404040),
+                content = Color(0xFF1E1E1E),
+                input = Color(0xFF34363B),
+                focusedInput = Color(0xFF42444A),
                 inputPrimary = Color(0xE6FFFFFF),
                 inputSecondary = Color(0x8AFFFFFF),
                 inputTertiary = Color(0x4DFFFFFF),
-                tertiary = Color(0x66FFFFFF),
+                tertiary = Color(0x40FFFFFF),
+                panelStroke = Color(0x0AFFFFFF),
                 scrim = Color(0x52000000),
             )
         } else {
             EtaVoicePanelColors(
-                content = Color(0xFAF7F7F9),
-                input = Color(0xF2FFFFFF),
+                content = Color(0xFFF0F1F2),
+                input = Color(0xFFF4F5F7),
+                focusedInput = Color.White,
                 inputPrimary = Color(0xE6000000),
                 inputSecondary = Color(0x8A000000),
                 inputTertiary = Color(0x42000000),
-                tertiary = Color(0x52000000),
+                tertiary = Color(0x29000000),
+                panelStroke = Color.White,
                 scrim = Color(0x30000000),
             )
         }
@@ -202,14 +136,19 @@ private fun rememberEtaVoicePanelColors(): EtaVoicePanelColors {
 
 @Composable
 internal fun EtaVoicePanel(
+    speechLevel: () -> Float,
     state: EtaVoiceUiState,
     input: String,
+    speech: EtaSpeechState,
+    onMicrophone: () -> Unit,
+    onFinishSpeech: () -> Unit,
+    onDownloadModel: () -> Unit,
+    onKeyboard: () -> Unit,
     inputFocusRequestKey: Int,
     canOpenConversation: Boolean,
     exitRequested: Boolean,
     onInputChange: (String) -> Unit,
-    onScreenContextSelect: () -> Unit,
-    onScreenContextRemove: () -> Unit,
+    onSuggestionClick: (String) -> Unit,
     onSubmit: () -> Unit,
     onStop: () -> Unit,
     onClose: () -> Unit,
@@ -220,6 +159,7 @@ internal fun EtaVoicePanel(
     val density = LocalDensity.current
     val focusRequester = remember { FocusRequester() }
     val entryProgress = remember { Animatable(0f) }
+    val scrimProgress = remember { Animatable(0f) }
     val exitAlpha by animateFloatAsState(
         targetValue = if (exitRequested) 0f else 1f,
         animationSpec = tween(220, easing = FastOutSlowInEasing),
@@ -227,7 +167,9 @@ internal fun EtaVoicePanel(
     )
 
     LaunchedEffect(Unit) {
-        entryProgress.animateTo(1f, tween(260, easing = FastOutSlowInEasing))
+        launch { entryProgress.animateTo(1f, tween(160, easing = LinearOutSlowInEasing)) }
+        delay(180)
+        scrimProgress.animateTo(1f, tween(280, easing = LinearOutSlowInEasing))
     }
 
     LaunchedEffect(inputFocusRequestKey) {
@@ -242,7 +184,7 @@ internal fun EtaVoicePanel(
         modifier = Modifier
             .fillMaxSize()
             .graphicsLayer { alpha = exitAlpha }
-            .background(colors.scrim.copy(alpha = colors.scrim.alpha * entryProgress.value)),
+            .drawBehind { drawRect(colors.scrim.copy(alpha = colors.scrim.alpha * scrimProgress.value)) },
     ) {
         Box(
             modifier = Modifier
@@ -254,12 +196,20 @@ internal fun EtaVoicePanel(
                 ),
         )
 
+        EtaAssistantEdgeGlow(
+            active = speech.active && !exitRequested,
+        )
+        EtaAssistantWave(
+            active = speech.active && !exitRequested,
+            level = speechLevel,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
+
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
                     alpha = entryProgress.value
-                    translationY = (1f - entryProgress.value) * with(density) { 32.dp.toPx() }
                 },
         ) {
             val imeBottom = WindowInsets.ime.getBottom(density)
@@ -273,6 +223,11 @@ internal fun EtaVoicePanel(
             AssistantPanel(
                 state = state,
                 input = input,
+                speech = speech,
+                onMicrophone = onMicrophone,
+                onFinishSpeech = onFinishSpeech,
+                onDownloadModel = onDownloadModel,
+                onKeyboard = onKeyboard,
                 colors = colors,
                 focusRequester = focusRequester,
                 canOpenConversation = canOpenConversation,
@@ -293,8 +248,11 @@ internal fun EtaVoicePanel(
                 bottomInsetPx = bottomInset,
                 imeOverlapPx = imeOverlap,
                 onInputChange = onInputChange,
-                onScreenContextSelect = onScreenContextSelect,
-                onScreenContextRemove = onScreenContextRemove,
+                onSuggestionClick = { suggestion ->
+                    keyboard?.hide()
+                    onSuggestionClick(suggestion)
+                },
+                keyboardVisible = imeBottom > navigationBottom,
                 onSubmit = {
                     keyboard?.hide()
                     onSubmit()
@@ -311,6 +269,11 @@ internal fun EtaVoicePanel(
 private fun BoxScope.AssistantPanel(
     state: EtaVoiceUiState,
     input: String,
+    speech: EtaSpeechState,
+    onMicrophone: () -> Unit,
+    onFinishSpeech: () -> Unit,
+    onDownloadModel: () -> Unit,
+    onKeyboard: () -> Unit,
     colors: EtaVoicePanelColors,
     focusRequester: FocusRequester,
     canOpenConversation: Boolean,
@@ -319,8 +282,8 @@ private fun BoxScope.AssistantPanel(
     bottomInsetPx: Int,
     imeOverlapPx: Int,
     onInputChange: (String) -> Unit,
-    onScreenContextSelect: () -> Unit,
-    onScreenContextRemove: () -> Unit,
+    onSuggestionClick: (String) -> Unit,
+    keyboardVisible: Boolean,
     onSubmit: () -> Unit,
     onStop: () -> Unit,
     onClose: () -> Unit,
@@ -332,25 +295,42 @@ private fun BoxScope.AssistantPanel(
     val listState = rememberLazyListState()
     var settledHeightPx by remember { mutableFloatStateOf(baseContentHeightPx) }
     var draggedHeightPx by remember { mutableStateOf<Float?>(null) }
+    var autoExpandSuppressed by remember { mutableStateOf(false) }
     var dismissPullPx by remember { mutableFloatStateOf(0f) }
     var handoffPullPx by remember { mutableFloatStateOf(0f) }
     var directHandoffPullPx by remember { mutableFloatStateOf(0f) }
     var thresholdHapticSent by remember { mutableStateOf(false) }
     var handoffRunning by remember { mutableStateOf(false) }
     var keepBottomAnchored by remember { mutableStateOf(true) }
+    var fittedReplyId by remember { mutableStateOf<String?>(null) }
     val handoffThresholdPx = with(density) { 72.dp.toPx() }
     val directHandoffThresholdPx = with(density) { 48.dp.toPx() }
     val dismissThresholdPx = with(density) { 92.dp.toPx() }
     val handoffVelocityPx = with(density) { 900.dp.toPx() }
+    val autoSettleTolerancePx = with(density) { 8.dp.toPx() }
+    val overflowTolerancePx = with(density) { 16.dp.toPx() }
+    val minimumContentHeightPx = with(density) { 140.dp.toPx() }.coerceAtMost(maxContentHeightPx)
+    val dragHandleHeightPx = with(density) { 38.dp.toPx() }
+    val contentFitSlackPx = with(density) { 12.dp.toPx() }
+    val mediumHeightPx = baseContentHeightPx +
+        (maxContentHeightPx - baseContentHeightPx) * 0.58f
     val hasMessages = state.messages.isNotEmpty()
+    val latestMessageId = state.messages.lastOrNull()?.id
     val targetHeightPx = if (hasMessages) {
-        settledHeightPx.coerceIn(baseContentHeightPx, maxContentHeightPx)
+        if (settledHeightPx <= 0f) baseContentHeightPx
+        else settledHeightPx.coerceIn(minimumContentHeightPx, maxContentHeightPx)
     } else {
         0f
     }
     val animatedHeightPx by animateFloatAsState(
         targetValue = targetHeightPx,
-        animationSpec = folmeSpring(damping = 0.9f, response = 0.38f),
+        animationSpec = when {
+            !autoExpandSuppressed &&
+                abs(settledHeightPx - baseContentHeightPx) > autoSettleTolerancePx ->
+                folmeSpring(damping = 1f, response = 0.72f)
+            autoExpandSuppressed -> folmeSpring(damping = 1f, response = 0.38f)
+            else -> folmeSpring(damping = 1f, response = 0.50f)
+        },
         label = "assistant_content_height",
     )
     val sheetBackgroundAlpha = animateFloatAsState(
@@ -369,9 +349,11 @@ private fun BoxScope.AssistantPanel(
     )
     val currentAnimatedHeight = rememberUpdatedState(animatedHeightPx)
     val sheetHeightPx = draggedHeightPx ?: animatedHeightPx
-    val visibleSheetHeightPx = sheetHeightPx.coerceAtMost(
-        (maxContentHeightPx - imeOverlapPx).coerceAtLeast(0f),
-    )
+    val visibleSheetHeightPx = (sheetHeightPx - imeOverlapPx * 0.42f)
+        .coerceAtLeast(if (hasMessages) with(density) { 140.dp.toPx() }.coerceAtMost(sheetHeightPx) else 0f)
+        .coerceAtMost(
+            (maxContentHeightPx - imeOverlapPx).coerceAtLeast(0f),
+        )
     val nearFullscreen = sheetHeightPx >= maxContentHeightPx * 0.88f
     val handoffReady = canOpenConversation && nearFullscreen &&
         (handoffPullPx >= handoffThresholdPx ||
@@ -380,15 +362,74 @@ private fun BoxScope.AssistantPanel(
         with(density) { 28.dp.toPx() },
     ) * 0.12f
 
-    LaunchedEffect(hasMessages, baseContentHeightPx, maxContentHeightPx) {
+    LaunchedEffect(hasMessages, minimumContentHeightPx, maxContentHeightPx) {
         settledHeightPx = if (hasMessages) {
-            settledHeightPx.coerceIn(baseContentHeightPx, maxContentHeightPx)
+            if (settledHeightPx <= 0f) baseContentHeightPx
+            else settledHeightPx.coerceIn(minimumContentHeightPx, maxContentHeightPx)
         } else {
+            autoExpandSuppressed = false
+            fittedReplyId = null
             0f
         }
     }
-    LaunchedEffect(state.messages.size) {
-        if (state.messages.isNotEmpty()) keepBottomAnchored = true
+    LaunchedEffect(state.phase, latestMessageId) {
+        if (state.phase == EtaVoicePhase.PROCESSING) fittedReplyId = null
+    }
+    // 回复中按真实溢出逐级升高；回复结束且全部条目可测量时交给一次性内容拟合。
+    LaunchedEffect(hasMessages, state.phase, latestMessageId, keyboardVisible, baseContentHeightPx, maxContentHeightPx, listState) {
+        if (!hasMessages || keyboardVisible) return@LaunchedEffect
+        snapshotFlow {
+            !autoExpandSuppressed &&
+                fittedReplyId != latestMessageId &&
+                draggedHeightPx == null &&
+                !handoffRunning &&
+                keepBottomAnchored &&
+                abs(currentAnimatedHeight.value - settledHeightPx) <= autoSettleTolerancePx &&
+                run {
+                    val measuredHeightPx = measuredConversationHeightPx(listState)
+                    if (state.phase != EtaVoicePhase.PROCESSING && measuredHeightPx != null) {
+                        false
+                    } else if (measuredHeightPx != null) {
+                        measuredHeightPx > listState.layoutInfo.viewportSize.height + overflowTolerancePx
+                    } else {
+                        listState.canScrollBackward || listState.canScrollForward
+                    }
+                }
+        }
+            .distinctUntilChanged()
+            .collect { overflowAtRest ->
+                if (!overflowAtRest) return@collect
+                val nextHeight = when {
+                    settledHeightPx < baseContentHeightPx - autoSettleTolerancePx -> baseContentHeightPx
+                    settledHeightPx < mediumHeightPx - autoSettleTolerancePx -> mediumHeightPx
+                    settledHeightPx < maxContentHeightPx - autoSettleTolerancePx -> maxContentHeightPx
+                    else -> null
+                }
+                if (nextHeight != null) settledHeightPx = nextHeight
+            }
+    }
+    // 完成排版后本轮只拟合一次；列表的旧滚动偏移不能把它再次推回高档。
+    LaunchedEffect(hasMessages, state.phase, latestMessageId, keyboardVisible, maxContentHeightPx, listState) {
+        if (!hasMessages || state.phase == EtaVoicePhase.PROCESSING || keyboardVisible) return@LaunchedEffect
+        snapshotFlow {
+            if (autoExpandSuppressed || fittedReplyId == latestMessageId ||
+                draggedHeightPx != null || handoffRunning ||
+                !keepBottomAnchored ||
+                abs(currentAnimatedHeight.value - settledHeightPx) > autoSettleTolerancePx
+            ) return@snapshotFlow null
+            val contentHeightPx = measuredConversationHeightPx(listState) ?: return@snapshotFlow null
+            (dragHandleHeightPx + contentHeightPx + contentFitSlackPx)
+                .coerceIn(minimumContentHeightPx, maxContentHeightPx)
+        }
+            .distinctUntilChanged()
+            .collectLatest { fittedHeightPx ->
+                val targetHeightPx = fittedHeightPx ?: return@collectLatest
+                delay(500)
+                fittedReplyId = latestMessageId
+                if (abs(settledHeightPx - targetHeightPx) > autoSettleTolerancePx) {
+                    settledHeightPx = targetHeightPx
+                }
+            }
     }
     LaunchedEffect(handoffReady) {
         if (handoffReady && !thresholdHapticSent) {
@@ -410,18 +451,27 @@ private fun BoxScope.AssistantPanel(
         }
     }
 
+    fun stopAutoExpand() {
+        if (autoExpandSuppressed) return
+        autoExpandSuppressed = true
+        if (settledHeightPx > currentAnimatedHeight.value + autoSettleTolerancePx) {
+            settledHeightPx = currentAnimatedHeight.value.coerceIn(minimumContentHeightPx, maxContentHeightPx)
+        }
+    }
+
     fun dragBy(deltaY: Float): Float {
         if (handoffRunning || state.messages.isEmpty()) return 0f
         val current = draggedHeightPx ?: currentAnimatedHeight.value
         val requested = current - deltaY
+        val minimumDragHeightPx = minOf(baseContentHeightPx, settledHeightPx)
         return when {
             requested > maxContentHeightPx -> {
                 draggedHeightPx = maxContentHeightPx
                 if (deltaY < 0f) handoffPullPx += -deltaY
                 deltaY
             }
-            requested < baseContentHeightPx -> {
-                draggedHeightPx = baseContentHeightPx
+            requested < minimumDragHeightPx -> {
+                draggedHeightPx = minimumDragHeightPx
                 if (deltaY > 0f) dismissPullPx += deltaY
                 deltaY
             }
@@ -441,9 +491,12 @@ private fun BoxScope.AssistantPanel(
             canOpenConversation && current >= maxContentHeightPx * 0.88f &&
                 (handoffReady || velocityY <= -handoffVelocityPx) -> triggerHandoff()
             else -> {
-                val medium = baseContentHeightPx +
-                    (maxContentHeightPx - baseContentHeightPx) * 0.58f
-                val anchors = floatArrayOf(baseContentHeightPx, medium, maxContentHeightPx)
+                val anchors = floatArrayOf(
+                    minOf(baseContentHeightPx, settledHeightPx),
+                    baseContentHeightPx,
+                    mediumHeightPx,
+                    maxContentHeightPx,
+                )
                 settledHeightPx = anchors.minBy { kotlin.math.abs(it - current) }
                 draggedHeightPx = null
                 dismissPullPx = 0f
@@ -462,11 +515,14 @@ private fun BoxScope.AssistantPanel(
     ) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source != NestedScrollSource.UserInput) return Offset.Zero
+                stopAutoExpand()
                 val current = draggedHeightPx ?: currentAnimatedHeight.value
                 if (
                     available.y < 0f &&
                     canOpenConversation &&
-                    current >= maxContentHeightPx * 0.88f
+                    current >= maxContentHeightPx * 0.88f &&
+                    !listState.canScrollForward
                 ) {
                     directHandoffPullPx += -available.y
                     if (directHandoffPullPx >= directHandoffThresholdPx) {
@@ -477,7 +533,8 @@ private fun BoxScope.AssistantPanel(
                     return Offset(0f, available.y)
                 }
                 val shouldResize = (available.y < 0f && current < maxContentHeightPx) ||
-                    (available.y > 0f && current > baseContentHeightPx && !listState.canScrollBackward)
+                    (available.y > 0f && current > minOf(baseContentHeightPx, settledHeightPx) &&
+                        !listState.canScrollBackward)
                 return if (shouldResize) {
                     Offset(0f, dragByState.value(available.y))
                 } else {
@@ -490,10 +547,11 @@ private fun BoxScope.AssistantPanel(
                 available: Offset,
                 source: NestedScrollSource,
             ): Offset {
-                if (available.y == 0f) return Offset.Zero
+                if (source != NestedScrollSource.UserInput || available.y == 0f) return Offset.Zero
+                stopAutoExpand()
                 val current = draggedHeightPx ?: currentAnimatedHeight.value
                 val atUpperEdge = available.y < 0f && current >= maxContentHeightPx * 0.88f
-                val atLowerEdge = available.y > 0f && current <= baseContentHeightPx
+                val atLowerEdge = available.y > 0f && current <= minOf(baseContentHeightPx, settledHeightPx)
                 return if (atUpperEdge || atLowerEdge) {
                     Offset(0f, dragByState.value(available.y))
                 } else {
@@ -502,11 +560,13 @@ private fun BoxScope.AssistantPanel(
             }
 
             override suspend fun onPreFling(available: Velocity): Velocity {
+                stopAutoExpand()
                 finishDragState.value(available.y)
                 return Velocity.Zero
             }
 
             override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                stopAutoExpand()
                 finishDragState.value(available.y)
                 return Velocity.Zero
             }
@@ -515,7 +575,7 @@ private fun BoxScope.AssistantPanel(
 
     val bottomInset = with(density) { bottomInsetPx.toDp() }
     val messageRevealOffsetPx = with(density) { 12.dp.toPx() }
-    val sheetShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    val sheetShape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp)
     Column(
         modifier = Modifier
             .align(Alignment.BottomCenter)
@@ -528,7 +588,12 @@ private fun BoxScope.AssistantPanel(
                         alpha = colors.content.alpha * sheetBackgroundAlpha.value,
                     ),
                 )
-            },
+            }
+            .border(
+                width = 1.6.dp,
+                color = colors.panelStroke.copy(alpha = colors.panelStroke.alpha * sheetBackgroundAlpha.value),
+                shape = sheetShape,
+            ),
     ) {
         Column(
             modifier = Modifier
@@ -540,7 +605,10 @@ private fun BoxScope.AssistantPanel(
                 colors = colors,
                 modifier = Modifier.pointerInput(baseContentHeightPx, maxContentHeightPx) {
                     detectVerticalDragGestures(
-                        onDragStart = { draggedHeightPx = currentAnimatedHeight.value },
+                        onDragStart = {
+                            stopAutoExpand()
+                            draggedHeightPx = currentAnimatedHeight.value
+                        },
                         onVerticalDrag = { change, dragAmount ->
                             change.consume()
                             dragBy(dragAmount)
@@ -566,19 +634,30 @@ private fun BoxScope.AssistantPanel(
                         bottomInset = 8.dp,
                         keepBottomAnchored = keepBottomAnchored,
                         onBottomAnchorChanged = { keepBottomAnchored = it },
+                        assistantOverlay = true,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
         }
+        EtaAssistantSuggestions(
+            onSuggestionClick = onSuggestionClick,
+            visible = !hasMessages,
+            keyboardVisible = keyboardVisible,
+        )
         AssistantComposer(
             state = state,
             input = input,
+            speech = speech,
+            onMicrophone = onMicrophone,
+            onFinishSpeech = onFinishSpeech,
+            onDownloadModel = onDownloadModel,
+            onKeyboard = onKeyboard,
+            keyboardVisible = keyboardVisible,
             colors = colors,
             focusRequester = focusRequester,
             onInputChange = onInputChange,
-            onScreenContextSelect = onScreenContextSelect,
-            onScreenContextRemove = onScreenContextRemove,
+            onClose = onClose,
             onSubmit = onSubmit,
             onStop = onStop,
             modifier = Modifier
@@ -594,191 +673,11 @@ private fun BoxScope.AssistantPanel(
 }
 
 @Composable
-private fun AssistantComposer(
-    state: EtaVoiceUiState,
-    input: String,
-    colors: EtaVoicePanelColors,
-    focusRequester: FocusRequester,
-    onInputChange: (String) -> Unit,
-    onScreenContextSelect: () -> Unit,
-    onScreenContextRemove: () -> Unit,
-    onSubmit: () -> Unit,
-    onStop: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier.animateContentSize(
-            animationSpec = folmeSpring(damping = 0.92f, response = 0.34f),
-        ),
-    ) {
-        ScreenContextAttachment(
-            state = state.screenContext,
-            enabled = state.phase != EtaVoicePhase.PROCESSING,
-            colors = colors,
-            onSelect = onScreenContextSelect,
-            onRemove = onScreenContextRemove,
-        )
-        if (state.screenContext.phase != EtaScreenContextPhase.CONSUMED) {
-            Spacer(Modifier.height(7.dp))
-        }
-        AssistantInputBar(
-            state = state,
-            input = input,
-            colors = colors,
-            focusRequester = focusRequester,
-            onInputChange = onInputChange,
-            onSubmit = onSubmit,
-            onStop = onStop,
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
-}
-
-@Composable
-private fun ScreenContextAttachment(
-    state: EtaScreenContextUiState,
-    enabled: Boolean,
-    colors: EtaVoicePanelColors,
-    onSelect: () -> Unit,
-    onRemove: () -> Unit,
-) {
-    AnimatedContent(
-        targetState = state,
-        transitionSpec = {
-            (fadeIn(tween(180, easing = LinearOutSlowInEasing)) +
-                slideInVertically(tween(180, easing = LinearOutSlowInEasing)) { it / 5 })
-                .togetherWith(
-                    fadeOut(tween(120, easing = FastOutSlowInEasing)) +
-                        slideOutVertically(tween(120, easing = FastOutSlowInEasing)) { -it / 6 },
-                )
-        },
-        contentKey = { it.phase to it.selected },
-        label = "assistant_screen_context",
-    ) { screenContext ->
-        when {
-            screenContext.phase == EtaScreenContextPhase.CONSUMED -> Unit
-            screenContext.phase == EtaScreenContextPhase.AVAILABLE && screenContext.selected -> {
-                SelectedScreenContext(
-                    previewDataUrl = screenContext.previewDataUrl,
-                    enabled = enabled,
-                    colors = colors,
-                    onRemove = onRemove,
-                )
-            }
-            else -> {
-                val available = screenContext.phase == EtaScreenContextPhase.AVAILABLE && enabled
-                Row(
-                    modifier = Modifier
-                        .height(34.dp)
-                        .squircleSurface(
-                            color = colors.input.copy(alpha = 0.9f),
-                            cornerRadius = 17.dp,
-                        )
-                        .clickable(enabled = available, onClick = onSelect)
-                        .padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    when (screenContext.phase) {
-                        EtaScreenContextPhase.CAPTURING -> CircularProgressIndicator(
-                            size = 15.dp,
-                            strokeWidth = 2.dp,
-                        )
-                        EtaScreenContextPhase.AVAILABLE -> Icon(
-                            imageVector = Icons.Rounded.DesktopWindows,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = if (available) colors.inputPrimary else colors.inputTertiary,
-                        )
-                        EtaScreenContextPhase.UNAVAILABLE -> Icon(
-                            imageVector = Icons.Rounded.CancelPresentation,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = colors.inputTertiary,
-                        )
-                        EtaScreenContextPhase.CONSUMED -> Unit
-                    }
-                    Spacer(Modifier.size(7.dp))
-                    Text(
-                        text = when (screenContext.phase) {
-                            EtaScreenContextPhase.CAPTURING -> stringResource(R.string.voice_screen_preparing)
-                            EtaScreenContextPhase.AVAILABLE -> stringResource(R.string.voice_screen_add)
-                            EtaScreenContextPhase.UNAVAILABLE -> stringResource(R.string.voice_screen_unavailable)
-                            EtaScreenContextPhase.CONSUMED -> ""
-                        },
-                        color = if (available) colors.inputPrimary else colors.inputSecondary,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SelectedScreenContext(
-    previewDataUrl: String?,
-    enabled: Boolean,
-    colors: EtaVoicePanelColors,
-    onRemove: () -> Unit,
-) {
-    val previewBitmap = previewDataUrl?.let { rememberDataUrlBitmap(it) }
-    Row(
-        modifier = Modifier
-            .height(60.dp)
-            .squircleBackground(colors.input.copy(alpha = 0.92f), 15.dp)
-            .padding(5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        previewBitmap?.let { bitmap ->
-            Image(
-                bitmap = bitmap,
-                contentDescription = stringResource(R.string.voice_screen_preview),
-                modifier = Modifier
-                    .size(50.dp)
-                    .squircleClip(11.dp),
-                contentScale = ContentScale.Crop,
-            )
-        }
-        Column(
-            modifier = Modifier.padding(start = 10.dp, end = 6.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.voice_screen_title),
-                color = colors.inputPrimary,
-                fontSize = 13.sp,
-                maxLines = 1,
-            )
-            Text(
-                text = stringResource(R.string.voice_screen_context_summary),
-                color = colors.inputSecondary,
-                fontSize = 11.sp,
-                maxLines = 1,
-            )
-        }
-        IconButton(
-            onClick = onRemove,
-            enabled = enabled,
-            minWidth = 30.dp,
-            minHeight = 30.dp,
-            cornerRadius = 15.dp,
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Close,
-                contentDescription = stringResource(R.string.voice_screen_remove),
-                modifier = Modifier.size(14.dp),
-                tint = if (enabled) colors.inputSecondary else colors.inputTertiary,
-            )
-        }
-    }
-}
-
-@Composable
 private fun DragHandle(colors: EtaVoicePanelColors, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(34.dp),
+            .height(38.dp),
         contentAlignment = Alignment.Center,
     ) {
         Box(
@@ -790,100 +689,14 @@ private fun DragHandle(colors: EtaVoicePanelColors, modifier: Modifier = Modifie
     }
 }
 
-@Composable
-private fun AssistantInputBar(
-    state: EtaVoiceUiState,
-    input: String,
-    colors: EtaVoicePanelColors,
-    focusRequester: FocusRequester,
-    onInputChange: (String) -> Unit,
-    onSubmit: () -> Unit,
-    onStop: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val canSubmit = input.isNotBlank() && state.phase != EtaVoicePhase.PROCESSING
-    Row(
-        modifier = modifier
-            .heightIn(min = 48.dp)
-            .squircleBackground(colors.input, 24.dp)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = {},
-            )
-            .padding(start = 16.dp, end = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        BasicTextField(
-            value = input,
-            onValueChange = onInputChange,
-            modifier = Modifier
-                .weight(1f)
-                .padding(vertical = 6.dp)
-                .focusRequester(focusRequester),
-            enabled = state.phase != EtaVoicePhase.PROCESSING,
-            textStyle = TextStyle(
-                color = colors.inputPrimary,
-                fontSize = 14.sp,
-                lineHeight = 20.sp,
-            ),
-            cursorBrush = SolidColor(MiuixTheme.colorScheme.primary),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { if (canSubmit) onSubmit() }),
-            maxLines = 4,
-            minLines = 1,
-            decorationBox = { innerTextField ->
-                Box(contentAlignment = Alignment.CenterStart) {
-                    if (input.isEmpty()) {
-                        Text(
-                            text = stringResource(R.string.voice_input_hint),
-                            color = colors.inputTertiary,
-                            fontSize = 14.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    innerTextField()
-                }
-            },
-        )
-        if (state.phase == EtaVoicePhase.PROCESSING) {
-            IconButton(
-                onClick = onStop,
-                minWidth = 36.dp,
-                minHeight = 36.dp,
-                cornerRadius = 18.dp,
-                backgroundColor = MiuixTheme.colorScheme.error,
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Stop,
-                    contentDescription = stringResource(R.string.action_stop),
-                    modifier = Modifier.size(15.dp),
-                    tint = Color.White,
-                )
-            }
-        } else {
-            IconButton(
-                onClick = onSubmit,
-                enabled = canSubmit,
-                minWidth = 36.dp,
-                minHeight = 36.dp,
-                cornerRadius = 18.dp,
-                backgroundColor = if (canSubmit) {
-                    MiuixTheme.colorScheme.primary
-                } else {
-                    colors.inputTertiary.copy(alpha = 0.35f)
-                },
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.ArrowForward,
-                    contentDescription = stringResource(R.string.voice_send),
-                    modifier = Modifier.size(17.dp),
-                    tint = if (canSubmit) Color.White else colors.inputSecondary,
-                )
-            }
-        }
-    }
+private fun measuredConversationHeightPx(listState: LazyListState): Float? {
+    val layout = listState.layoutInfo
+    if (layout.totalItemsCount == 0) return null
+    val first = layout.visibleItemsInfo.firstOrNull() ?: return null
+    val last = layout.visibleItemsInfo.lastOrNull() ?: return null
+    if (first.index != 0 || last.index != layout.totalItemsCount - 1) return null
+    return (last.offset + last.size - first.offset +
+        layout.beforeContentPadding + layout.afterContentPadding).toFloat()
 }
 
 private fun assistantBaseHeightPx(
@@ -892,17 +705,6 @@ private fun assistantBaseHeightPx(
     density: Float,
 ): Float {
     if (messages.isEmpty()) return 0f
-    val estimatedLines = messages.sumOf { message ->
-        when (message) {
-            is UserMessageUi -> ceil(message.content.length / 22f).toInt().coerceAtLeast(1)
-            is AgentMessageUi -> ceil(message.content.length / 24f).toInt().coerceAtLeast(1)
-            is ThinkingMessageUi -> 2
-            is ToolActivityMessageUi -> 2
-            else -> 1
-        }
-    }
-    val estimatedDp = 92f + estimatedLines * 23f + messages.size * 12f
-    return max(230f, estimatedDp)
-        .times(density)
-        .coerceAtMost(maxHeightPx * 0.68f)
+    // 回复增量只改变列表内容，不重新估算浮窗高度，避免与跟底滚动互相追赶。
+    return (304f * density).coerceAtMost(maxHeightPx)
 }

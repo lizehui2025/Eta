@@ -6,7 +6,9 @@ import android.database.sqlite.SQLiteException
 import io.github.mangi.eta.agent.device.BoundedRootCommandExecutor
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.core.ColorOsMemoryBridgeProtocol
+import io.github.mangi.eta.core.isPlaintextColorOsMemoryDatabase
 import java.io.File
+import java.io.IOException
 import org.json.JSONObject
 
 private const val COLOROS_MEMORY_DATABASE_MAX_BYTES = 64L * 1024 * 1024
@@ -82,6 +84,14 @@ internal class AgentColorOsMemoryTools(
                 error(snapshotCreation.errorCode, "ColorOS 系统记忆快照暂时不可用"),
             )
         try {
+            if (!isPlaintextColorOsMemoryDatabase(snapshot)) {
+                return@synchronized sensitive(
+                    error(
+                        "COLOROS_MEMORY_ENCRYPTED_REQUIRES_HOOK",
+                        "系统记忆已加密，需要启用小布记忆的 Xposed 作用域并重新启动小布记忆",
+                    ),
+                )
+            }
             val database = runCatching {
                 SQLiteDatabase.openDatabase(
                     snapshot.absolutePath,
@@ -106,6 +116,8 @@ internal class AgentColorOsMemoryTools(
                         sensitive(error("COLOROS_MEMORY_QUERY_FAILED", "ColorOS 系统记忆查询失败"))
                     }
             }
+        } catch (_: IOException) {
+            sensitive(error("COLOROS_MEMORY_SNAPSHOT_INVALID", "ColorOS 系统记忆快照无法读取"))
         } finally {
             deleteSnapshot(snapshot)
         }

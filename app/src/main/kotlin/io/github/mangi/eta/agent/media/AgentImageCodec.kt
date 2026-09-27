@@ -18,7 +18,7 @@ internal object AgentImageCodec {
     ): AgentModelClient.ModelImage {
         require(bytes.isNotEmpty()) { "图片内容为空" }
         require(bytes.size <= MAX_AGENT_IMAGE_BYTES) { "图片数据过大：${bytes.size}" }
-        // 全局发原图：直接 base64 原始 bytes，不 decode+re-encode（零损失），只读尺寸/mime
+        // 已编码图片只读取尺寸和格式，正文保留原始字节。
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
         val recognizedImage = bytes.hasSupportedImageMagic()
@@ -41,28 +41,27 @@ internal object AgentImageCodec {
         source: String,
         mimeHint: String = "image/jpeg",
     ): AgentModelClient.ModelImage =
-        AgentModelImageEncoder.screen(bytes, source, mimeHint)
+        AgentModelImageEncoder.attachment(bytes, source, mimeHint)
             ?: error("无法解码图片")
 
-    /** Root screencap 只允许无损换编码，不改变截图尺寸。 */
+    /** 已有截图编码直接透传，不解码像素、缩放或转换格式。 */
     fun fromScreenBytes(
         bytes: ByteArray,
         source: String,
         mimeHint: String = "image/png",
     ): AgentModelClient.ModelImage =
-        AgentModelImageEncoder.screen(bytes, source, mimeHint)
-            ?: fromBytes(bytes, source, mimeHint)
+        fromBytes(bytes, source, mimeHint).copy(preserveOriginal = true)
 
     fun fromScreenBitmap(
         bitmap: Bitmap,
         source: String,
     ): AgentModelClient.ModelImage = AgentModelImageEncoder.screen(bitmap, source)
 
-    /** 助理消息里的屏幕上下文使用有界视觉编码，不改变通用屏幕观察的无损合同。 */
+    /** 助理与 GUI 截图共用原始像素合同。 */
     fun fromScreenContextBitmap(
         bitmap: Bitmap,
         source: String,
-    ): AgentModelClient.ModelImage = AgentModelImageEncoder.screenContext(bitmap, source)
+    ): AgentModelClient.ModelImage = fromScreenBitmap(bitmap, source)
 
     /**
      * 为聊天列表生成独立的小预览。模型仍从 [image.reference] 读取原图，预览不会参与模型输入。
@@ -77,7 +76,12 @@ internal object AgentImageCodec {
         AgentModelImageEncoder.toolVision(file.readBytesLimited(), source)
     }.getOrNull()
 
-    fun fromReference(context: Context?, value: String, source: String): AgentModelClient.ModelImage? {
+    fun fromReference(
+        context: Context?,
+        value: String,
+        source: String,
+        preserveOriginal: Boolean = false,
+    ): AgentModelClient.ModelImage? {
         val trimmed = value.trim()
         if (trimmed.isBlank()) return null
         if (
@@ -88,7 +92,8 @@ internal object AgentImageCodec {
                 reference = trimmed,
                 mimeType = "image/*",
                 bytes = 0,
-                source = source
+                source = source,
+                preserveOriginal = preserveOriginal,
             )
         }
         if (trimmed.startsWith("data:image/", ignoreCase = true)) {
@@ -96,23 +101,23 @@ internal object AgentImageCodec {
             if (markerIndex < 0) return null
             val encoded = trimmed.substring(markerIndex + "base64,".length)
             if (encoded.isBlank() || encoded.length > MAX_AGENT_IMAGE_BYTES * 2) return null
-            val bytes = runCatching { Base64.decode(encoded, Base64.DEFAULT).size }.getOrDefault(0)
-            if (bytes <= 0 || bytes > MAX_AGENT_IMAGE_BYTES) return null
             val raw = runCatching { Base64.decode(encoded, Base64.DEFAULT) }.getOrNull() ?: return null
-            return AgentModelImageEncoder.screen(raw, source, trimmed.substring("data:".length).substringBefore(";"))
-                ?: return null
+            if (raw.isEmpty() || raw.size > MAX_AGENT_IMAGE_BYTES) return null
+            val mimeHint = trimmed.substring("data:".length).substringBefore(";")
+            return if (preserveOriginal) fromScreenBytes(raw, source, mimeHint)
+            else AgentModelImageEncoder.attachment(raw, source, mimeHint)
         }
 
         if (context != null) {
             val uri = Uri.parse(trimmed)
             if (uri.scheme == "content") {
-                return readContentUri(context, uri, source)
+                return readContentUri(context, uri, source)?.copy(preserveOriginal = preserveOriginal)
             }
             if (uri.scheme == "file") {
                 val file = uri.path?.let(::File)
                 return file?.takeIf(File::isFile)?.let { candidate ->
                     runCatching {
-                        fromBytes(candidate.readBytesLimited(), source)
+                        fromBytes(candidate.readBytesLimited(), source).copy(preserveOriginal = preserveOriginal)
                     }.getOrNull()
                 }
             }
@@ -120,7 +125,7 @@ internal object AgentImageCodec {
             runCatching {
                 val file = File(trimmed)
                 if (file.isFile) {
-                    return fromBytes(file.readBytesLimited(), source)
+                    return fromBytes(file.readBytesLimited(), source).copy(preserveOriginal = preserveOriginal)
                 }
             }
         }
@@ -128,7 +133,7 @@ internal object AgentImageCodec {
         return runCatching {
             if (!trimmed.looksLikeBase64()) return@runCatching null
             val decoded = Base64.decode(trimmed, Base64.DEFAULT)
-            if (decoded.hasSupportedImageMagic()) fromBytes(decoded, source) else null
+            if (decoded.hasSupportedImageMagic()) fromBytes(decoded, source).copy(preserveOriginal = preserveOriginal) else null
         }.getOrNull()
     }
 

@@ -111,6 +111,7 @@ internal object AgentModelClient {
          */
         agentMode: AgentMode = AgentMode.CHAT,
         rewriteReply: Boolean = false,
+        assistantScreenContext: String = "",
         onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
         onTranscript: (List<ConversationMessage>) -> Unit = {},
         onEvent: (AgentEvent) -> Unit = {}
@@ -138,6 +139,7 @@ internal object AgentModelClient {
             ))
         } else if (!compactOnly) {
             messages.getJSONObject(messages.length() - 1).put("_eta_message_id", initialUserMessageId)
+            AssistantScreenContextProjection.attach(messages.getJSONObject(messages.length() - 1), assistantScreenContext)
         }
         if (compactOnly) messages.remove(messages.length() - 1)
         val transcript = JSONArray()
@@ -400,7 +402,9 @@ internal object AgentModelClient {
         val bytes: Int,
         val width: Int? = null,
         val height: Int? = null,
-        val source: String = "unknown"
+        val source: String = "unknown",
+        /** 截图已具有可上传编码，跨进程物化时保留字节，不走附件转码。 */
+        val preserveOriginal: Boolean = false,
     )
 
     sealed interface ModelResponse {

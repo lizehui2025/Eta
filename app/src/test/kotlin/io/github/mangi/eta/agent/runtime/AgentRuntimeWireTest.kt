@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.runtime
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Parcel
 import android.util.Base64
 import io.github.mangi.eta.agent.media.AgentImageCodec
@@ -9,8 +10,10 @@ import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ReasoningEffort
 import java.io.File
 import java.io.FileOutputStream
+import java.io.ByteArrayOutputStream
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -24,6 +27,74 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class AgentRuntimeWireTest {
+    @Test
+    fun screenshotsKeepExactBytesAndFormatAcrossDescriptorAndInlineTransport() {
+        val bitmap = Bitmap.createBitmap(32, 24, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.argb(128, 96, 128, 192))
+        }
+        try {
+            for ((format, mime) in listOf(
+                Bitmap.CompressFormat.PNG to "image/png",
+                Bitmap.CompressFormat.JPEG to "image/jpeg",
+                Bitmap.CompressFormat.WEBP_LOSSLESS to "image/webp",
+            )) {
+                val original = ByteArrayOutputStream().use { output ->
+                    assertTrue(bitmap.compress(format, 83, output))
+                    output.toByteArray()
+                }
+                val image = AgentImageCodec.fromScreenBytes(original, "custom_capture_label", mime)
+                val request = AgentRuntimeWire.RunRequest(
+                    runId = "raw-screen", prompt = "解释当前屏幕", images = listOf(image),
+                    config = AgentModelClient.ModelConfig(
+                        baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "",
+                        reasoningEffort = ReasoningEffort.OFF,
+                    ),
+                )
+                AgentRuntimeImageTransfer.prepare(RuntimeEnvironment.getApplication(), request.images).use { prepared ->
+                    assertTrue(prepared.images.single().preserveOriginal)
+                    val result = AgentRuntimeImageTransfer.materialize(AgentRuntimeWire.incomingRunRequestFromBundle(
+                        AgentRuntimeWire.toBundle(request, prepared.images),
+                    )).images.single()
+                    assertEquals(mime, result.mimeType)
+                    assertTrue(result.preserveOriginal)
+                    assertEquals(32, result.width)
+                    assertEquals(24, result.height)
+                    assertArrayEquals(original, Base64.decode(result.reference.substringAfter("base64,"), Base64.DEFAULT))
+                }
+                val inline = AgentRuntimeWire.toLegacyBundle(request)
+                assertEquals(request, AgentRuntimeWire.runRequestFromBundle(inline))
+                val restored = AgentRuntimeImageTransfer.materialize(
+                    AgentRuntimeWire.incomingRunRequestFromBundle(inline),
+                ).images.single()
+                assertEquals(mime, restored.mimeType)
+                assertTrue(restored.preserveOriginal)
+                assertArrayEquals(original, Base64.decode(restored.reference.substringAfter("base64,"), Base64.DEFAULT))
+                inline.getParcelableArrayList("images", android.os.Bundle::class.java)!!.single().remove("preserve_original")
+                assertFalse(AgentRuntimeWire.runRequestFromBundle(inline).images.single().preserveOriginal)
+            }
+        } finally { bitmap.recycle() }
+    }
+
+    @Test
+    fun assistantScreenContextRoundTripsSeparatelyFromPromptAndDefaultsForOldSenders() {
+        val request = AgentRuntimeWire.RunRequest(
+            runId = "assistant-context", prompt = "这是什么？", images = emptyList(),
+            config = AgentModelClient.ModelConfig(baseUrl = "https://example.invalid", apiKey = "test", model = "test", systemPrompt = "", reasoningEffort = ReasoningEffort.OFF),
+            assistantScreenContext = "当前应用与画面内容",
+        )
+        val bundle = AgentRuntimeWire.toLegacyBundle(request)
+        assertEquals(request, AgentRuntimeWire.runRequestFromBundle(bundle))
+        bundle.remove("assistant_screen_context")
+        val legacy = AgentRuntimeWire.runRequestFromBundle(bundle)
+        assertEquals("", legacy.assistantScreenContext)
+        assertEquals(request.prompt, legacy.prompt)
+        assertThrows(IllegalArgumentException::class.java) {
+            AgentRuntimeWire.toLegacyBundle(request.copy(assistantScreenContext = "x".repeat(24_001)))
+        }
+        bundle.putString("assistant_screen_context", "x".repeat(24_001))
+        assertThrows(IllegalArgumentException::class.java) { AgentRuntimeWire.runRequestFromBundle(bundle) }
+    }
+
     @Test
     fun replyRewriteTargetSurvivesRequestResultAndDrain() {
         val request = AgentRuntimeWire.RunRequest(
@@ -240,7 +311,18 @@ class AgentRuntimeWireTest {
 
     @Test
     fun largeImageBodyUsesFileDescriptorAndStaysOutOfBinderBundle() {
-        val imageBytes = ByteArray(600_000) { index -> (index % 251).toByte() }
+        val random = kotlin.random.Random(7)
+        val bitmap = Bitmap.createBitmap(
+            IntArray(640 * 640) { random.nextInt() or 0xff000000.toInt() },
+            640, 640, Bitmap.Config.ARGB_8888,
+        )
+        val imageBytes = try {
+            ByteArrayOutputStream().use { output ->
+                assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+                output.toByteArray()
+            }
+        } finally { bitmap.recycle() }
+        assertTrue(imageBytes.size > 600_000)
         val dataUrl = "data:image/png;base64,${Base64.encodeToString(imageBytes, Base64.NO_WRAP)}"
         val request = AgentRuntimeWire.RunRequest(
             runId = "run-large-image",
@@ -279,9 +361,19 @@ class AgentRuntimeWireTest {
                 AgentRuntimeWire.incomingRunRequestFromBundle(bundle)
             )
             assertEquals(request.copy(images = emptyList()), materialized.copy(images = emptyList()))
-            assertEquals(request.images.single().reference, materialized.images.single().reference)
-            assertEquals(request.images.single().mimeType, materialized.images.single().mimeType)
-            assertEquals(request.images.single().bytes, materialized.images.single().bytes)
+            assertEquals(imageBytes.size, prepared.images.single().bytes)
+            val receivedImage = materialized.images.single()
+            assertEquals("image/jpeg", receivedImage.mimeType)
+            val decodedBytes = Base64.decode(receivedImage.reference.substringAfter("base64,"), Base64.DEFAULT)
+            assertEquals(decodedBytes.size, receivedImage.bytes)
+            val decodedBitmap = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
+                ?: error("传输后的图片无法解码")
+            try {
+                assertEquals(640, decodedBitmap.width)
+                assertEquals(640, decodedBitmap.height)
+                assertEquals(decodedBitmap.width, receivedImage.width)
+                assertEquals(decodedBitmap.height, receivedImage.height)
+            } finally { decodedBitmap.recycle() }
             assertEquals(request.images.single().source, materialized.images.single().source)
         }
     }
@@ -326,7 +418,14 @@ class AgentRuntimeWireTest {
                 )
                 assertTrue(materialized.images.single().reference.startsWith("data:image/"))
                 assertTrue(materialized.images.single().reference.contains(";base64,"))
-                assertEquals(sourceFile.length().toInt(), materialized.images.single().bytes)
+                val receivedImage = materialized.images.single()
+                assertEquals("image/jpeg", receivedImage.mimeType)
+                assertEquals(8, receivedImage.width)
+                assertEquals(8, receivedImage.height)
+                assertEquals(
+                    Base64.decode(receivedImage.reference.substringAfter("base64,"), Base64.DEFAULT).size,
+                    receivedImage.bytes,
+                )
             }
         } finally {
             sourceFile.delete()

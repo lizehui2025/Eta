@@ -7,6 +7,7 @@ import io.github.mangi.eta.agent.runtime.AgentAppContext
 import io.github.mangi.eta.agent.runtime.AgentExternalArchivePayload
 import io.github.mangi.eta.agent.runtime.AgentRuntimeClient
 import io.github.mangi.eta.agent.runtime.AgentRuntimeWire
+import io.github.mangi.eta.core.DexKitTargets
 import io.github.mangi.eta.core.HookInstallation
 import io.github.mangi.eta.core.HookRegistrar
 import io.github.mangi.eta.core.HookSupport
@@ -16,12 +17,14 @@ import io.github.mangi.eta.core.toSafeLogToken
 import io.github.mangi.eta.hook.EtaInjectedStrings
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.os.Handler
 import android.os.Looper
 import androidx.annotation.StringRes
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.libxposed.api.XposedModule
+import java.io.File
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.security.MessageDigest
@@ -56,32 +59,11 @@ internal object BreenoHooks {
         "Reasoning",
     )
 
-    private const val MESSAGE_QUEUE_MANAGER_CLASS =
-        "com.heytap.speech.engine.connect.core.manager.MessageQueueManager"
-    private const val MESSAGE_CLASS = "com.heytap.speech.engine.protocol.event.Message"
-    private const val MESSAGE_PROCESSOR_CLASS =
-        "com.heytap.speech.engine.connect.core.manager.i"
-    private const val CDM_NODE_CLASS = "com.heytap.speech.engine.nodes.a"
-    private const val DM_PARAMETER_CLASS = "com.heytap.speech.engine.nodes.DmParameter"
-    private const val HEYTAP_SPEECH_ENGINE_CLASS = "com.heytap.speech.engine.HeytapSpeechEngine"
     private const val DIRECTIVE_CLASS = "com.heytap.speech.engine.protocol.directive.Directive"
     private const val DIRECTIVE_HEADER_CLASS = "com.heytap.speech.engine.protocol.directive.DirectiveHeader"
     private const val DIRECTIVE_PAYLOAD_CLASS = "com.heytap.speech.engine.protocol.directive.DirectivePayload"
     private const val STREAM_TEXT_CARD_CLASS =
         "com.heytap.speech.engine.protocol.directive.myai.StreamTextCard"
-    private const val AI_CHAT_REPOSITORY_CLASS =
-        "com.heytap.speechassist.aichat.repository.AIChatRepository"
-    private const val AI_CHAT_DATA_CENTER_CLASS =
-        "com.heytap.speechassist.aichat.AIChatDataCenter"
-    private const val AI_CHAT_VIEW_BEAN_CLASS =
-        "com.heytap.speechassist.aichat.bean.AIChatViewBean"
-    private const val AI_CHAT_ROOM_ID_MANAGER_CLASS =
-        "com.heytap.speechassist.aichat.AIChatRoomIdManager"
-    private const val AI_CHAT_FAST_MODE_STATE_MANAGER_CLASS =
-        "com.heytap.speechassist.aichathome.chat.ui.tip.AiChatFastModeStateManager"
-    private const val INSERT_RECORD_CLASS =
-        "com.heytap.speechassist.aichat.repository.api.InsertRecord"
-    private const val JSON_UTIL_CLASS = "com.heytap.speechassist.utils.j3"
     private const val KOTLIN_FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
     private const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
     private const val EXPERIMENTAL_PREFIX = "/agent "
@@ -172,17 +154,38 @@ internal object BreenoHooks {
     @Volatile
     private var lastBreenoThinkingEnabledOverride: Boolean? = null
 
+    @Volatile
+    private var protocolTargets: BreenoTargets? = null
+
     fun install(
         module: XposedModule,
         rootLogger: ModuleLogger,
-        classLoader: ClassLoader
+        classLoader: ClassLoader,
+        applicationInfo: ApplicationInfo,
     ): HookInstallation {
         val hooks = HookRegistrar(module, rootLogger, "Breeno")
         val logger = hooks.logger
         return hooks.install {
+            val targets = DexKitTargets(
+                apkPath = applicationInfo.sourceDir,
+                classLoader = classLoader,
+                logger = logger,
+                cacheDirectory = File(applicationInfo.dataDir, "cache/eta-dexkit"),
+                moduleNativeLibraryDirectory = module.moduleApplicationInfo.nativeLibraryDir,
+                moduleApkPath = module.moduleApplicationInfo.sourceDir,
+            ).use { BreenoTargets.resolve(classLoader, it) }
+            protocolTargets = targets
+            if (targets.missingBridgeMethods.isNotEmpty()) {
+                missing(
+                    id = "breeno.runtime-contract",
+                    description = "Breeno Runtime bridge",
+                    detail = "小布交付链路不完整，保留原生请求：${targets.missingBridgeMethods.joinToString()}",
+                )
+                return@install
+            }
             hookOutboundMessage(hooks, classLoader)
-            hookInboundMessage(hooks, classLoader)
-            hookCdmTextRequest(hooks, classLoader)
+            hookInboundMessage(hooks)
+            hookCdmTextRequest(hooks)
             hookAIChatDataCenter(hooks, classLoader)
             schedulePendingResultDrains(logger, classLoader)
         }
@@ -193,29 +196,12 @@ internal object BreenoHooks {
         classLoader: ClassLoader
     ) {
         val logger = hooks.logger
-        val managerClass = HookSupport.findClassOrNull(classLoader, MESSAGE_QUEUE_MANAGER_CLASS)
-        val messageClass = HookSupport.findClassOrNull(classLoader, MESSAGE_CLASS)
-        if (managerClass == null || messageClass == null) {
-            hooks.missing(
-                id = "breeno.outbound-message",
-                description = "MessageQueueManager.c",
-                detail = "未找到 MessageQueueManager/Message，跳过出站接管"
-            )
-            return
-        }
-        val method = HookSupport.findMethod(
-            managerClass,
-            "c",
-            messageClass,
-            Boolean::class.javaPrimitiveType!!,
-            Int::class.javaObjectType,
-            Boolean::class.javaPrimitiveType!!
-        )
+        val method = protocolTargets?.outboundMessage
         if (method == null) {
             hooks.missing(
                 id = "breeno.outbound-message",
-                description = "MessageQueueManager.c",
-                detail = "未找到 MessageQueueManager.c(Message,boolean,Integer,boolean)"
+                description = "MessageQueueManager.send",
+                detail = "未找到唯一出站消息方法，保留原生处理",
             )
             return
         }
@@ -223,7 +209,7 @@ internal object BreenoHooks {
         hooks.intercept(
             id = "breeno.outbound-message",
             executable = method,
-            description = "Breeno MessageQueueManager.c"
+            description = "Breeno outbound message"
         ) { chain ->
             val message = chain.args.getOrNull(0)
             if (maybeHandleCustomModelRequest(logger, classLoader, message)) {
@@ -240,31 +226,14 @@ internal object BreenoHooks {
         }
     }
 
-    private fun hookInboundMessage(
-        hooks: HookRegistrar,
-        classLoader: ClassLoader
-    ) {
+    private fun hookInboundMessage(hooks: HookRegistrar) {
         val logger = hooks.logger
-        val processorClass = HookSupport.findClassOrNull(classLoader, MESSAGE_PROCESSOR_CLASS)
-        if (processorClass == null) {
-            hooks.missing(
-                id = "breeno.inbound-message",
-                description = "MessageProcessor.B",
-                detail = "未找到 MessageProcessor，跳过入站接管"
-            )
-            return
-        }
-        val method = HookSupport.findMethod(
-            processorClass,
-            "B",
-            String::class.java,
-            String::class.java
-        )
+        val method = protocolTargets?.inboundMessage
         if (method == null) {
             hooks.missing(
                 id = "breeno.inbound-message",
-                description = "MessageProcessor.B",
-                detail = "未找到 MessageProcessor.B(String,String)"
+                description = "MessageProcessor.processMessage",
+                detail = "未找到唯一入站消息方法，保留原生处理",
             )
             return
         }
@@ -272,7 +241,7 @@ internal object BreenoHooks {
         hooks.intercept(
             id = "breeno.inbound-message",
             executable = method,
-            description = "Breeno MessageProcessor.B"
+            description = "Breeno inbound message"
         ) { chain ->
             val content = chain.args.getOrNull(1) as? String
             val filteredContent = filterClaimedNativeDirectives(logger, content)
@@ -299,27 +268,14 @@ internal object BreenoHooks {
         }
     }
 
-    private fun hookCdmTextRequest(
-        hooks: HookRegistrar,
-        classLoader: ClassLoader
-    ) {
+    private fun hookCdmTextRequest(hooks: HookRegistrar) {
         val logger = hooks.logger
-        val cdmNodeClass = HookSupport.findClassOrNull(classLoader, CDM_NODE_CLASS)
-        val dmParameterClass = HookSupport.findClassOrNull(classLoader, DM_PARAMETER_CLASS)
-        if (cdmNodeClass == null || dmParameterClass == null) {
-            hooks.missing(
-                id = "breeno.cdm-text-request",
-                description = "CdmNode.o",
-                detail = "未找到 CdmNode/DmParameter，跳过文本请求观测"
-            )
-            return
-        }
-        val method = HookSupport.findMethod(cdmNodeClass, "o", dmParameterClass)
+        val method = protocolTargets?.cdmTextRequest
         if (method == null) {
             hooks.missing(
                 id = "breeno.cdm-text-request",
-                description = "CdmNode.o",
-                detail = "未找到 CdmNode.o(DmParameter)"
+                description = "CdmNode.voiceStart",
+                detail = "未找到唯一文本请求方法，保留原生处理",
             )
             return
         }
@@ -327,7 +283,7 @@ internal object BreenoHooks {
         hooks.intercept(
             id = "breeno.cdm-text-request",
             executable = method,
-            description = "Breeno CdmNode.o"
+            description = "Breeno text request"
         ) { chain ->
             val parameter = chain.args.getOrNull(0)
             try {
@@ -353,22 +309,12 @@ internal object BreenoHooks {
         classLoader: ClassLoader
     ) {
         val logger = hooks.logger
-        val dataCenterClass = HookSupport.findClassOrNull(classLoader, AI_CHAT_DATA_CENTER_CLASS)
-        val viewBeanClass = HookSupport.findClassOrNull(classLoader, AI_CHAT_VIEW_BEAN_CLASS)
-        if (dataCenterClass == null || viewBeanClass == null) {
-            hooks.missing(
-                id = "breeno.ai-chat-data-center",
-                description = "AIChatDataCenter.r",
-                detail = "未找到 AIChatDataCenter/AIChatViewBean，跳过对话 UI 接管"
-            )
-            return
-        }
-        val method = HookSupport.findMethod(dataCenterClass, "r", viewBeanClass)
+        val method = protocolTargets?.chatDispatch
         if (method == null) {
             hooks.missing(
                 id = "breeno.ai-chat-data-center",
-                description = "AIChatDataCenter.r",
-                detail = "未找到 AIChatDataCenter.r(AIChatViewBean)"
+                description = "AIChatDataCenter.addChatBean",
+                detail = "未找到唯一对话派发方法，保留原生处理",
             )
             return
         }
@@ -376,7 +322,7 @@ internal object BreenoHooks {
         hooks.intercept(
             id = "breeno.ai-chat-data-center",
             executable = method,
-            description = "Breeno AIChatDataCenter.r"
+            description = "Breeno chat dispatch"
         ) { chain ->
             val bean = chain.args.getOrNull(0)
             when (invokeInt(bean, "getChatType")) {
@@ -446,10 +392,7 @@ internal object BreenoHooks {
             ),
             thinkingEnabledOverride = currentBreenoThinkingEnabledOverride(classLoader),
             queryPayload = invokeString(bean, "getPayload"),
-            queryClientResult = serializeForBreenoHistory(
-                classLoader,
-                clientResult,
-            ),
+            queryClientResult = serializeForBreenoHistory(clientResult),
         )
         val handled = startAgentRequest(
             logger = logger,
@@ -1310,8 +1253,8 @@ internal object BreenoHooks {
     }
 
     private fun currentBreenoThinkingEnabledOverride(classLoader: ClassLoader): Boolean? =
-        singletonInstance(classLoader, AI_CHAT_FAST_MODE_STATE_MANAGER_CLASS)
-            ?.let { manager -> invokeCompatible(manager, "h") as? Boolean }
+        singletonInstance(classLoader, BreenoTargets.FAST_MODE_MANAGER)
+            ?.let { manager -> protocolTargets?.fastModeEnabled?.invoke(manager) as? Boolean }
             ?.let { fastModeEnabled -> !fastModeEnabled }
 
     private fun thinkingEnabledFromMode(mode: String?): Boolean? =
@@ -1571,11 +1514,11 @@ internal object BreenoHooks {
         )
         val agent = getAgent(classLoader)
             ?: error("HeytapSpeechEngine.mAgent is null")
-        invokeCompatible(agent, "j", directives, origin)
+        requireNotNull(protocolTargets?.dispatchDirectives).invoke(agent, directives, origin)
     }
 
     private fun getAgent(classLoader: ClassLoader): Any? {
-        val engineClass = Class.forName(HEYTAP_SPEECH_ENGINE_CLASS, false, classLoader)
+        val engineClass = Class.forName(BreenoTargets.ENGINE, false, classLoader)
         val engine = getHeytapSpeechEngineInstance(engineClass)
         if (engine == null) return null
         return runCatching { invokeCompatible(engine, "getMAgent") }.getOrNull()
@@ -1661,7 +1604,7 @@ internal object BreenoHooks {
                 .ifBlank { request.originalRecordId }
                 .ifBlank { newCompactId() }
             val agentName = currentAgentName(classLoader).ifBlank { BREENO_DEFAULT_AGENT_NAME }
-            val repository = singletonInstance(classLoader, AI_CHAT_REPOSITORY_CLASS)
+            val repository = singletonInstance(classLoader, BreenoTargets.REPOSITORY)
                 ?: error("AIChatRepository.INSTANCE is null")
             val queryRecord = newInsertRecord(
                 classLoader = classLoader,
@@ -1769,9 +1712,8 @@ internal object BreenoHooks {
         label: String,
         onResult: (HistoryInsertResult) -> Unit,
     ) {
-        invokeCompatible(
+        requireNotNull(protocolTargets?.insertHistory).invoke(
             repository,
-            "r",
             roomId,
             agentName,
             record,
@@ -1851,7 +1793,7 @@ internal object BreenoHooks {
         payload: String?,
         clientResult: String?,
     ): Any {
-        val insertRecordClass = Class.forName(INSERT_RECORD_CLASS, false, classLoader)
+        val insertRecordClass = Class.forName(BreenoTargets.INSERT_RECORD, false, classLoader)
         return insertRecordClass.getDeclaredConstructor().newInstance().also { record ->
             invokeCompatible(record, "setRecordId", recordId)
             invokeCompatible(record, "setOriginRecordId", recordId)
@@ -1868,13 +1810,13 @@ internal object BreenoHooks {
     }
 
     private fun currentRoomId(classLoader: ClassLoader): String =
-        singletonInstance(classLoader, AI_CHAT_ROOM_ID_MANAGER_CLASS)
-            ?.let { manager -> invokeCompatible(manager, "x") as? String }
+        singletonInstance(classLoader, BreenoTargets.ROOM_MANAGER)
+            ?.let { manager -> protocolTargets?.currentRoomId?.invoke(manager) as? String }
             .orEmpty()
 
     private fun currentAgentName(classLoader: ClassLoader): String =
-        singletonInstance(classLoader, AI_CHAT_ROOM_ID_MANAGER_CLASS)
-            ?.let { manager -> invokeCompatible(manager, "v") as? String }
+        singletonInstance(classLoader, BreenoTargets.ROOM_MANAGER)
+            ?.let { manager -> protocolTargets?.currentAgentName?.invoke(manager) as? String }
             .orEmpty()
 
     private fun currentBreenoHistory(
@@ -1885,9 +1827,9 @@ internal object BreenoHooks {
     ): List<AgentModelClient.ConversationMessage> {
         if (roomId.isBlank()) return emptyList()
         return runCatching {
-            val dataCenter = singletonInstance(classLoader, AI_CHAT_DATA_CENTER_CLASS)
+            val dataCenter = singletonInstance(classLoader, BreenoTargets.DATA_CENTER)
                 ?: return@runCatching emptyList()
-            val beans = invokeCompatible(dataCenter, "g0", roomId, false) as? Iterable<*>
+            val beans = protocolTargets?.historyList?.invoke(dataCenter, roomId, false) as? Iterable<*>
                 ?: return@runCatching emptyList()
             BreenoConversationHistory.build(
                 entries = beans.mapNotNull { bean ->
@@ -1950,7 +1892,9 @@ internal object BreenoHooks {
 
     private fun parseHistoryInsertResult(result: Any?): HistoryInsertResult =
         runCatching {
-            val response = result?.let { invokeCompatible(it, "a") }
+            val response = result?.let {
+                uniqueBreenoInstanceMethod(it.javaClass, "java.lang.Object")?.invoke(it)
+            }
                 ?: return@runCatching HistoryInsertResult.FAILED
             val saved = invokeCompatible(response, "isSuccess") as? Boolean ?: false
             HistoryInsertResult(
@@ -1966,20 +1910,19 @@ internal object BreenoHooks {
         uniqueId: String,
     ) {
         if (uniqueId.isBlank()) return
-        val dataCenter = singletonInstance(classLoader, AI_CHAT_DATA_CENTER_CLASS) ?: return
-        val bean = invokeCompatible(dataCenter, "q0", roomId) ?: return
+        val dataCenter = singletonInstance(classLoader, BreenoTargets.DATA_CENTER) ?: return
+        val beans = protocolTargets?.historyList?.invoke(dataCenter, roomId, false) as? List<*>
+            ?: return
+        val bean = beans.lastOrNull() ?: return
         if (invokeInt(bean, "getChatType") != AI_CHAT_TYPE_ANSWER) return
         if (invokeString(bean, "getContent").orEmpty() != content) return
         invokeCompatible(bean, "setUniqueId", uniqueId)
     }
 
-    private fun serializeForBreenoHistory(classLoader: ClassLoader, value: Any?): String? {
+    private fun serializeForBreenoHistory(value: Any?): String? {
         if (value == null) return null
         return runCatching {
-            Class.forName(JSON_UTIL_CLASS, false, classLoader)
-                .getDeclaredMethod("f", Any::class.java)
-                .apply { isAccessible = true }
-                .invoke(null, value) as? String
+            requireNotNull(protocolTargets?.serializeHistory).invoke(null, value) as? String
         }.getOrNull()
     }
 

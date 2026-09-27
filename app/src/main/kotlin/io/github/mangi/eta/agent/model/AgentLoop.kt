@@ -108,7 +108,11 @@ internal class AgentLoop(
             toolCallValidator = AgentToolCallValidator(roundTools)
             publishTranscript()
             context.compact(roundTools)
-            var requestMessages = roleplayContext?.projectMessages(messages, roundTools) ?: messages
+            // 屏幕上下文只投影到 Provider 请求；无上下文时 project 原样返回入参，
+            // 因此下面的消息级估算缓存仍然命中。
+            var requestMessages = AssistantScreenContextProjection.project(
+                roleplayContext?.projectMessages(messages, roundTools) ?: messages,
+            )
             // 复用会话 budget 的消息级缓存：非角色态下 requestMessages 与 messages 同身份，直接命中，
             // 避免每轮把上百 KB 的 tool 结果重新 toString 一遍。旧实现用无缓存的静态 rawEstimate。
             var requestEstimate = context.budget.rawEstimateCached(requestMessages, roundTools)
@@ -152,7 +156,9 @@ internal class AgentLoop(
                         overflowAttempts++
                         accumulatedReasoning.setLength(reasoningLengthBeforeRound)
                         context.compact(roundTools, force = true)
-                        requestMessages = roleplayContext?.projectMessages(messages, roundTools) ?: messages
+                        requestMessages = AssistantScreenContextProjection.project(
+                            roleplayContext?.projectMessages(messages, roundTools) ?: messages,
+                        )
                         requestEstimate = context.budget.rawEstimateCached(requestMessages, roundTools)
                         roundInputTokens = null
                         round++

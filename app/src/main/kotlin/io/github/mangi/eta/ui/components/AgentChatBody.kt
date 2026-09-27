@@ -393,6 +393,7 @@ internal fun AgentConversationMessages(
     bottomInset: Dp,
     keepBottomAnchored: Boolean,
     onBottomAnchorChanged: (Boolean) -> Unit,
+    assistantOverlay: Boolean = false,
     onSuggestionClick: (String) -> Unit = {},
     onRunTraceClick: () -> Unit = {},
     onOpenBrowser: () -> Unit = {},
@@ -649,6 +650,7 @@ internal fun AgentConversationMessages(
                         val message = entry.message
                         ChatMessageItem(
                             message = message,
+                            assistantOverlay = assistantOverlay,
                             retainedStreamingState = (message as? AgentMessageUi)
                                 ?.takeIf { it.isStreaming || streamingMarkdownStates.containsKey(it.id) }
                                 ?.let { agentMessage ->
@@ -683,6 +685,7 @@ internal fun AgentConversationMessages(
                         AgentWorkProcess(
                             id = entry.key,
                             messages = entry.messages,
+                            assistantOverlay = assistantOverlay,
                             onOpenBrowser = onOpenBrowser,
                             currentBrowserMessageId = currentBrowserMessageId,
                             retainedStreamingStates = streamingMarkdownStates,

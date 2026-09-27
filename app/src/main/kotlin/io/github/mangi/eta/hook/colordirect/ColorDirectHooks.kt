@@ -1,6 +1,7 @@
 package io.github.mangi.eta.hook.colordirect
 
 import io.github.mangi.eta.core.HookSupport
+import io.github.mangi.eta.core.DexKitTargets
 import io.github.mangi.eta.core.HookInstallation
 import io.github.mangi.eta.core.HookRegistrar
 import io.github.mangi.eta.core.ModuleConfig
@@ -10,11 +11,13 @@ import io.github.mangi.eta.hook.system.CircleToSearchInvoker
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.os.Parcelable
 import android.os.SystemClock
 import io.github.mangi.eta.config.Prefs
 import io.github.libxposed.api.XposedModule
 import org.json.JSONObject
+import java.io.File
 
 internal object ColorDirectHooks {
     private const val SOURCE = "ColorDirectActivity"
@@ -28,17 +31,22 @@ internal object ColorDirectHooks {
     fun install(
         module: XposedModule,
         rootLogger: ModuleLogger,
-        classLoader: ClassLoader
+        classLoader: ClassLoader,
+        applicationInfo: ApplicationInfo,
     ): HookInstallation {
         val hooks = HookRegistrar(module, rootLogger, "ColorDirect")
         return hooks.install {
-            hookCollectInfoActivity(hooks, classLoader)
+            hookCollectInfoActivity(
+                hooks, classLoader, applicationInfo, module.moduleApplicationInfo,
+            )
         }
     }
 
     private fun hookCollectInfoActivity(
         hooks: HookRegistrar,
-        classLoader: ClassLoader
+        classLoader: ClassLoader,
+        applicationInfo: ApplicationInfo,
+        moduleApplicationInfo: ApplicationInfo,
     ) {
         val logger = hooks.logger
         val activityClass = HookSupport.findClassOrNull(
@@ -48,7 +56,7 @@ internal object ColorDirectHooks {
         if (activityClass == null) {
             hooks.missing(
                 id = "colordirect.collect-info",
-                description = "CollectInfoActivity.M(Intent)",
+                description = "CollectInfoActivity Intent 处理入口",
                 detail = "未找到 CollectInfoActivity，无法接管双指识屏 Activity 入口"
             )
             return
@@ -58,12 +66,21 @@ internal object ColorDirectHooks {
             ModuleConfig.COLOR_DIRECT_START_INFO_CLASS
         )
 
-        val method = HookSupport.findMethod(activityClass, "M", Intent::class.java)
+        val method = DexKitTargets(
+            apkPath = applicationInfo.sourceDir,
+            classLoader = classLoader,
+            logger = logger,
+            cacheDirectory = applicationInfo.dataDir?.let { File(it, "cache/eta-dexkit") },
+            moduleNativeLibraryDirectory = moduleApplicationInfo.nativeLibraryDir,
+            moduleApkPath = moduleApplicationInfo.sourceDir,
+        ).use { targets ->
+            ColorDirectTargets.findCollectIntent(targets, activityClass)
+        }
         if (method == null) {
             hooks.missing(
                 id = "colordirect.collect-info",
-                description = "CollectInfoActivity.M(Intent)",
-                detail = "未找到 CollectInfoActivity.M(Intent)"
+                description = "CollectInfoActivity Intent 处理入口",
+                detail = "未唯一定位 CollectInfoActivity Intent 处理方法，保留系统双指识屏"
             )
             return
         }
@@ -71,7 +88,7 @@ internal object ColorDirectHooks {
         hooks.intercept(
             id = "colordirect.collect-info",
             executable = method,
-            description = "CollectInfoActivity.M(Intent)"
+            description = "CollectInfoActivity Intent 处理入口"
         ) { chain ->
             // 开关关闭则走原双指识屏逻辑。
             if (!Prefs.isEnabled(Prefs.Keys.DOUBLE_FINGER_CIRCLE_TO_SEARCH)) {

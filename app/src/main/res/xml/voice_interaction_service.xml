@@ -4,5 +4,8 @@
     android:sessionService="io.github.mangi.eta.agent.voice.EtaVoiceInteractionSessionService"
     android:settingsActivity="io.github.mangi.eta.ui.MainActivity"
     android:supportsAssist="true"
+    android:usesAssistData="true"
+    android:usesAssistScreenshots="true"
+    android:usesAssistStructureScreenContent="true"
     android:supportsLaunchVoiceAssistFromKeyguard="true"
     android:supportsLocalInteraction="false" />

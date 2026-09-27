@@ -5,7 +5,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.service.voice.VoiceInteractionService
-import android.service.voice.VoiceInteractionSession
+import io.github.mangi.eta.core.AssistantContextFlags
 
 class EtaVoiceInteractionService : VoiceInteractionService() {
     override fun onReady() {
@@ -29,7 +29,7 @@ class EtaVoiceInteractionService : VoiceInteractionService() {
     }
 
     private fun showEtaSession() {
-        showSession(Bundle(), VoiceInteractionSession.SHOW_WITH_ASSIST)
+        showSession(Bundle(), AssistantContextFlags.forSdk(Build.VERSION.SDK_INT))
     }
 
     companion object {

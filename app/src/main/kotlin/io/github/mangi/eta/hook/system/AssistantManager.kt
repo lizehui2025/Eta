@@ -1,6 +1,7 @@
 package io.github.mangi.eta.hook.system
 
 import io.github.mangi.eta.core.HookSupport
+import io.github.mangi.eta.core.AssistantContextFlags
 import io.github.mangi.eta.core.HookInstallation
 import io.github.mangi.eta.core.HookRegistrar
 import io.github.mangi.eta.core.ModuleConfig
@@ -14,6 +15,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -233,7 +235,9 @@ internal object AssistantManager {
             showSessionMethod.invoke(
                 service,
                 Bundle(),
-                DEFAULT_SHOW_FLAGS,
+                DEFAULT_SHOW_FLAGS or if (binding.target == PowerAssistantTarget.ETA) {
+                    AssistantContextFlags.forSdk(Build.VERSION.SDK_INT)
+                } else 0,
                 null,
                 null,
                 null
