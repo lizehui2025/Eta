@@ -43,7 +43,7 @@ class AgentModelClientLoopTest {
             provider = provider,
             capabilitiesProvider = {
                 captures++
-                AgentToolCapabilities(rootAvailable = root)
+                AgentToolCapabilities.full(rootAvailable = root)
             },
             toolExecutor = AgentModelClient.ToolExecutor {
                 executed += it.id
@@ -341,6 +341,7 @@ class AgentModelClientLoopTest {
         val result = AgentModelClient.complete(
             config = modelConfig(),
             prompt = "观察",
+            capabilitiesProvider = { AgentToolCapabilities.full(rootAvailable = false) },
             toolExecutor = AgentModelClient.ToolExecutor { call ->
                 AgentModelClient.ToolResult(
                     content = JSONObject().put("ok", true).toString(),
@@ -386,6 +387,7 @@ class AgentModelClientLoopTest {
         val result = AgentModelClient.complete(
             config = modelConfig(),
             prompt = "观察后点击",
+            capabilitiesProvider = { AgentToolCapabilities.full(rootAvailable = false) },
             toolExecutor = AgentModelClient.ToolExecutor { call ->
                 AgentModelClient.ToolResult(
                     content = JSONObject().put("ok", true).toString(),
@@ -432,6 +434,7 @@ class AgentModelClientLoopTest {
         AgentModelClient.complete(
             config = modelConfig(),
             prompt = "连续观察",
+            capabilitiesProvider = { AgentToolCapabilities.full(rootAvailable = false) },
             toolExecutor = AgentModelClient.ToolExecutor {
                 val reference = if (observationIndex++ == 0) firstImage else secondImage
                 AgentModelClient.ToolResult(

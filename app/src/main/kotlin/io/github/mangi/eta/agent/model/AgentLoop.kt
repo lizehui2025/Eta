@@ -128,7 +128,9 @@ internal class AgentLoop(
                             onProviderEvent = { attemptRound, providerEvent ->
                                 if (!purpose.allowsTools && (providerEvent is ProviderEvent.HostedToolStarted ||
                                         providerEvent is ProviderEvent.BlockStart && providerEvent.kind == AssistantBlockKind.TOOL_CALL)) {
-                                    throw AgentModelFailure("REPLY_REWRITE_TOOL_CALL", false, "改写回复时模型请求了工具，已停止；原回复未改变。")
+                                    throw AgentModelFailure(
+                                        "REPLY_REWRITE_TOOL_CALL", false, purpose.noToolsFailureMessage,
+                                    )
                                 }
                                 if (providerEvent is ProviderEvent.Usage) {
                                 roundInputTokens = providerEvent.contextInputTokens ?: roundInputTokens
@@ -172,7 +174,7 @@ internal class AgentLoop(
             val assistantMessage = providerResponse.assistantMessage
             val toolCalls = AgentConversationCodec.parseToolCalls(assistantMessage)
             if (!purpose.allowsTools && toolCalls.isNotEmpty()) {
-                throw AgentModelFailure("REPLY_REWRITE_TOOL_CALL", false, "改写回复时模型请求了工具，已停止；原回复未改变。")
+                throw AgentModelFailure("REPLY_REWRITE_TOOL_CALL", false, purpose.noToolsFailureMessage)
             }
             if (purpose == ProviderRequestPurpose.REPLY_REWRITE && providerResponse.stopReason != AssistantStopReason.END_TURN) {
                 throw AgentModelFailure("REPLY_REWRITE_INCOMPLETE", false, "模型未返回完整的改写回复；原回复未改变。")
@@ -216,8 +218,10 @@ internal class AgentLoop(
                     appendMessage(AgentConversationCodec.toolResultMessage(outcome.call, outcome.result))
                     outcome
                 }
-                // 同批工具结果一次发布：transcript() 每次全量转换，随轮数增长；
-                // 逐工具发布会把 N 次全量转换放大为 O(N^2)，UI 按批次刷新即可。
+                // Publish the batch's tool results once: publishing per tool would refresh the UI
+                // once per tool, and the intermediate state (only some tool results written)
+                // disagrees with the calls already declared in the assistant message. Publishing
+                // itself is incremental (see transcriptPublisher); this only fixes the batch boundary.
                 publishTranscript()
                 appendToolImages(round, outcomes)
                 publishTranscript()
@@ -276,6 +280,19 @@ internal class AgentLoop(
         toolCall: AgentModelClient.ToolCall,
     ): ToolOutcome {
         runController.throwIfCancelled()
+        // Unified schema validation must precede every execution dispatch. spawn_agents and
+        // todo_write have their own business checks (write-range conflicts, list entry validity,
+        // ...), but the JSON Schema actually sent this round is the single source of truth for the
+        // model's call contract; validating after the dedicated handlers lets those two bypass it and
+        // grow a second contract.
+        toolCallValidator.validate(toolCall)?.let { validationError ->
+            return rejectedToolOutcome(
+                round = round,
+                toolCall = toolCall,
+                code = "INVALID_TOOL_ARGUMENTS",
+                message = validationError,
+            )
+        }
         if (toolCall.name == AgentSubagentPolicy.TOOL_NAME && subagentHandler != null) {
             onEvent(
                 AgentEvent.ToolStarted(
@@ -325,14 +342,6 @@ internal class AgentLoop(
                 emitToolFinished(round, toolCall, todoResult)
                 return ToolOutcome(toolCall, todoResult)
             }
-        }
-        toolCallValidator.validate(toolCall)?.let { validationError ->
-            return rejectedToolOutcome(
-                round = round,
-                toolCall = toolCall,
-                code = "INVALID_TOOL_ARGUMENTS",
-                message = validationError,
-            )
         }
         onEvent(
             AgentEvent.ToolStarted(

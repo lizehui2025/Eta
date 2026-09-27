@@ -53,7 +53,6 @@ import io.github.mangi.eta.ui.components.EtaPreference
 import io.github.mangi.eta.ui.components.EtaPreferenceDivider
 import io.github.mangi.eta.ui.components.EtaSwitchPreference
 import io.github.mangi.eta.ui.components.EtaTextButton
-import io.github.mangi.eta.ui.components.EtaWindowSpinnerPreference
 import io.github.mangi.eta.ui.components.MiuixDialogActions
 import io.github.mangi.eta.ui.components.MiuixPageBottomSpacer
 import io.github.mangi.eta.ui.components.MiuixScaffold
@@ -66,7 +65,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
-import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.ScrollBehavior
@@ -272,41 +270,18 @@ private fun ProviderConfigTab(
                 }
                 if (provider !is AnthropicProviderSetting) {
                     EtaPreferenceDivider(hasLeading = false)
-                    EtaWindowSpinnerPreference(
-                        items = listOf(
-                            DropdownItem(text = "Chat Completions API"),
-                            DropdownItem(text = "Responses API"),
-                        ),
-                        selectedIndex = if (draft.endpointMode == OpenAiEndpointMode.RESPONSES) 1 else 0,
-                        title = stringResource(R.string.ui_endpoint_mode_3c8546),
-                        summary = if (draft.endpointMode == OpenAiEndpointMode.RESPONSES) {
-                            context.getString(R.string.page_using_typed_items_with_semantic_streaming_events_f9c906)
-                        } else {
-                            context.getString(R.string.page_use_standard_chat_completions_ee4b1a)
-                        },
-                        onSelectedIndexChange = { selectedIndex ->
-                            onDraftChange(
-                                draft.copy(
-                                    endpointMode = if (selectedIndex == 1) {
-                                        OpenAiEndpointMode.RESPONSES
-                                    } else {
-                                        OpenAiEndpointMode.CHAT_COMPLETIONS
-                                    },
-                                ),
-                            )
+                    // Protocol is no longer user-selectable: OpenAiMixedEndpointProvider switches
+                    // between Chat Completions and Responses based on what the endpoint actually
+                    // serves. What remains here is user intent — provider-hosted web search is only
+                    // available over Responses, so enabling it makes requests prefer Responses.
+                    EtaSwitchPreference(
+                        title = stringResource(R.string.ui_server_side_web_search_ddb8e0),
+                        summary = stringResource(R.string.ui_allows_the_model_to_call_web_searches_provided_by_th_2f752f),
+                        checked = draft.hostedWebSearchEnabled,
+                        onCheckedChange = {
+                            onDraftChange(draft.copy(hostedWebSearchEnabled = it))
                         },
                     )
-                    if (draft.endpointMode == OpenAiEndpointMode.RESPONSES) {
-                        EtaPreferenceDivider(hasLeading = false)
-                        EtaSwitchPreference(
-                            title = stringResource(R.string.ui_server_side_web_search_ddb8e0),
-                            summary = stringResource(R.string.ui_allows_the_model_to_call_web_searches_provided_by_th_2f752f),
-                            checked = draft.hostedWebSearchEnabled,
-                            onCheckedChange = {
-                                onDraftChange(draft.copy(hostedWebSearchEnabled = it))
-                            },
-                        )
-                    }
                 }
                 EtaPreferenceDivider(hasLeading = false)
                 EtaPreference(

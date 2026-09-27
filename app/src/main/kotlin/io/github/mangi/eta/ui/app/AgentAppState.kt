@@ -207,6 +207,13 @@ internal class AgentAppState(
     /** 等待初始会话加载（或失败降级）完成；供测试与外部流程使用。 */
     internal suspend fun awaitInitialLoad() = loadCompletion.await()
 
+    /**
+     * 是否还有排队中的落盘任务。落盘是 fire-and-forget 的，测试结束时若仍有在途写入，
+     * 它会落到下一个用例新建的库上（既有用例靠 deleteDatabase 隔离，挡不住晚到的写）。
+     */
+    internal fun hasPendingPersistence(): Boolean =
+        (synchronized(persistenceLock) { persistenceJob })?.isActive == true
+
     private fun observeRuntimeSelection() {
         scope.launch(Dispatchers.IO) {
             combine(
@@ -593,7 +600,7 @@ internal class AgentAppState(
 
         if (changed) {
             val saved = withContext(Dispatchers.Main) { persistConversations() }.await()
-            if (saved) {
+            if (saved == null) {
                 acknowledgeAfterSave.forEach(client::ackResult)
                 removeAfterSave.forEach { runId ->
                     AgentRunCheckpointStore.remove(appContext, runId)
@@ -1303,7 +1310,8 @@ internal class AgentAppState(
 
         val preparationJob = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             // write-ahead：用户消息未提交前不把可能产生副作用的 run 交给 Runtime。
-            if (!initialPersistence.await()) {
+            val persistenceFailure = initialPersistence.await()
+            if (persistenceFailure != null) {
                 withContext(Dispatchers.Main) {
                     applyRunResult(
                         runId,
@@ -1311,7 +1319,10 @@ internal class AgentAppState(
                             runId = runId,
                             ok = false,
                             content = "",
-                            error = appContext.getString(R.string.conversation_persistence_failed),
+                            // 诊断后缀：写盘失败一直无法复现，而日志只落到 logcat（release 还剥掉 debug），
+                            // 把原因直接写在用户能看到的那条提示里，才能拿到异常类名/错误码。
+                            error = appContext.getString(R.string.conversation_persistence_failed) +
+                                "（$persistenceFailure）",
                         )
                     )
                 }
@@ -1331,7 +1342,7 @@ internal class AgentAppState(
                             }
                             persistConversations()
                         }.await()
-                        check(saved) { "无法保存角色会话设定" }
+                        check(saved == null) { "无法保存角色会话设定：$saved" }
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -2616,39 +2627,56 @@ internal class AgentAppState(
         return matches
     }
 
-    private fun persistConversations(onSaved: (() -> Unit)? = null): Deferred<Boolean> {
+    private fun persistConversations(onSaved: (() -> Unit)? = null): Deferred<String?> {
         return synchronized(persistenceLock) {
             val previous = persistenceJob
             scope.async(Dispatchers.IO) {
-                try {
-                    // 初始快照应用前禁止捕获状态：空快照会把磁盘上的全部会话删除。
-                    loadCompletion.await()
-                    previous?.join()
-                    val captured = withContext(Dispatchers.Main) {
-                        AgentConversationStore.Snapshot(
-                            selectedConversationId = selectedConversationId,
-                            conversationsById = conversationsById,
-                            titles = conversationTitles,
-                            updatedAt = conversationUpdatedAt,
+                var attempt = 0
+                while (true) {
+                    try {
+                        // 初始快照应用前禁止捕获状态：空快照会把磁盘上的全部会话删除。
+                        loadCompletion.await()
+                        previous?.join()
+                        val captured = withContext(Dispatchers.Main) {
+                            AgentConversationStore.Snapshot(
+                                selectedConversationId = selectedConversationId,
+                                conversationsById = conversationsById,
+                                titles = conversationTitles,
+                                updatedAt = conversationUpdatedAt,
+                            )
+                        }
+                        AgentConversationStore.save(
+                            context = appContext,
+                            selectedConversationId = captured.selectedConversationId,
+                            conversationsById = captured.conversationsById,
+                            titles = captured.titles,
+                            updatedAt = captured.updatedAt,
                         )
+                        onSaved?.invoke()
+                        return@async null
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (throwable: Throwable) {
+                        // 多进程共享同一库时的瞬时写锁（busy/locked）退避重试，
+                        // 不把一次锁竞争报成"无法保存对话"；其余异常照旧直接报失败。
+                        if (attempt >= MAX_TRANSIENT_PERSISTENCE_RETRIES ||
+                            !throwable.isTransientDatabaseContention()
+                        ) {
+                            val reason = throwable.persistenceFailureReason()
+                            AndroidAgentLogger.error(
+                                "Agent conversation persistence failed: reason=$reason"
+                            )
+                            return@async reason
+                        }
+                        attempt += 1
+                        AndroidAgentLogger.warnThrottled("agent_conversation_persistence_retry") {
+                            "Agent conversation persistence retrying after transient contention: " +
+                                "attempt=$attempt, type=${throwable.safeLogType()}"
+                        }
+                        delay(TRANSIENT_PERSISTENCE_RETRY_DELAY_MS * attempt)
                     }
-                    AgentConversationStore.save(
-                        context = appContext,
-                        selectedConversationId = captured.selectedConversationId,
-                        conversationsById = captured.conversationsById,
-                        titles = captured.titles,
-                        updatedAt = captured.updatedAt,
-                    )
-                    onSaved?.invoke()
-                    true
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (throwable: Throwable) {
-                    AndroidAgentLogger.error(
-                        "Agent conversation persistence failed: type=${throwable.safeLogType()}"
-                    )
-                    false
                 }
+                @Suppress("UNREACHABLE_CODE") null
             }.also { persistenceJob = it }
         }
     }
@@ -2658,6 +2686,9 @@ internal class AgentAppState(
         const val MAX_PREVIEW_CHARS = 48
         const val LEGACY_STOPPED_ERROR = "已停止"
         const val SYNTHETIC_STATUS_STOPPED = "eta_status:stopped"
+        // 写锁竞争在几十到几百毫秒内自行消解；重试两次仍失败才真的报错退出。
+        const val MAX_TRANSIENT_PERSISTENCE_RETRIES = 2
+        const val TRANSIENT_PERSISTENCE_RETRY_DELAY_MS = 150L
         // 数据状态以较粗粒度发布，文字显现由独立的帧时钟连续推进。
         // 这与 Kimi 将流式数据和视觉动画分层的做法一致。
         const val STREAM_UI_UPDATE_INTERVAL_MS = 40L

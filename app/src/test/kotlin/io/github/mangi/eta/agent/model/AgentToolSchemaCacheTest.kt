@@ -10,7 +10,7 @@ import org.junit.Test
 
 /** 工具 schema 缓存：能力不变必须复用同一实例，否则窗口预算的工具表估算缓存永远命不中。 */
 class AgentToolSchemaCacheTest {
-    private val base = AgentToolCapabilities(rootAvailable = true)
+    private val base = AgentToolCapabilities.full()
 
     @Test
     fun identicalCapabilitiesReuseTheSameInstance() {
@@ -25,9 +25,9 @@ class AgentToolSchemaCacheTest {
     @Test
     fun equalButDistinctCapabilitiesStillHit() {
         val cache = AgentToolSchemaCache { _ -> JSONArray().put("schema") }
-        val first = cache.tools(AgentToolCapabilities(rootAvailable = true))
+        val first = cache.tools(AgentToolCapabilities.full())
         // 每轮都从采集点拿到新实例，但内容相同：必须命中。
-        val second = cache.tools(AgentToolCapabilities(rootAvailable = true, colorOs = true))
+        val second = cache.tools(AgentToolCapabilities.full(colorOs = true))
         assertSame(first, second)
         assertEquals(1, cache.builds)
     }

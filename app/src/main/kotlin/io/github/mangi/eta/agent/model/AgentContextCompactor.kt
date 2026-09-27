@@ -10,7 +10,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** 只在完整工具交换之间生成候选摘要；全部验证通过后由会话一次性提交。
- * 不设时间/次数预算（用户可随时取消，取消即停并保留原始上下文）；
+ * Bounded as a whole by [budget]: exceeding either the call count or the wall clock fails and keeps
+ * the original context instead of leaving the UI on a long wait; user cancellation still takes
+ * effect immediately and keeps the original context.
  * 摘要输入按条截断超长正文，单组超预算时再整体截断并按消息二分，不因单组过大让整次压缩失败。
  * 分片彼此独立、并行摘要（上限见 [MAX_PARALLEL_SUMMARIES]），最后合并为一份摘要。 */
 internal class AgentContextCompactor(
@@ -22,6 +24,12 @@ internal class AgentContextCompactor(
     private val roleplay: Boolean = false,
     /** 压缩/合并请求携带会话路由键：与主对话共享服务端缓存路由。 */
     private val sessionId: String = java.util.UUID.randomUUID().toString(),
+    /**
+     * Whole-operation budget: created by the session and shared across the outer retry loop and all
+     * chunks, so the limits bound the *compaction* rather than granting each chunk its own quota.
+     * The default exists only for tests that construct the compactor directly.
+     */
+    private val budget: AgentCompactionBudget = AgentCompactionBudget(),
 ) {
     private val summaryLineTokenCache = java.util.IdentityHashMap<AgentModelClient.ConversationMessage, Int>()
     /**
@@ -31,8 +39,7 @@ internal class AgentContextCompactor(
      */
     private val summaryJsonCache = java.util.IdentityHashMap<AgentModelClient.ConversationMessage, String>()
 
-    /** 本轮压缩实际发出的摘要/合并模型调用数（并行分片共享，线程安全）。 */
-    private val summaryCalls = java.util.concurrent.atomic.AtomicInteger(0)
+    /** Summary and merge calls actually issued are counted by [budget]; see AgentCompactionBudget. */
 
     /** 摘要输入的固定框架（system 提示 + “待整理的历史：”壳）token 数，整轮只算一次。 */
     private val summaryBaseTokens: Int by lazy {
@@ -193,7 +200,7 @@ internal class AgentContextCompactor(
             val total = System.currentTimeMillis() - startAll
             AndroidAgentLogger.info(
                 "Agent context 压缩准备完成：消息=${historySize}条/压缩=${sourceSize}条/" +
-                    "分组=${groupCount}个/分片=${chunkCount}个/摘要调用=${summaryCalls.get()}次/" +
+                    "分组=${groupCount}个/分片=${chunkCount}个/摘要调用=${budget.callsUsed}次/" +
                     "切分=${tSplit - startAll}ms/转写=${tTranscript - tSplit}ms/" +
                     "分组=${tGroups - tTranscript}ms/计划=${tPlan - tGroups}ms/" +
                     "并行摘要=${waveMs}ms/合并=${mergeMs}ms/总量=${total}ms",
@@ -208,7 +215,7 @@ internal class AgentContextCompactor(
                     AndroidAgentLogger.info(
                         "Agent context 压缩准备失败：code=$code, 消息=${historySize}条/" +
                             "压缩=${sourceSize}条/分组=${groupCount}个/分片=${chunkCount}个/" +
-                            "摘要调用=${summaryCalls.get()}次/" +
+                            "摘要调用=${budget.callsUsed}次/" +
                             "总量=${System.currentTimeMillis() - startAll}ms",
                     )
                 }
@@ -224,7 +231,9 @@ internal class AgentContextCompactor(
         truncatedOnce: Boolean = false,
     ): String {
         controller.throwIfCancelled()
-        summaryCalls.incrementAndGet()
+        // Budget check happens before the request is sent: exceeding it fails immediately and keeps
+        // the original context instead of leaving the user on an unresponsive wait.
+        budget.acquireOrThrow()
         val messages = summaryInput(summaryUserBody(previous, chunk), maxChars)
         // 压缩是用户等待中的额外模型调用，失败重试按 2/4/8s 退避只会让"等第一步"更久：压缩只重试一次。
         val retry = AgentModelRetry(maxRetries = COMPACTION_MAX_RETRIES)
@@ -386,7 +395,9 @@ internal class AgentContextCompactor(
     /** 一次摘要/合并模型调用（压缩只重试一次）：校验摘要有效性并截断到上限。 */
     private fun runSummaryCall(userBody: String, maxChars: Int): String {
         val messages = summaryInput(userBody, maxChars)
-        summaryCalls.incrementAndGet()
+        // Shares the same whole-operation budget as summarize: merge calls count too, so a large
+        // chunk count cannot slip past the limit through merging.
+        budget.acquireOrThrow()
         val retry = AgentModelRetry(maxRetries = COMPACTION_MAX_RETRIES)
         val response = retry.complete(
             initialRound = 0,

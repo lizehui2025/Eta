@@ -1,11 +1,14 @@
 package io.github.mangi.eta.ui.app
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabaseLockedException
+import android.database.sqlite.SQLiteException
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
-import io.github.mangi.eta.data.db.ConversationContextCheckpointEntity
+import io.github.mangi.eta.core.safeLogType
+import io.github.mangi.eta.data.db.ConversationDao
 import io.github.mangi.eta.data.db.ConversationEntity
 import io.github.mangi.eta.data.db.ConversationMetadata
 import io.github.mangi.eta.data.db.ConversationMessageEntity
@@ -84,14 +87,19 @@ internal object AgentConversationStore {
                 // 只构造并写入内容确实变化的会话；未变化的会话连检查点编码都不做。
                 val conversations = mutableListOf<ConversationEntity>()
                 val messagesByConversation = mutableMapOf<String, List<ConversationMessageEntity>>()
-                val contextCheckpoints = mutableListOf<ConversationContextCheckpointEntity>()
+                val streamedCheckpoints = mutableMapOf<String, ConversationDao.StreamedCheckpoint>()
                 val planned = mutableMapOf<String, AgentConversationPersistence.Saved>()
                 val previousSaved = savedConversations
                 sorted.forEach { (id, state) ->
                     val title = titles[id].orEmpty()
                     val previous = previousSaved[id]
                     val existing = existingRows[id]
-                    val createdAt = AgentConversationPersistence.createdAt(existing?.createdAt, previous, now)
+                    val createdAt = AgentConversationPersistence.createdAt(
+                        existing = existing?.createdAt,
+                        previous = previous,
+                        reported = updatedAt[id],
+                        now = now,
+                    )
                     val conversationUpdatedAt =
                         AgentConversationPersistence.updatedAt(updatedAt[id], previous, now)
                     val appliedRuntimeRunIdsJson = json.encodeToString(state.appliedRuntimeRunIds)
@@ -107,11 +115,13 @@ internal object AgentConversationStore {
                         roleplayJson = roleplayJson,
                         revisionsJson = revisionsJson,
                     )
+                    val contentSignature = AgentConversationPersistence.contentSignature(state)
                     planned[id] = AgentConversationPersistence.Saved(
                         fingerprint = fingerprint,
                         createdAt = createdAt,
                         updatedAt = conversationUpdatedAt,
                         storedUpdatedAt = conversationUpdatedAt,
+                        contentSignature = contentSignature,
                     )
                     if (!AgentConversationPersistence.shouldWrite(
                             fingerprint = fingerprint,
@@ -132,18 +142,28 @@ internal object AgentConversationStore {
                         createdAt = createdAt,
                         updatedAt = conversationUpdatedAt,
                     )
+                    // 消息与检查点要先把整份正文序列化成一个大字符串再分块（长会话下是单次几十 MB 的堆分配）。
+                    // 手动压缩、切换会话这类保存只推进了时间戳，正文一字未动，跳过即可让库里已有的分块原样保留。
+                    if (!AgentConversationPersistence.shouldWriteContent(
+                            contentSignature = contentSignature,
+                            previous = previous,
+                            storedUpdatedAt = existing?.updatedAt,
+                        )
+                    ) {
+                        return@forEach
+                    }
                     messagesByConversation[id] = state.messages
                         .mapIndexedNotNull { index, message -> message.toEntityOrNull(id, index) }
-                    contextCheckpoints += ConversationContextCheckpointEntity(
-                        conversationId = id,
-                        historyJson = AgentConversationCodec.encodeConversationCheckpoint(state.history),
-                        journalJson = AgentConversationCodec.encodeTranscriptForStorage(state.journal.ifEmpty { state.history }),
+                    // 检查点正文逐条产出分片直接写块：不先拼出整份 JSON，长会话下这一项就是几十 MB 的堆分配。
+                    streamedCheckpoints[id] = ConversationDao.StreamedCheckpoint(
+                        history = AgentConversationCodec.transcriptPieces(state.history),
+                        journal = AgentConversationCodec.transcriptPieces(state.journal.ifEmpty { state.history }),
                     )
                 }
                 dao.saveIncremental(
                     conversations = conversations,
                     messagesByConversation = messagesByConversation,
-                    contextCheckpoints = contextCheckpoints,
+                    streamedCheckpoints = streamedCheckpoints,
                     removedConversationIds = removedConversationIds,
                     state = selected?.let { ConversationStateEntity(selectedConversationId = it) },
                 )
@@ -454,3 +474,50 @@ internal object AgentConversationStore {
     private const val MESSAGE_LOAD_PAGE_SIZE = 128
     private const val LEGACY_UNNAMED_TITLE = "新对话"
 }
+
+/**
+ * 多个进程共享同一个 SQLite 库时，写方会瞬时拿到 busy/locked（例如另一个进程正持写锁）。
+ * 这类失败重试即可，不代表数据有问题；损坏、磁盘满、约束冲突等一律不算。
+ *
+ * Android 没有公开 SQLite 的 result code，只能按异常类型与消息判定，因此只认最明确的形态：
+ * [SQLiteDatabaseLockedException]，以及消息里带 locked/busy 的 [SQLiteException]。
+ */
+internal fun Throwable.isTransientDatabaseContention(): Boolean {
+    var current: Throwable? = this
+    var depth = 0
+    while (current != null && depth < MAX_DATABASE_CONTENTION_CAUSE_DEPTH) {
+        val throwable = current
+        if (throwable is SQLiteDatabaseLockedException) return true
+        if (throwable is SQLiteException) {
+            val message = throwable.message.orEmpty()
+            if (message.contains("locked", ignoreCase = true) ||
+                message.contains("busy", ignoreCase = true)
+            ) {
+                return true
+            }
+        }
+        val cause = throwable.cause
+        current = if (cause === throwable) null else cause
+        depth += 1
+    }
+    return false
+}
+
+private const val MAX_DATABASE_CONTENTION_CAUSE_DEPTH = 4
+
+/**
+ * 落盘失败的诊断文本：总是给出异常类名。
+ *
+ * SQLite 异常的 message 只包含表名与错误码（如 `FOREIGN KEY constraint failed (code 787 ...)`），
+ * 不含用户正文，因此一并给出；其它异常（反序列化等）的消息可能夹带会话内容，
+ * 一律只保留类名，禁止外带。
+ *
+ * 这段文本会随失败提示一起展现给用户，用于定位无法复现的写盘失败。
+ */
+internal fun Throwable.persistenceFailureReason(): String {
+    val type = safeLogType()
+    val detail = (this as? SQLiteException)?.message?.takeIf { it.isNotBlank() } ?: return type
+    return "$type: ${detail.take(MAX_PERSISTENCE_FAILURE_CHARS)}"
+}
+
+private const val MAX_PERSISTENCE_FAILURE_CHARS = 120

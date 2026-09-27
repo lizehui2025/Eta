@@ -82,14 +82,32 @@ internal class AgentContextBudget(private val window: Int?) {
      * 这里按消息对象身份缓存，并用内容签名兜底：对象被就地改写（追加标记、替换正文）时自动失效。
      */
     fun rawEstimateCached(messages: JSONArray, tools: JSONArray = JSONArray()): Int {
-        if (messageTokenCache.size > CACHE_LIMIT) messageTokenCache.clear()
-        if (toolSchemaTokenCache.size > CACHE_LIMIT) toolSchemaTokenCache.clear()
+        evictOverflow(messageTokenCache)
+        evictOverflow(toolSchemaTokenCache)
         var tokens = cachedToolSchemaTokens(tools) + 16
         for (index in 0 until messages.length()) {
             val message = messages.optJSONObject(index) ?: continue
             tokens += cachedMessageTokens(message)
         }
         return tokens
+    }
+
+    /**
+     * Evicts part of the cache instead of clearing it outright.
+     *
+     * Clearing everything makes the round that overflows miss on every entry: long sessions then
+     * show a periodic "fill -> clear -> recompute" spike, and what gets recomputed is precisely the
+     * expensive large tool results. Evicting down to a 3/4 watermark keeps almost every live entry
+     * while capacity stays bounded (it cannot exceed CACHE_LIMIT past the next round).
+     */
+    private fun <K, V> evictOverflow(cache: java.util.IdentityHashMap<K, V>) {
+        if (cache.size <= CACHE_LIMIT) return
+        val target = CACHE_LIMIT * 3 / 4
+        val entries = cache.keys.iterator()
+        while (cache.size > target && entries.hasNext()) {
+            entries.next()
+            entries.remove()
+        }
     }
 
     private fun cachedToolSchemaTokens(tools: JSONArray): Int {
@@ -164,7 +182,7 @@ internal class AgentContextBudget(private val window: Int?) {
          * 取常见 100k 档，主窗口容量仍由服务商真实 input 锚点 + 压缩统一裁决。
          */
         const val FALLBACK_WINDOW_TOKENS = 100_000
-        /** 消息级估算缓存的规模上限，超过即整体丢弃，避免长会话把对象图钉在内存里。 */
+        /** Per-message estimate cache cap; overflow evicts part of it, so long sessions cannot pin the object graph. */
         const val CACHE_LIMIT = 4096
 
         /** 空工具表 token 常量：避免压缩摘要路径每轮 `textTokens("[]")` 的重复计算与 miss 计数。 */

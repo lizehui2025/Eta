@@ -219,9 +219,12 @@ internal class AgentSubagentExecutor(
                     )
                 }
             }
-            // 整体超时默认即生效：到点取消未完成任务，走下方超时收敛路径。
-            // 不设整体超时：invokeAll 会一直等到所有任务自然结束。子代理只由父取消终止，
-            // 此时各子控制器被 cancel，阻塞中的模型请求与工具调用会随之中断。
+            // No overall timeout: invokeAll waits until every task ends naturally and excess tasks
+            // queue in the fixed pool. Subagents are terminated only by the parent run's
+            // cancellation — each sub-controller is cancelled, which interrupts blocked model
+            // requests and tool calls, and the code below converges through isCancelled. The timed
+            // invokeAll overload is deliberately avoided: it cancels unfinished tasks, turning them
+            // into partial results of unknown state that may already have written files.
             val futures = pool.invokeAll(callables)
             val results = JSONArray()
             var okCount = 0

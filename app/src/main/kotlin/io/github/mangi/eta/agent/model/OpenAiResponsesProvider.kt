@@ -140,6 +140,11 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         var terminal: JSONObject? = null
         var terminalType: String? = null
         var sawEvent = false
+        // Whether a Responses shaped event was ever seen (type starting with response., or an
+        // event: line naming one). Tracked separately from sawEvent: data with no response.* event
+        // at all means the peer speaks another protocol rather than the stream being cut short —
+        // both used to collapse into "missing terminal event", leaving no way to tell them apart.
+        var sawResponseEvent = false
 
         fun finishContentBlock(
             block: StreamingContentBlock,
@@ -242,7 +247,9 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             sawEvent = true
             val event = JSONObject(payload)
             throwEventError(event)
-            when (val type = event.optString("type").ifBlank { eventName }) {
+            val type = event.optString("type").ifBlank { eventName }
+            if (type.startsWith("response.")) sawResponseEvent = true
+            when (type) {
                 "response.output_text.delta" -> {
                     val delta = event.optString("delta")
                     if (delta.isNotEmpty()) {
@@ -383,6 +390,13 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         }
 
         if (!sawEvent) throw AgentModelFailure.incompleteStream("模型接口未返回 SSE data chunk")
+        // Data arrived but not a single response.* event: a protocol shape mismatch, not truncation.
+        // Retrying the same endpoint would fail identically, so it throws a non-retryable dedicated
+        // code that lets the endpoint adaptation layer retry the other protocol once.
+        if (!sawResponseEvent) throw AgentModelFailure.endpointProtocolMismatch(
+            "模型接口返回了 SSE 数据，但没有一条是 Responses 事件（缺少 response.* 类型）：" +
+                "该地址很可能使用 Chat Completions API。",
+        )
         val finalResponse = terminal ?: throw AgentModelFailure.incompleteStream("模型接口 Responses SSE 流缺少合法终止事件")
         if (terminalType == "response.failed") throwResponseFailure(finalResponse)
 

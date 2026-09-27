@@ -52,7 +52,14 @@ internal object AgentRuntimeConnection {
     private val idleUnbind = Runnable { unbindIfIdle() }
 
     private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName, service: IBinder) {
+        // 这四个都是平台回调：SDK 是无标注的 Java 签名，name 与 service 都允许为 null。
+        // 声明成非空会让 Kotlin 的隐式空检查把"框架传 null"升级成主线程 NPE。
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            if (service == null) {
+                // 拿到通道为空：按死绑定收尾，让等待方立即失败，而不是等满 8s 超时。
+                resetDeadBinding()
+                return
+            }
             synchronized(lock) {
                 messenger = Messenger(service)
                 binding = false
@@ -66,7 +73,7 @@ internal object AgentRuntimeConnection {
             }
         }
 
-        override fun onServiceDisconnected(name: ComponentName) {
+        override fun onServiceDisconnected(name: ComponentName?) {
             synchronized(lock) {
                 messenger = null
                 // 普通断线由系统自动重连当前 binding；不要叠加第二次 bindService。
@@ -76,11 +83,11 @@ internal object AgentRuntimeConnection {
             }
         }
 
-        override fun onBindingDied(name: ComponentName) {
+        override fun onBindingDied(name: ComponentName?) {
             resetDeadBinding()
         }
 
-        override fun onNullBinding(name: ComponentName) {
+        override fun onNullBinding(name: ComponentName?) {
             resetDeadBinding()
         }
     }

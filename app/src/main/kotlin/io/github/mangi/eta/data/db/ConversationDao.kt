@@ -133,6 +133,15 @@ internal interface ConversationDao : ChunkedTextDao {
     @Upsert
     suspend fun insertContextCheckpointRow(checkpoint: ConversationContextCheckpointEntity)
 
+    /**
+     * 检查点正文的分片来源：惰性序列，拼接结果就是落库正文。
+     * 长会话的 transcript 整份序列化是几十 MB 的堆分配，分片后任一刻只持有一个分片。
+     */
+    class StreamedCheckpoint(
+        val history: Sequence<String>,
+        val journal: Sequence<String>,
+    )
+
     @Transaction
     suspend fun insertContextCheckpoints(checkpoints: List<ConversationContextCheckpointEntity>) {
         checkpoints.forEach { row ->
@@ -182,6 +191,7 @@ internal interface ConversationDao : ChunkedTextDao {
         conversations: List<ConversationEntity>,
         messagesByConversation: Map<String, List<ConversationMessageEntity>>,
         contextCheckpoints: List<ConversationContextCheckpointEntity> = emptyList(),
+        streamedCheckpoints: Map<String, StreamedCheckpoint> = emptyMap(),
         removedConversationIds: List<String> = emptyList(),
         state: ConversationStateEntity?,
     ) {
@@ -197,6 +207,19 @@ internal interface ConversationDao : ChunkedTextDao {
             if (messages.isNotEmpty()) insertMessages(messages)
         }
         insertContextCheckpoints(contextCheckpoints)
+        streamedCheckpoints.forEach { (conversationId, transcript) ->
+            insertContextCheckpointRow(
+                ConversationContextCheckpointEntity(
+                    conversationId = conversationId,
+                    historyJson = storeTextPieces(
+                        "conversation_context_checkpoints", conversationId, "history", transcript.history,
+                    ),
+                    journalJson = storeTextPieces(
+                        "conversation_context_checkpoints", conversationId, "journal", transcript.journal,
+                    ),
+                )
+            )
+        }
         deleteState()
         state?.let { insertState(it) }
     }

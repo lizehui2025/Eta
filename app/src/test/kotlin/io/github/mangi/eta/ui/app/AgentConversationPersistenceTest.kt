@@ -112,10 +112,14 @@ class AgentConversationPersistenceTest {
     @Test
     fun timestampResolutionStaysStableWhenReportedValueIsMissing() {
         val now = 5_000L
+        val reported = 30L
         val previous = AgentConversationPersistence.Saved(1L, 10L, 20L, 20L)
-        assertEquals(99L, AgentConversationPersistence.createdAt(99L, previous, now))
-        assertEquals(10L, AgentConversationPersistence.createdAt(null, previous, now))
-        assertEquals(now, AgentConversationPersistence.createdAt(null, null, now))
+        assertEquals(99L, AgentConversationPersistence.createdAt(99L, previous, reported, now))
+        assertEquals(10L, AgentConversationPersistence.createdAt(null, previous, reported, now))
+        // 库与上次落盘都不知道创建时间时，用调用方上报的时间戳（会话自己的时间），
+        // 最后才退回当次写盘时刻。
+        assertEquals(30L, AgentConversationPersistence.createdAt(null, null, reported, now))
+        assertEquals(now, AgentConversationPersistence.createdAt(null, null, null, now))
         assertEquals(99L, AgentConversationPersistence.updatedAt(99L, previous, now))
         assertEquals(20L, AgentConversationPersistence.updatedAt(null, previous, now))
         assertEquals(now, AgentConversationPersistence.updatedAt(null, null, now))
@@ -132,5 +136,50 @@ class AgentConversationPersistenceTest {
             AgentConversationPersistence.shouldWrite(42L, saved, 777L),
         )
         assertFalse(AgentConversationPersistence.shouldWrite(42L, saved, 2L))
+    }
+
+    /**
+     * 正文写入判定的唯一目的：把"只改时间戳"的保存与"正文真的变了"的保存区分开。
+     * 前者（手动压缩、切换会话）必须跳过，否则长会话每次都要把整份正文序列化 + 分块，
+     * 这是"无法保存对话（OutOfMemoryError）"的来源。
+     */
+    @Test
+    fun contentWriteIsSkippedOnlyWhenStoredContentStillMatches() {
+        val saved = AgentConversationPersistence.Saved(
+            fingerprint = 42L, createdAt = 1L, updatedAt = 2L, storedUpdatedAt = 2L, contentSignature = 7L,
+        )
+        assertTrue(
+            "库中还没有该会话时正文必须写入",
+            AgentConversationPersistence.shouldWriteContent(7L, null, null),
+        )
+        assertTrue(
+            "没有上次落盘记录时必须写入正文",
+            AgentConversationPersistence.shouldWriteContent(7L, null, 2L),
+        )
+        assertTrue(
+            "库里该行被别的写入方整份改写过时必须重写正文",
+            AgentConversationPersistence.shouldWriteContent(7L, saved, 777L),
+        )
+        assertTrue(
+            "正文变化时必须重写",
+            AgentConversationPersistence.shouldWriteContent(8L, saved, 2L),
+        )
+        assertFalse(
+            "正文未变（只推进了时间戳）时应跳过整份重写",
+            AgentConversationPersistence.shouldWriteContent(7L, saved, 2L),
+        )
+    }
+
+    @Test
+    fun contentSignatureTracksOnlyTranscriptPayload() {
+        val base = AgentConversationPersistence.contentSignature(state())
+        assertEquals("流式/压缩标志不落盘，不得影响正文签名", base, AgentConversationPersistence.contentSignature(state(isStreaming = true)))
+        assertEquals("输入框草稿不落盘，不得影响正文签名", base, AgentConversationPersistence.contentSignature(state(input = "草稿")))
+        assertNotEquals("消息变化必须影响正文签名", base, AgentConversationPersistence.contentSignature(state(messages = listOf())))
+        assertNotEquals(
+            "历史变化必须影响正文签名",
+            base,
+            AgentConversationPersistence.contentSignature(state(history = history.drop(1))),
+        )
     }
 }

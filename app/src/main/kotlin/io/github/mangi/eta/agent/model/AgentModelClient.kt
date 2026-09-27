@@ -93,6 +93,11 @@ internal object AgentModelClient {
         skillContext: SkillContext = SkillContext.EMPTY,
         memoryContext: AgentMemoryContext = AgentMemoryContext.DISABLED,
         additionalTools: JSONArray = JSONArray(),
+        /**
+         * Capability capture entry point. The default covers only the offline "nothing available"
+         * case; production must pass `AgentToolCapabilities.capture(context)` (see
+         * AgentRuntimeRunExecutor), otherwise the model is offered tools it cannot execute.
+         */
         capabilitiesProvider: () -> AgentToolCapabilities = { AgentToolCapabilities(rootAvailable = false) },
         sessionId: String = java.util.UUID.randomUUID().toString(),
         compactOnly: Boolean = false,

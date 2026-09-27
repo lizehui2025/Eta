@@ -67,6 +67,80 @@ internal interface ChunkedTextDao {
         return "$REFERENCE_PREFIX$count:${text.length}"
     }
 
+    /**
+     * [storeText] 的分片版：正文由 [pieces] 依次产出，拼接结果就是正文。
+     *
+     * 语义与 [storeText] 完全一致——同样的内联阈值、同样的退化值保护与损坏哨兵行、
+     * 同样的每块 ≤ [CHUNK_CHARS] 且不拆 UTF-16 代理对、返回同样的引用串、写同样的分块行
+     * （拆点位置一致，所以对同一份正文两者产出的分块与引用逐字节相同）。
+     *
+     * 区别只在内存：内联判定与退化值保护都只可能命中短文本，因此先攒到刚越过 [CHUNK_CHARS]，
+     * 确定走分块后就边收边冲、不再保留完整正文。长会话的 transcript 序列化后是几十 MB，
+     * 整份构造会直接把堆打爆（实测单次分配 25.5 MB 触发 OutOfMemoryError），
+     * 分片后任一刻只持有一个分片加一个 ≤ [CHUNK_CHARS] 的缓冲。
+     */
+    suspend fun storeTextPieces(
+        table: String,
+        owner: String,
+        field: String,
+        pieces: Sequence<String>,
+    ): String {
+        val buffer = StringBuilder()
+        var length = 0
+        var count = 0
+        val iterator = pieces.iterator()
+
+        // 攒到"确定不是短文本"为止：每块最多带进一个分片，缓冲不会超过 CHUNK_CHARS + 单个分片。
+        var chunked = false
+        while (iterator.hasNext()) {
+            val piece = iterator.next()
+            length += piece.length
+            buffer.append(piece)
+            if (buffer.length > CHUNK_CHARS) {
+                chunked = true
+                break
+            }
+        }
+
+        if (!chunked) {
+            // 短文本：与 storeText 同一段判定，此时完整正文就在缓冲里。
+            val text = buffer.toString()
+            if (text in DEGENERATE_TEXT_WRITE_VALUES) {
+                corruptedOriginalRef(table, owner, field)?.let { return it }
+            } else {
+                clearTextCorruption(table, owner, field)
+            }
+            val inline = text.length <= CHUNK_CHARS && !text.startsWith(REFERENCE_PREFIX)
+            if (inline && !hasTextChunks(table, owner, field)) return text
+            deleteTextChunks(table, owner, field)
+            if (inline) return text
+            insertTextChunk(AgentTextChunkEntity(table, owner, field, count++, text))
+            return "$REFERENCE_PREFIX$count:${text.length}"
+        }
+
+        // 长文本：必定不是退化值，按 storeText 的长文本分支处理（短路掉 hasTextChunks 探测）。
+        clearTextCorruption(table, owner, field)
+        deleteTextChunks(table, owner, field)
+        suspend fun flush(force: Boolean) {
+            while (buffer.length > CHUNK_CHARS || (force && buffer.isNotEmpty())) {
+                // 不把 UTF-16 代理对拆到两个 SQLite TEXT 中；拆点与 storeText 完全一致。
+                var end = minOf(CHUNK_CHARS, buffer.length)
+                if (end < buffer.length && buffer[end - 1].isHighSurrogate()) end--
+                insertTextChunk(AgentTextChunkEntity(table, owner, field, count++, buffer.substring(0, end)))
+                buffer.delete(0, end)
+            }
+        }
+        flush(force = false)
+        while (iterator.hasNext()) {
+            val piece = iterator.next()
+            length += piece.length
+            buffer.append(piece)
+            flush(force = false)
+        }
+        flush(force = true)
+        return "$REFERENCE_PREFIX$count:$length"
+    }
+
     suspend fun restoreText(table: String, owner: String, field: String, stored: String): String {
         // 只有严格等于 "@eta:chunks:v1:<count>:<length>"（两段非负整数、无多余冒号或空白）才按分块引用恢复；
         // 其余以 REFERENCE_PREFIX 开头的历史文本一律原样返回，避免 ≤16 KiB 的遗留正文被误判为引用。

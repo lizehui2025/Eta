@@ -246,12 +246,12 @@ internal object OfficialModelCatalog {
     )
 
     fun modelsForProvider(provider: ProviderSetting): List<Model> =
-        modelsForCatalogId(catalogIdFor(provider))
-            .map { it.withCatalogReasoningCapabilities(catalogIdFor(provider)) }
+        modelsForCatalogId(seedingCatalogIdFor(provider))
+            .map { it.withCatalogReasoningCapabilities(seedingCatalogIdFor(provider)) }
             .withStableSortOrder()
 
     fun enrich(provider: ProviderSetting, models: List<Model>): List<Model> =
-        enrich(catalogId = catalogIdFor(provider), models = models)
+        enrich(catalogId = metadataCatalogIdFor(provider), models = models)
 
     internal fun enrich(catalogId: String?, models: List<Model>): List<Model> {
         if (catalogId == null) return models
@@ -296,7 +296,16 @@ internal object OfficialModelCatalog {
     private fun List<Model>.withStableSortOrder(): List<Model> =
         mapIndexed { index, model -> model.copy(sortOrder = index) }
 
-    private fun catalogIdFor(provider: ProviderSetting): String? {
+    /**
+     * Catalog used for seeding: only providers known to be official OpenAI get a full official model
+     * list up front.
+     *
+     * The historical protocol check is kept here because seeding invents a list of models out of
+     * nothing: relaxing it would stuff a full set of OpenAI models into any custom endpoint (a local
+     * inference server, for instance) that does not serve them. The correct source of models for a
+     * custom provider is the "fetch models" action, not a guess.
+     */
+    private fun seedingCatalogIdFor(provider: ProviderSetting): String? {
         val resolved = ProviderSourceRegistry.resolve(provider)
         if (resolved != ProviderSourceTypes.CUSTOM) return resolved
         val endpointMode = when (provider) {
@@ -305,6 +314,21 @@ internal object OfficialModelCatalog {
             else -> null
         }
         return ProviderSourceTypes.OPENAI.takeIf { endpointMode == OpenAiEndpointMode.RESPONSES }
+    }
+
+    /**
+     * Catalog used for metadata enrichment: open to every custom provider, fully decoupled from the
+     * protocol.
+     *
+     * Enrichment can be relaxed where seeding cannot: it matches `modelId` **exactly** to fill in
+     * metadata for models that already exist, and returns them untouched otherwise. There is
+     * therefore no need to guess "is this endpoint OpenAI" first — only models literally named
+     * `gpt-5.5` or `gpt-5.6-*` pick up official metadata and reasoning capabilities.
+     */
+    private fun metadataCatalogIdFor(provider: ProviderSetting): String? {
+        val resolved = ProviderSourceRegistry.resolve(provider)
+        if (resolved != ProviderSourceTypes.CUSTOM) return resolved
+        return ProviderSourceTypes.OPENAI
     }
 
     private fun officialModel(

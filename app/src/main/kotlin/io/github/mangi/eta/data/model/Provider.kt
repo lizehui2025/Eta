@@ -12,6 +12,17 @@ internal object ProviderTypes {
 internal object OpenAiEndpointMode {
     const val CHAT_COMPLETIONS = "chat_completions"
     const val RESPONSES = "responses"
+
+    /**
+     * Unknown, blank and legacy values all fall back to Chat Completions, matching the existing
+     * defaults in the database, the wire format and the settings page. The adaptation layer knows
+     * only these two values, and a dirty string must not become a third "endpoint kind".
+     */
+    fun normalize(mode: String?): String = if (mode == RESPONSES) RESPONSES else CHAT_COMPLETIONS
+
+    /** The other endpoint within the OpenAI-compatible family; used to retry when one is unavailable. */
+    fun alternative(mode: String?): String =
+        if (normalize(mode) == RESPONSES) CHAT_COMPLETIONS else RESPONSES
 }
 
 internal object ProviderSourceTypes {

@@ -23,6 +23,24 @@ internal object AgentConversationCodec {
     fun encodeConversationCheckpoint(messages: List<AgentModelClient.ConversationMessage>): String =
         encodeTranscriptForStorage(messages)
 
+    /**
+     * 按条产出 transcript 的 JSON 分片，拼接结果与 [encodeTranscriptForStorage] 逐字节相同。
+     *
+     * 存在的意义是内存：长会话整份序列化是一次几十 MB 的堆分配，逐条产出后
+     * 任一刻只持有一条消息的 JSON，配合 [io.github.mangi.eta.data.db.ChunkedTextDao.storeTextPieces]
+     * 就能边序列化边写分块。
+     */
+    fun transcriptPieces(
+        messages: List<AgentModelClient.ConversationMessage>,
+    ): Sequence<String> = sequence {
+        yield("[")
+        messages.forEachIndexed { index, message ->
+            if (index > 0) yield(",")
+            yield(json.encodeToString(sanitizeMessage(message)))
+        }
+        yield("]")
+    }
+
     fun decodeTranscript(raw: String?): List<AgentModelClient.ConversationMessage> =
         if (raw.isNullOrBlank()) {
             emptyList()

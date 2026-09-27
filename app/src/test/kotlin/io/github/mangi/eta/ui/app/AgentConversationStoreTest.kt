@@ -1,13 +1,18 @@
 package io.github.mangi.eta.ui.app
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabaseLockedException
+import android.database.sqlite.SQLiteException
 import android.os.Looper
+import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.roleplay.CharacterCardCodec
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageLink
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
+import io.github.mangi.eta.data.db.AgentTextChunkEntity
+import io.github.mangi.eta.data.db.ChunkedTextDao
 import io.github.mangi.eta.data.db.ConversationEntity
 import io.github.mangi.eta.data.db.ConversationMessageEntity
 import io.github.mangi.eta.data.db.ConversationStateEntity
@@ -453,6 +458,8 @@ class AgentConversationStoreTest {
             assertTrue(state.homeState.history.isEmpty())
             assertTrue(state.homeState.messages.isEmpty())
             assertFalse(state.homeState.isStreaming)
+            // 冲掉在途落盘：角色会话创建会异步写盘，晚到的写会污染下一个用例的库。
+            idleUntil { !state.hasPendingPersistence() }
         } finally {
             scope.cancel()
         }
@@ -464,20 +471,24 @@ class AgentConversationStoreTest {
         try {
             val state = AgentAppState(context, scope)
             awaitInitialConversationLoad(state)
+            // 用"前后差"判定：应用自身的后台恢复与其它用例的落盘都可能在这条用例运行期间补上会话，
+            // 本用例只关心 createConversation 自身不新增面板项、也不写库。
+            val paneBefore = state.conversationPaneState.conversations
+            val rowsBefore = conversationRowCount()
 
             state.createConversation()
             state.createConversation()
 
             assertEquals(null, state.conversationPaneState.selectedConversationId)
-            assertTrue(state.conversationPaneState.conversations.isEmpty())
-            assertTrue(
-                runBlocking {
-                    EtaDatabase.get(context).conversationDao().conversations().isEmpty()
-                }
-            )
+            assertEquals(paneBefore, state.conversationPaneState.conversations)
+            assertEquals(rowsBefore, conversationRowCount())
         } finally {
             scope.cancel()
         }
+    }
+
+    private fun conversationRowCount(): Int = runBlocking {
+        EtaDatabase.get(context).conversationDao().conversationMetadataRows().size
     }
 
     @Test
@@ -554,4 +565,304 @@ class AgentConversationStoreTest {
             assertEquals(2_000L, second.updatedAt)
         }
     }
+
+    /**
+     * 只改时间戳的保存（手动压缩、切换会话）不得重写正文分块 —— 那是长会话下"无法保存对话
+     * （OutOfMemoryError）"的来源：整份正文要重新序列化再分块，单次就是几十 MB 的堆分配。
+     *
+     * 观测方式：先落盘，再把库里的分块改成哨兵值，然后做一次只推进时间戳的保存；
+     * 哨兵值仍在即证明正文确实没被重写。
+     */
+    @Test
+    fun timestampOnlySaveLeavesStoredTranscriptUntouched() {
+        val body = buildString {
+            repeat(2_000) { append("第 ").append(it).append(" 行：这条正文要撑过 16 KiB 分块阈值。\n") }
+        }
+        val seeded = AgentChatHomeUiState(
+            messages = listOf(AgentMessageUi(id = "assistant-long", content = body, isStreaming = false)),
+            history = listOf(
+                AgentModelClient.ConversationMessage(role = "assistant", content = body, messageId = "assistant-long")
+            ),
+            journal = listOf(
+                AgentModelClient.ConversationMessage(role = "assistant", content = body, messageId = "assistant-long")
+            ),
+            input = "",
+            isStreaming = false,
+            thinkingEnabled = false,
+        )
+        runBlocking {
+            AgentConversationStore.save(
+                context = context,
+                selectedConversationId = "conv-stamp",
+                conversationsById = mapOf("conv-stamp" to seeded),
+                titles = mapOf("conv-stamp" to "只改时间戳"),
+                updatedAt = mapOf("conv-stamp" to 1L),
+            )
+            EtaDatabase.get(context).openHelper.writableDatabase.execSQL(
+                "UPDATE agent_text_chunks SET content = 'STALE' " +
+                    "WHERE owner_table = 'conversation_context_checkpoints' AND field = 'journal'"
+            )
+            AgentConversationStore.save(
+                context = context,
+                selectedConversationId = "conv-stamp",
+                conversationsById = mapOf("conv-stamp" to seeded.copy(isStreaming = true, isCompacting = true)),
+                titles = mapOf("conv-stamp" to "只改时间戳"),
+                updatedAt = mapOf("conv-stamp" to 2L),
+            )
+        }
+
+        val staleChunks = runBlocking {
+            EtaDatabase.get(context).openHelper.readableDatabase
+                .query("SELECT COUNT(*) FROM agent_text_chunks WHERE content = 'STALE'")
+                .use { cursor ->
+                    cursor.moveToFirst()
+                    cursor.getInt(0)
+                }
+        }
+        assertTrue(
+            "只改时间戳的保存重写了正文分块：长会话下这次重写要整份序列化 + 分块，是 OOM 的来源",
+            staleChunks > 0,
+        )
+    }
+
+    /**
+     * 分片写入必须与整份写入完全等价：写同样的分块、返回同样的引用串。
+     * 这是"不再构造整份正文"能安全替换旧路径的前提——长会话的整份序列化会直接 OOM。
+     */
+    @Test
+    fun streamedStoreWritesSameChunksAndReferenceAsWholeTextStore() = runBlocking {
+        val dao = EtaDatabase.get(context).conversationDao()
+        val table = "conversation_context_checkpoints"
+        val field = "journal"
+        val line = "第 %d 行：中文正文，用于校验分块与代理对边界。\n"
+        val samples = listOf(
+            "",
+            "[]",
+            "短文本",
+            "@eta:chunks:v1:3:100",
+            buildString { repeat(3_000) { append(line.format(it)) } },
+            buildString { repeat(3_000) { append(if (it % 2 == 0) "\uD83D\uDE00" else "字") } },
+        )
+        samples.forEachIndexed { index, sample ->
+            val wholeOwner = "whole-$index"
+            val streamedOwner = "streamed-$index"
+            val wholeRef = dao.storeText(table, wholeOwner, field, sample)
+            val wholeChunks = dao.textChunks(table, wholeOwner, field, CHUNK_READ_LIMIT, 0)
+                .map { it.chunkIndex to it.content }
+            val streamedRef = dao.storeTextPieces(table, streamedOwner, field, sample.asPieces())
+            val streamedChunks = dao.textChunks(table, streamedOwner, field, CHUNK_READ_LIMIT, 0)
+                .map { it.chunkIndex to it.content }
+            assertEquals("引用串必须一致（正文长度=${sample.length}）", wholeRef, streamedRef)
+            assertEquals("分块必须一致（正文长度=${sample.length}）", wholeChunks, streamedChunks)
+        }
+
+        // 带损坏哨兵行时，退化值写回必须被同样拒绝（两个路径都返回哨兵行保存的原始引用）。
+        val sentinel = "@eta:chunks:v1:9:9"
+        dao.insertTextChunk(
+            AgentTextChunkEntity(table, "whole-sentinel", field, ChunkedTextDao.CORRUPTED_CHUNK_INDEX, sentinel)
+        )
+        dao.insertTextChunk(
+            AgentTextChunkEntity(table, "streamed-sentinel", field, ChunkedTextDao.CORRUPTED_CHUNK_INDEX, sentinel)
+        )
+        assertEquals(
+            dao.storeText(table, "whole-sentinel", field, "[]"),
+            dao.storeTextPieces(table, "streamed-sentinel", field, sequenceOf("[]")),
+        )
+    }
+
+    /** 按不等长分片喂入，覆盖缓冲、拆点与代理对边界。 */
+    private fun String.asPieces(): Sequence<String> = sequence {
+        if (isEmpty()) {
+            yield("")
+            return@sequence
+        }
+        val sizes = intArrayOf(1, 7, 4_096, 16_384, 65_537)
+        var offset = 0
+        var index = 0
+        while (offset < length) {
+            val end = minOf(offset + sizes[index % sizes.size], length)
+            yield(substring(offset, end))
+            offset = end
+            index++
+        }
+    }
+
+    /** 分片拼出的 JSON 必须与整份序列化逐字节相同，否则库里会写成非法 JSON。 */
+    @Test
+    fun transcriptPiecesConcatenateToTheSameJsonAsWholeEncoding() {
+        val messages = listOf(
+            AgentModelClient.ConversationMessage(role = "user", content = "问题", messageId = "m1"),
+            AgentModelClient.ConversationMessage(
+                role = "assistant",
+                content = "",
+                toolCallsJson = """[{"id":"t","function":{"name":"x","arguments":"{}"}}]""",
+            ),
+            AgentModelClient.ConversationMessage(role = "tool", content = "{\"ok\":true}", toolCallId = "t"),
+            AgentModelClient.ConversationMessage(
+                role = "assistant",
+                content = "含 Unicode 😀 与转义 \\ \" 的正文",
+                compactedUserTurns = 2,
+            ),
+        )
+        assertEquals(
+            AgentConversationCodec.encodeTranscriptForStorage(messages),
+            AgentConversationCodec.transcriptPieces(messages).joinToString(""),
+        )
+        assertEquals("[]", AgentConversationCodec.transcriptPieces(emptyList()).joinToString(""))
+    }
+
+    /**
+     * 手动压缩的写前闸门回归：压缩 run 必须在落盘成功后才会交给 Runtime。
+     * 落盘失败时压缩结果标记的 detail 会写成 conversation_persistence_failed 文案，
+     * 这里断言该文案不出现，即写前落盘成功、压缩已进入 Runtime 准备阶段。
+     */
+    @Test
+    fun compactionRunPassesWriteAheadPersistence() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        try {
+            val state = AgentAppState(context, scope)
+            awaitInitialConversationLoad(state)
+            state.startCharacterConversation(
+                RoleplayBinding(
+                    characterId = "compaction-character",
+                    cardSnapshotJson = CharacterCardCodec.encodeJson(CharacterCardCodec.create("旅人")),
+                    characterName = "旅人",
+                    userName = "小林",
+                ),
+                "你好，{{user}}",
+            )
+            state.compactCurrentContext()
+            idleUntil { !state.homeState.isStreaming }
+            // 冲掉在途落盘：压缩起跑与终态各会写一次盘。
+            idleUntil { !state.hasPendingPersistence() }
+
+            val notices = state.homeState.messages.filterIsInstance<SystemNoticeMessageUi>()
+            val persistenceFailure = context.getString(R.string.conversation_persistence_failed)
+            assertTrue(
+                "压缩未走到终态标记：$notices",
+                notices.any { it.code == SystemNoticeCode.ContextCompaction },
+            )
+            assertTrue(
+                "压缩写前落盘失败，压缩标记被写成失败提示：$notices",
+                notices.none { it.detail?.contains(persistenceFailure) == true },
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    /**
+     * 长会话的压缩回归：需要压缩的会话正是正文远超 16 KiB 分块阈值的会话，
+     * 而压缩前的落盘与聊天落盘走同一条路径、写同一份数据，长文本不应让落盘失败。
+     */
+    @Test
+    fun compactionRunPassesWriteAheadPersistenceForLargeConversation() {
+        val body = buildString {
+            repeat(1_500) { append("第 ").append(it).append(" 行：用于撑大持久化载荷的正文，远超分块阈值。\n") }
+        }
+        val history = (0 until 8).map { index ->
+            AgentModelClient.ConversationMessage(
+                role = if (index % 2 == 0) "user" else "assistant",
+                content = body,
+                messageId = "large-$index",
+            )
+        }
+        val messages = (0 until 8).map { index ->
+            if (index % 2 == 0) {
+                UserMessageUi(id = "large-$index", content = body)
+            } else {
+                AgentMessageUi(id = "large-$index", content = body, isStreaming = false)
+            }
+        } + ToolActivityMessageUi(
+            id = "large-tool",
+            toolName = "open_and_exec",
+            status = ToolActivityStatusUi.Success,
+            argumentsSummary = "读取大日志",
+            command = "cat big.log",
+            resultSummary = "ok=true",
+            detail = body,
+        )
+        runBlocking {
+            AgentConversationStore.save(
+                context = context,
+                selectedConversationId = "conv-large",
+                conversationsById = mapOf(
+                    "conv-large" to AgentChatHomeUiState(
+                        messages = messages,
+                        history = history,
+                        journal = history,
+                        input = "",
+                        isStreaming = false,
+                        thinkingEnabled = false,
+                    )
+                ),
+                titles = mapOf("conv-large" to "长会话"),
+                updatedAt = mapOf("conv-large" to 1L),
+            )
+        }
+
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        try {
+            val state = AgentAppState(context, scope)
+            awaitInitialConversationLoad(state)
+            assertEquals("conv-large", state.conversationPaneState.selectedConversationId)
+            assertTrue("长会话未加载出历史", state.homeState.history.isNotEmpty())
+
+            state.compactCurrentContext()
+            idleUntil { !state.homeState.isStreaming }
+            idleUntil { !state.hasPendingPersistence() }
+
+            val notices = state.homeState.messages.filterIsInstance<SystemNoticeMessageUi>()
+            val persistenceFailure = context.getString(R.string.conversation_persistence_failed)
+            assertTrue(
+                "压缩未走到终态标记：$notices",
+                notices.any { it.code == SystemNoticeCode.ContextCompaction },
+            )
+            assertTrue(
+                "长会话压缩写前落盘失败：$notices",
+                notices.none { it.detail?.contains(persistenceFailure) == true },
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    /**
+     * 落盘重试只针对"库被别的进程持写锁"这一类瞬时失败；
+     * 损坏、缺表、已关闭、OOM 都必须照旧直接报失败，不能被重试掩盖。
+     */
+    @Test
+    fun transientDatabaseContentionOnlyMatchesLockAndBusy() {
+        assertTrue(
+            SQLiteDatabaseLockedException("database is locked (code 5 SQLITE_BUSY)")
+                .isTransientDatabaseContention()
+        )
+        assertTrue(
+            SQLiteException("database table is locked: conversation_messages")
+                .isTransientDatabaseContention()
+        )
+        assertTrue(
+            SQLiteException("wrapped", SQLiteDatabaseLockedException("database is locked"))
+                .isTransientDatabaseContention()
+        )
+        assertFalse(SQLiteException("no such table: conversations").isTransientDatabaseContention())
+        assertFalse(
+            IllegalStateException("attempt to re-open an already-closed object")
+                .isTransientDatabaseContention()
+        )
+        assertFalse(OutOfMemoryError().isTransientDatabaseContention())
+    }
+
+    /** 推进主 Looper 直到条件成立；Robolectric 的主 Looper 不会自动执行。 */
+    private fun idleUntil(timeoutMillis: Long = 10_000, condition: () -> Boolean) {
+        val deadlineMillis = System.currentTimeMillis() + timeoutMillis
+        while (!condition()) {
+            check(System.currentTimeMillis() < deadlineMillis) { "等待条件成立超时" }
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(2)
+        }
+    }
 }
+
+/** 读分块用的上限：远大于用例构造的任何正文所需的分块数。 */
+private const val CHUNK_READ_LIMIT = 10_000

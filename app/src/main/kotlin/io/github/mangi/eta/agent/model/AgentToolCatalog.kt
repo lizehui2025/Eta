@@ -17,7 +17,13 @@ internal object AgentToolCatalog {
         memoryWritable: Boolean = true,
         subagentTools: Boolean = true,
         planTools: Boolean = true,
-        capabilities: AgentToolCapabilities = AgentToolCapabilities(rootAvailable = true),
+        /**
+         * Capability projection conditions. The [AgentToolCapabilities.full] default only spares
+         * catalog-structure tests from restating it; production must pass the real device state
+         * captured by `AgentToolCapabilities.capture(context)` (production call sites are
+         * AgentModelClient and AgentRuntimeRunExecutor), or the model is offered tools it cannot run.
+         */
+        capabilities: AgentToolCapabilities = AgentToolCapabilities.full(),
     ): JSONArray =
         capabilities.project(JSONArray().also { tools ->
             AgentContextAppToolCatalog.appendTo(tools)

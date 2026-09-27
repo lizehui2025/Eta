@@ -16,7 +16,12 @@ internal object AgentSensitiveToolPolicy {
         "get_device_environment",
         "list_alarms",
         "list_active_timers",
+        // Clipboard read/write is treated like clipboard history: a read returns what the user just
+        // copied (passwords, OTPs and card numbers land there constantly) and a write carries a
+        // credential the model just produced. Neither belongs in the persisted session.
         "search_clipboard_history",
+        "get_clipboard",
+        "set_clipboard",
         "get_health_summary",
         "read_sms_code",
         "get_logcat",

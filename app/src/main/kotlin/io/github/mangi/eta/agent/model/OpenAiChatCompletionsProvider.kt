@@ -208,6 +208,11 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
         val toolCalls = linkedMapOf<Int, StreamingToolCall>()
         var usage: AgentTokenUsage? = null
         var sawStreamData = false
+        // Whether a Chat Completions shaped chunk (non-empty choices) was ever seen. Tracked
+        // separately from sawStreamData: data with no choices at all means the peer speaks another
+        // protocol rather than the stream being cut short — both used to collapse into
+        // "SSE stream did not end normally", leaving no way to tell them apart.
+        var sawChoiceChunk = false
         var sawDone = false
         var finishReason: String? = null
         var nextContentIndex = 0
@@ -257,6 +262,7 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             }
             val choices = chunk.optJSONArray("choices")
             if (choices == null || choices.length() == 0) return@readProviderSse true
+            sawChoiceChunk = true
             val choice = choices.optJSONObject(0) ?: return@readProviderSse true
             val reason = choice.optString("finish_reason")
             if (reason.isNotBlank() && reason != "null") {
@@ -318,6 +324,13 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
         }
 
         if (!sawStreamData) throw AgentModelFailure.incompleteStream("模型接口未返回 SSE data chunk")
+        // Data arrived but not a single choices array: this is a protocol shape mismatch, not
+        // truncation. Retrying the same endpoint would fail identically, so it throws a non-retryable
+        // dedicated code that lets the endpoint adaptation layer retry the other protocol once.
+        if (!sawChoiceChunk) throw AgentModelFailure.endpointProtocolMismatch(
+            "模型接口返回了 SSE 数据，但没有一条是 Chat Completions 格式（缺少 choices）：" +
+                "该地址很可能使用 Responses API。",
+        )
         if (!sawDone && finishReason == null) throw AgentModelFailure.incompleteStream("模型接口 SSE 流未正常结束")
 
         finishActiveVisibleBlock()

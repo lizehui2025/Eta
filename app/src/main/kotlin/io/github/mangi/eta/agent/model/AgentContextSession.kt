@@ -90,13 +90,17 @@ internal class AgentContextSession(
             var candidate = messages
             // 不设尝试次数上限：只要每次摘要都在缩小就继续，直到达标；
             // 某次不再缩小即停并报错，避免无进展时无限消耗模型调用。
+            // The whole-operation budget is shared by this compaction, so "never reducing enough"
+            // is still bounded by the call count and the wall clock.
             var previousTokens = before
+            val compactionBudget = AgentCompactionBudget()
             do {
                 candidate = AgentContextCompactor(
                     config, provider, runController,
                     estimate = { candidate -> budget.rawEstimateCached(candidate) },
                     roleplay = roleplay,
                     sessionId = sessionId,
+                    budget = compactionBudget,
                 ).compact(candidate, systemCount, sensitiveIds(), force)
                 val tokens = budget.effectiveTokens(candidate, roundTools)
                 if (!budget.shouldCompact(tokens)) break

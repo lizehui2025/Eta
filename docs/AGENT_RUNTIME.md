@@ -40,7 +40,7 @@ pending steering
 - 工具参数在执行前按本轮实际下发的 JSON Schema 校验，支持本地 `$ref`、组合 Schema、条件 Schema 与常用对象、数组、字符串、数值约束；这只检查调用合同，不承担权限确认或额外安全策略。
 - transcript 只返回本次 run 新增的 assistant、tool 和运行中 steering 消息，不重复旧 history 或本轮初始用户消息。
 - GUI/终端工具保持串行。Android 前台状态和会话式 Shell 都不具备可安全并行的通用语义。
-- 例外：`spawn_agents` 可在一次调用内并行扇出子代理（任务数与并行度不设上限），每个任务独立 messages/loop 并发执行，结果汇总为单条 tool result 返回主循环。子代理有两种模式：`research`（默认，只读搜集）与 `code`（在任务声明的 `write_paths` 范围内用 `write_file` / `edit_file` 编辑，同一 canonical 文件由 fanout 级注册表互斥）；mode 可省略：任务声明 write_paths 或点名写工具时自动按 code 处理，否则默认 research；`allowed_tools` 只收窄工具集、不设数量上限，显式空数组视为未提供；显式声明的 mode 必须与 write_paths 自洽（research 禁写范围、code 必须带写范围），在调用级校验。两种模式都禁 GUI/浏览器、终端 shell（`terminal`、`run_command`）、敏感写、安装类与 `spawn_agents` 自身：违例返回 `EXCLUSIVE_TOOL_BUSY`，嵌套派生返回 `NESTED_SPAWN_NOT_ALLOWED`，越界写入返回 `WRITE_NOT_DECLARED`，文件写入冲突返回 `FILE_BUSY`，声明范围互相重叠在派生前返回 `WRITE_CONFLICT`。子代理不设轮数上限与整体超时：任务数与工具数不限，同时最多并行 4 个（超出的排队），长任务按自己的节奏跑完。唯一会终止子代理的是父运行取消——各子控制器随之取消，阻塞中的模型请求与工具调用一并中断；取消后最多再等 2 秒让收尾线程记完写入，线程仍存活时结果 JSON 含 `still_running: true`，未完成的任务以 `SUBAGENT_INTERRUPTED` 收尾并保留已记录的 `changed_files`。子代理输出与改动文件列表一律完整回填，不做任何长度截断；主窗口容量由 `AgentContextSession.compact()` 按实时窗口统一裁决。汇总结果带 `mode` 与各任务 `changed_files`，子代理行尾展示“已改 N 个文件”。父取消会联动取消全部子代理；每个子代理终态只上报一次（AtomicBoolean CAS），迟到事件不覆盖已上报的语义。每个子代理的工具调用经 `SubagentToolStarted` / `SubagentToolFinished` 事件（含 `detail`）转写为消息行的独立步骤：折叠行展示最新步骤摘要，点击打开独立详情窗口按步骤查看，结果区展示最终答复、耗时与改动文件。
+- 例外：`spawn_agents` 可在一次调用内并行扇出子代理（任务数不设上限，同时最多并行 4 个，超出的排队），每个任务独立 messages/loop 并发执行，结果汇总为单条 tool result 返回主循环。子代理有两种模式：`research`（默认，只读搜集）与 `code`（在任务声明的 `write_paths` 范围内用 `write_file` / `edit_file` 编辑，同一 canonical 文件由 fanout 级注册表互斥）；mode 可省略：任务声明 write_paths 或点名写工具时自动按 code 处理，否则默认 research；`allowed_tools` 只收窄工具集、不设数量上限，显式空数组视为未提供；显式声明的 mode 必须与 write_paths 自洽（research 禁写范围、code 必须带写范围），在调用级校验。两种模式都禁 GUI/浏览器、终端 shell（`terminal`、`run_command`）、敏感写、安装类与 `spawn_agents` 自身：违例返回 `EXCLUSIVE_TOOL_BUSY`，嵌套派生返回 `NESTED_SPAWN_NOT_ALLOWED`，越界写入返回 `WRITE_NOT_DECLARED`，文件写入冲突返回 `FILE_BUSY`，声明范围互相重叠在派生前返回 `WRITE_CONFLICT`。子代理不设轮数上限与整体超时：任务数与工具数不限，同时最多并行 4 个（超出的排队），长任务按自己的节奏跑完。唯一会终止子代理的是父运行取消——各子控制器随之取消，阻塞中的模型请求与工具调用一并中断；取消后最多再等 2 秒让收尾线程记完写入，线程仍存活时结果 JSON 含 `still_running: true`，未完成的任务以 `SUBAGENT_INTERRUPTED` 收尾并保留已记录的 `changed_files`。子代理输出与改动文件列表一律完整回填，不做任何长度截断；主窗口容量由 `AgentContextSession.compact()` 按实时窗口统一裁决。汇总结果带 `mode` 与各任务 `changed_files`，子代理行尾展示“已改 N 个文件”。父取消会联动取消全部子代理；每个子代理终态只上报一次（AtomicBoolean CAS），迟到事件不覆盖已上报的语义。每个子代理的工具调用经 `SubagentToolStarted` / `SubagentToolFinished` 事件（含 `detail`）转写为消息行的独立步骤：折叠行展示最新步骤摘要，点击打开独立详情窗口按步骤查看，结果区展示最终答复、耗时与改动文件。
 - 主代理可用 `todo_write` 维护任务清单（Plan）：整体替换语义，1–50 条、单条 ≤500 字符，状态仅 `pending`/`in_progress`/`completed`；校验通过后广播 `TodoUpdated` 进度事件（overlay 与工具卡片共用），tool result 回填 total/completed 供后续轮次复用。子代理不可调用该工具；系统提示只对非角色会话注入自动 Plan 引导，子代理快照不注入。
 - 任务分配按上下文污染特征：主上下文只保留决策与摘要，批量搜集一律走纯净子代理（默认 pure + research）。2 次以上文件/代码读取、跨 2 个以上个人数据源取样、开放式检索必须扇出子代理；分片改码用 code 模式并声明互不重叠的 write_paths。浏览器、终端、MCP、前台 GUI、截图与完整历史留在主代理且只做单次最小探针，不循环追全量；子代理只回填蒸馏后的事实摘要，不转储原文。
 - 工具行默认折叠：`read_file` 折叠行显示文件名，展开显示行范围（“第 1–N 行”）与字节数，schema 注明读取上限（有 Root 时 262144 字节、无 Root 时 16000），`truncated` 统一表示用户可见内容被截断（读满 limit 或触达 16000 字符上限）；`write_file` / `edit_file` 展开显示目标文件与修改对比（`AgentTextDiff` 裁剪公共前后缀），`terminal` / `run_command` 展开显示更长的 stdout/stderr 与截断标记。详情由 `ToolFinished.detail` / `SubagentToolFinished.detail` 携带，经 runtime wire 与归档 JSON 往返，不进入模型上下文；写入 wire 前 detail 统一 clamp 到 4000 字符（超出以省略号收尾）。
@@ -56,7 +56,7 @@ pending steering
 - 入口请求只能缩小工具能力，不能自行授权。Runtime 在开始 run 时裁剪配置，在每次浏览器、终端和设备工具执行前重新读取用户开关，并在 thinking 关闭时移除自定义请求体中的 reasoning/thinking 覆盖字段。
 - 设备工具分为直达工具、敏感读取工具和敏感操作工具，当前均默认开启。Runtime 在每次执行前重新读取用户开关；开关允许且参数符合工具 Schema 后即可执行，不再匹配用户原话，也不维护关键包、系统应用或 Settings key 黑名单。
 - 微信发送不提供专用工具、参数协议或额外策略层，完全使用通用 GUI 工具观察和操作微信界面。
-- 通知、短信验证码、Wi‑Fi 凭据和日志属于瞬时敏感工具数据。当前模型回合可以使用原始值，但持久 transcript 会同时替换对应工具参数和结果，避免进入会话数据库或后续 IPC。
+- 通知、短信验证码、Wi‑Fi 凭据、日志与剪贴板内容（读写及历史）属于瞬时敏感工具数据。当前模型回合可以使用原始值，但持久 transcript 会同时替换对应工具参数和结果，避免进入会话数据库或后续 IPC。
 
 ## 可选角色上下文
 
@@ -72,7 +72,9 @@ Provider 默认基础提示词将 Eta 定义为运行在 Android 设备上的 AI
 
 Runtime 独立于 Provider 自定义提示词注入 Eta 身份，以“当前配置的模型”标注 `ModelConfig.model` 的实际值，随本次运行配置更新，不使用模型显示名或历史消息推断当前模型，也不据此推断部署版本、知识截止日期或能力。通用交流规则要求日常问答直接回答、仅在缺少关键参数时澄清、按用户需求调整详略，并如实交代工具操作结果；个性化分析区分事实与推测，不根据零散记录断言性格、动机或心理状态。工具、记忆与 Skills 等系统规则仍按运行时条件追加。
 
-OpenAI-compatible Provider 可在配置页选择 `Chat Completions` 或 `Responses API`。新安装和重置后的内置 OpenAI 默认使用 Responses；数据库中已有 Provider 不会被默认值覆盖。自定义 Provider 和其他内置 Provider 默认仍使用 Chat Completions。
+OpenAI-compatible 的协议**不由用户选择**。历史配置里的 `Chat Completions` / `Responses API` 只作为首次尝试的提示保留在数据库中（内置 OpenAI 为 Responses，其余默认 Chat Completions），设置页不再提供该选项，新增 Provider 一律按运行时探测结果决定。新安装和重置后的内置 OpenAI 默认使用 Responses；数据库中已有 Provider 不会被默认值覆盖。
+
+同一个地址下两种协议由实际可用性裁决（`OpenAiMixedEndpointProvider` + `ProviderEndpointFallback`），首选顺序为**实测结论 > 用户意图 > 保存的提示值**：实测值（本进程内已确认可用的协议）优先，其次看用户是否开启了 Provider 托管网页搜索（该能力只有 Responses 提供，开启即要求优先 Responses），最后才用数据库里的历史值兜底，避免每次请求都先撞一次已知失败的端点。当首选端点明确不可用时——HTTP 404/405/501，或返回 200 但 SSE 数据里没有任何属于该协议形状的事件（Chat Completions 要求非空 `choices`，Responses 要求 `response.*` 类型）——自动换到另一端重试**一次**，成功后把结论按 `主机:端口` 记入进程内存。记忆只在请求真正成功后写入，因此不存在无证据的结论；它不持久化，每个进程启动后首次请求仍会按首选试一次，之后直接走实测可用的一端。协议形状不符使用不可重试的 `ENDPOINT_PROTOCOL_MISMATCH`，与"流被截断"（`STREAM_INCOMPLETE`，仍可重试）严格区分：前者重试同一端点必然再次失败，此前会白重试三次并报一个不含配置线索的流错误。端点不存在与网络、额度、参数类失败不同族，后者一律不触发换协议；两端都不可用时抛出不可重试的 `ENDPOINT_UNAVAILABLE`，说明地址、两种协议与 Anthropic 三种可能原因。用户开启了网页搜索但实际只能走 Chat Completions 时，请求仍然成功（Chat 侧不使用该字段），但会记一条 warn 让"开关开着却没生效"可见。协议选择与模型目录、思考能力推断已解耦：官方元数据改为按 `modelId` 精确匹配富化（`OfficialModelCatalog.metadataCatalogIdFor`），对所有自定义 Provider 生效，不再需要从协议反推"这是不是官方 OpenAI 端点"。
 
 模型可携带一组可选的底层请求参数（temperature、top_p、top_k、最大输出 token、presence/frequency penalty、seed）；它们随 Run 配置经 RemotePreferences JSON 与 Runtime Bundle 一并传递，并在协议请求体构建时先于 `extraBody` 与自定义请求体写入，推理档位最后覆盖。压缩、摘要与改写等内部用途不携带这些参数，与自定义请求体使用同一套裁剪规则。编码模式例外：运行开始时会把 `codingMode` 快照进运行配置，主对话、子代理与内部调用均统一写入 `temperature=0.1`；用户自定义请求体仍可覆盖。
 
@@ -170,7 +172,7 @@ App 在发起请求前已经把当前用户消息写入会话 history，因此 R
 
 首次模型请求前、完整工具批次结束后的下一次请求前，以及任务完成后检查模型窗口预算。请求估算达到窗口的 85% 时触发自动压缩；窗口未知时不根据字符数猜测容量，只支持手动压缩和明确的 Provider 上下文溢出恢复。估算包含系统提示、工具 schema、文本与图片，并以成功请求的输入 usage 校准。阈值集中在 `AgentContextBudget`，存储和传输分块大小不参与触发。
 
-压缩使用当前会话模型，额外请求会计费。摘要请求禁止本地及托管工具，也不接受自定义正文覆盖其输入；输入移除敏感工具原始参数、结果、图片正文与 opaque reasoning。近期历史以四条消息及窗口 20% 为目标，切分只能发生在完整工具批次之间；当前用户指令与未消费图片保留。过长历史按完整批次分段总结，明确的摘要输入溢出允许有限细分；单项过大、空摘要、截断摘要或没有容量收益时不提交。压缩本身带整体预算：一次压缩最多 6 次摘要调用、90 秒墙钟，超预算立即放弃并保留原始上下文（不把界面挂在没有反应的等待上），压缩调用的失败重试降为一次。安全切分点一次线性扫描求出，消息级 token 估算按消息对象缓存（对象就地改写时自动失效），窗口分类明细只在真正触发压缩时统计。
+压缩使用当前会话模型，额外请求会计费。摘要请求禁止本地及托管工具，也不接受自定义正文覆盖其输入；输入移除敏感工具原始参数、结果、图片正文与 opaque reasoning。近期历史以四条消息及窗口 20% 为目标，切分只能发生在完整工具批次之间；当前用户指令与未消费图片保留。过长历史按完整批次分段总结，明确的摘要输入溢出允许有限细分；单项过大、空摘要、截断摘要或没有容量收益时不提交。压缩本身带整体预算（`AgentCompactionBudget`，由会话创建一次并跨外层重试循环与所有分片共享）：一次压缩最多 24 次摘要调用、90 秒墙钟，超预算立即放弃并保留原始上下文（不把界面挂在没有反应的等待上），压缩调用的失败重试降为一次。安全切分点一次线性扫描求出，消息级 token 估算按消息对象缓存（对象就地改写时自动失效），窗口分类明细只在真正触发压缩时统计。
 
 摘要作为带有明确说明的 assistant 历史保存，不提升为系统指令。成功后重建模型上下文，保留系统约束及近期规范化消息；被压缩的原文始终保留在完整脱敏历史中，不用摘要覆盖。Responses 的旧 opaque output Items 不跨越压缩边界，也不跨 run、跨 Provider 持久化。
 

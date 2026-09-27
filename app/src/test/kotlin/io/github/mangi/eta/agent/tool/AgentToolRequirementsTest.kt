@@ -78,7 +78,7 @@ class AgentToolRequirementsTest {
         assertEquals(LsposedRequirement.OPTIONAL, AgentToolRequirements.find("search_coloros_memories")?.lsposedRequirement)
         assertEquals("ROOT_REQUIRED", AgentToolCapabilities(rootAvailable = false, lsposedAvailable = true)
             .unavailableCode("search_coloros_memories"))
-        assertEquals(null, AgentToolCapabilities(rootAvailable = true, lsposedAvailable = false)
+        assertEquals(null, AgentToolCapabilities(rootAvailable = true, lsposedAvailable = false, colorOs = true)
             .unavailableCode("search_coloros_memories"))
     }
 
@@ -86,7 +86,7 @@ class AgentToolRequirementsTest {
         terminalTools = true, browserTools = true, deviceDirectTools = true,
         deviceSensitiveReadTools = true, deviceSensitiveActionTools = true,
         skillGitHubDiscovery = true, skillGitHubInstall = true, memoryTools = true,
-        capabilities = AgentToolCapabilities(rootAvailable = root),
+        capabilities = AgentToolCapabilities.full(rootAvailable = root),
     )
 
     private fun JSONArray.names(): Set<String> = (0 until length()).mapTo(linkedSetOf()) {

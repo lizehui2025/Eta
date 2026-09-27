@@ -12,16 +12,23 @@ import io.github.mangi.eta.agent.device.RootAccess
 import java.util.Locale
 import org.json.JSONArray
 
-/** 每轮冻结的运行条件；不包含用户开关，也不触发授权请求。 */
+/**
+ * Per-round frozen runtime conditions; contains no user switches and triggers no permission requests.
+ *
+ * Defaults are all "unavailable / not granted". Capability projection must fail closed: a caller
+ * that forgets a condition publishes fewer tools rather than offering the model tools it cannot
+ * execute. Production may only use [capture] to sample real device state; an offline scenario that
+ * genuinely wants everything must say so with [full].
+ */
 internal data class AgentToolCapabilities(
     val rootAvailable: Boolean,
     val lsposedAvailable: Boolean = false,
-    val accessibilityAvailable: Boolean = true,
+    val accessibilityAvailable: Boolean = false,
     val accessibilityRecoveryAvailable: Boolean = false,
-    val notificationsAllowed: Boolean = true,
-    val usageAllowed: Boolean = true,
-    val locationAllowed: Boolean = true,
-    val colorOs: Boolean = true,
+    val notificationsAllowed: Boolean = false,
+    val usageAllowed: Boolean = false,
+    val locationAllowed: Boolean = false,
+    val colorOs: Boolean = false,
 ) {
     fun unavailableCode(name: String): String? {
         val requirement = AgentToolRequirements.find(name) ?: return "UNKNOWN_TOOL"
@@ -54,6 +61,33 @@ internal data class AgentToolCapabilities(
     }
 
     companion object {
+        /**
+         * Full-capability profile: every condition treated as available / granted.
+         *
+         * For tests, catalog assembly and explicitly declared offline scenarios only. Production must
+         * never use it to bypass real device state — that offers the model tools it cannot execute,
+         * and the user only finds out when execution fails.
+         */
+        fun full(
+            rootAvailable: Boolean = true,
+            lsposedAvailable: Boolean = false,
+            accessibilityAvailable: Boolean = true,
+            accessibilityRecoveryAvailable: Boolean = false,
+            notificationsAllowed: Boolean = true,
+            usageAllowed: Boolean = true,
+            locationAllowed: Boolean = true,
+            colorOs: Boolean = true,
+        ): AgentToolCapabilities = AgentToolCapabilities(
+            rootAvailable = rootAvailable,
+            lsposedAvailable = lsposedAvailable,
+            accessibilityAvailable = accessibilityAvailable,
+            accessibilityRecoveryAvailable = accessibilityRecoveryAvailable,
+            notificationsAllowed = notificationsAllowed,
+            usageAllowed = usageAllowed,
+            locationAllowed = locationAllowed,
+            colorOs = colorOs,
+        )
+
         fun isColorOsDevice(): Boolean = Build.MANUFACTURER.lowercase(Locale.ROOT) in
             setOf("oppo", "oneplus", "realme")
 

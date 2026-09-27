@@ -33,7 +33,7 @@ class ToolCatalogUiTest {
             skillGitHubDiscovery = true,
             skillGitHubInstall = true,
             memoryTools = true,
-            capabilities = AgentToolCapabilities(rootAvailable = true, lsposedAvailable = true),
+            capabilities = AgentToolCapabilities.full(rootAvailable = true, lsposedAvailable = true),
         )
         val runtimeNames = (0 until tools.length()).map {
             tools.getJSONObject(it).getJSONObject("function").getString("name")

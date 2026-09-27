@@ -81,7 +81,7 @@ Eta 本体可以读取项目、修改代码、运行命令并验证结果。如�
 
 使用 Eta 的 AI 功能需要自备模型服务的 **API Key**。内置 OpenAI、Anthropic、阿里百炼、DeepSeek、Kimi、MiMo、MiniMax、StepFun、硅基流动和 OpenRouter 等提供商配置，也可添加自定义服务。
 
-Provider 层支持 OpenAI-compatible Chat Completions、Responses API 和 Anthropic Messages，包括 SSE、Tool Calling、图片输入与推理内容。你可以自定义服务地址、请求头和请求体，拉取或手动添加模型，调整上下文长度与思考档位。具体能力取决于模型与接口，部分 Responses 提供商还可开启服务端网页搜索。
+Provider 层支持 OpenAI-compatible Chat Completions、Responses API 和 Anthropic Messages，包括 SSE、Tool Calling、图片输入与推理内容。你可以自定义服务地址、请求头和请求体，拉取或手动添加模型，调整上下文长度与思考档位。具体能力取决于模型与接口，部分 Responses 提供商还可开启服务端网页搜索。**API 协议不需要你选择**：同一个地址下 Chat Completions 与 Responses 由 Eta 按实际可用性自动裁决，端点不存在或返回了另一种协议的数据时会自动换协议重试并记住结果。
 
 提供商配置中的“自定义请求头”默认折叠，可添加、编辑和删除名称/值，保存后用于模型列表与对话请求；“测试连接”会使用尚未保存的配置。支持覆盖 `User-Agent`，认证和传输请求头仍由 Eta 管理。连接 OpenCode 官方端点时，Eta 自动发送每段对话稳定的 `x-opencode-session`，无需手动填写；默认客户端标识为 `Eta`。
 

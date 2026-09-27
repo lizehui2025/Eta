@@ -8,7 +8,6 @@ import io.github.mangi.eta.data.model.AnthropicProviderSetting
 import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.Model
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
-import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ProviderSetting
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.runtimeProviderType
@@ -99,8 +98,12 @@ internal object RuntimeConfigRepository {
             is CustomProviderSetting -> provider.endpointMode
             is AnthropicProviderSetting -> ""
         }
-        val inferOpenAiCatalog = sourceType == io.github.mangi.eta.data.model.ProviderSourceTypes.CUSTOM &&
-            endpointMode == OpenAiEndpointMode.RESPONSES
+        // Official-catalog inference no longer looks at "which protocol the user picked" — the
+        // protocol is not user-selectable any more. Relaxing it is safe: for OPENAI,
+        // catalogCapabilities matches only gpt-5.5 and gpt-5.6-*, and familyCapabilities has no
+        // OPENAI branch (it returns null), so opening this to every custom provider cannot tag
+        // unrelated models with reasoning capabilities.
+        val inferOpenAiCatalog = sourceType == io.github.mangi.eta.data.model.ProviderSourceTypes.CUSTOM
         val reasoningCapabilities = ReasoningCapabilityResolver.resolve(
             sourceType = if (inferOpenAiCatalog) {
                 io.github.mangi.eta.data.model.ProviderSourceTypes.OPENAI

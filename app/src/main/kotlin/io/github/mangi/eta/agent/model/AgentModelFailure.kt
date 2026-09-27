@@ -76,6 +76,19 @@ internal class AgentModelFailure(
 
         fun incompleteStream(message: String) = AgentModelFailure("STREAM_INCOMPLETE", true, message)
 
+        /**
+         * The endpoint returned data, but none of it is shaped for the current protocol: the baseUrl
+         * most likely points at a different API.
+         *
+         * Distinct from [incompleteStream]: truncation is transient (a retry may succeed), whereas a
+         * protocol mismatch would fail again against the same endpoint. This one is therefore
+         * non-retryable, and OpenAiMixedEndpointProvider retries the other endpoint once instead.
+         */
+        fun endpointProtocolMismatch(message: String) =
+            AgentModelFailure(CODE_ENDPOINT_PROTOCOL_MISMATCH, false, message)
+
+        const val CODE_ENDPOINT_PROTOCOL_MISMATCH = "ENDPOINT_PROTOCOL_MISMATCH"
+
         fun transport(failure: Exception): AgentModelFailure? = when (failure) {
             is AgentModelFailure -> failure
             is InterruptedIOException -> AgentModelFailure(

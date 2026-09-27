@@ -77,7 +77,7 @@ After installing Linux, Node.js, and Kimi Code in Eta, launch Kimi Web from the 
 
 Eta's AI features require **your own model-provider API key**. Built-in provider configurations include OpenAI, Anthropic, Alibaba Cloud Model Studio, DeepSeek, Kimi, MiMo, MiniMax, StepFun, SiliconFlow, and OpenRouter. You can also add custom services.
 
-The provider layer supports OpenAI-compatible Chat Completions, the Responses API, and Anthropic Messages, including SSE streaming, tool calling, image input, and reasoning content. Configure custom endpoints, headers, and request bodies; fetch model lists or add models manually; and override context windows and reasoning effort. Available features depend on the model and API. Some Responses providers also support server-side web search.
+The provider layer supports OpenAI-compatible Chat Completions, the Responses API, and Anthropic Messages, including SSE streaming, tool calling, image input, and reasoning content. Configure custom endpoints, headers, and request bodies; fetch model lists or add models manually; and override context windows and reasoning effort. Available features depend on the model and API. Some Responses providers also support server-side web search. **You never pick the API protocol**: for a given endpoint Eta decides between Chat Completions and Responses by what actually works, retrying with the other protocol when an endpoint is missing or answers in the other protocol's shape, and remembering the result.
 
 ## System assistant entry points
 

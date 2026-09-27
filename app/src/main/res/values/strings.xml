@@ -313,7 +313,6 @@
 - Long-term preferences:</string>
   <string name="ui_apk_analysis_95ad17">APK analysis</string>
   <string name="ui_agent_and_local_tools_can_still_be_used_but_the_syst_b14479">Agent and local tools remain available. System assistant takeover, Gemini, and Circle to Search settings cannot be changed right now.</string>
-  <string name="ui_endpoint_mode_3c8546">Endpoint mode</string>
   <string name="ui_eta_system_assistant_003e9b">Digital assistant app</string>
   <string name="ui_lsposed_service_is_not_connected_44734d">LSPosed service is not connected</string>
   <string name="ui_linux_tool_environment_314d22">Linux tool environment</string>
@@ -328,7 +327,7 @@
   <string name="ui_preferences_and_strategies_2abd3c">Preferences and Strategies</string>
   <string name="ui_stop_a17f70">stop</string>
   <string name="ui_allow_sensitive_device_operation_3d42ea">Allow sensitive device operation</string>
-  <string name="ui_allows_the_model_to_call_web_searches_provided_by_th_2f752f">Allows the model to call web searches provided by the Provider</string>
+  <string name="ui_allows_the_model_to_call_web_searches_provided_by_th_2f752f">Allows the model to call web searches provided by the Provider. Requires an endpoint that supports the Responses API; Eta prefers it when this is on</string>
   <string name="ui_allow_reading_of_sensitive_device_information_feaec0">Allow reading of sensitive device information</string>
   <string name="ui_about_bed172">about</string>
   <string name="ui_after_closing_no_memory_will_be_injected_and_the_mod_db3d23">After closing, no memory will be injected, and the model will not be allowed to read or write; existing content will be retained.</string>
@@ -682,8 +681,6 @@
   <string name="page_this_message_and_subsequent_content_will_be_replaced_086779">This message and subsequent content will be replaced after sending</string>
   <string name="page_this_message_will_be_replaced_after_sending_fb95e4">This message will be replaced after sending</string>
   <string name="page_unauthorized_86bddc">Unauthorized</string>
-  <string name="page_use_standard_chat_completions_ee4b1a">Uses the Chat Completions API</string>
-  <string name="page_using_typed_items_with_semantic_streaming_events_f9c906">Uses the Responses API with typed Items and semantic streaming events</string>
   <string name="injected_reasoning">Eta is reasoning…</string>
   <string name="injected_executing">Eta is working…</string>
   <string name="injected_completed">Eta completed this task</string>

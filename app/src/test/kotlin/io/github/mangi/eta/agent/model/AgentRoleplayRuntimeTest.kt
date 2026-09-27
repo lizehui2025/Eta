@@ -5,6 +5,7 @@ import io.github.mangi.eta.agent.roleplay.CharacterCardCodec
 import io.github.mangi.eta.agent.roleplay.CharacterMemoryTools
 import io.github.mangi.eta.agent.roleplay.RoleplayRunContext
 import io.github.mangi.eta.agent.runtime.AgentRunController
+import io.github.mangi.eta.agent.tool.AgentToolCapabilities
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -50,6 +51,9 @@ class AgentRoleplayRuntimeTest {
         }
         val response = AgentModelClient.complete(
             config = config(), prompt = "同行", roleplayContext = context,
+            // Capability defaults are fail-closed now: this case verifies that role sessions keep
+            // their foreground tools, so availability has to be declared explicitly.
+            capabilitiesProvider = { AgentToolCapabilities.full(rootAvailable = false) },
             memoryContext = AgentMemoryContextBuilder.empty(null),
             additionalTools = JSONArray().also(CharacterMemoryTools::appendSchemas),
             provider = provider, toolExecutor = { error("本次不应执行工具") },

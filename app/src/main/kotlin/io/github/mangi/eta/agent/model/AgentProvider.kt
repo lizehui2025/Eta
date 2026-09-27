@@ -37,6 +37,19 @@ internal enum class ProviderRequestPurpose {
     CHAT, COMPACTION, REPLY_REWRITE;
 
     val allowsTools: Boolean get() = this == CHAT
+
+    /**
+     * Failure message used when a non-tool purpose still requests tools.
+     *
+     * These purposes disable local tools outright, so the message must name the purpose involved;
+     * reporting every case as "reply rewriting" would describe something that never happened.
+     */
+    val noToolsFailureMessage: String
+        get() = when (this) {
+            CHAT -> ""
+            COMPACTION -> "上下文压缩请求了工具调用，已停止；本次摘要未提交，原始上下文已保留。"
+            REPLY_REWRITE -> "改写回复时模型请求了工具，已停止；原回复未改变。"
+        }
 }
 
 internal data class ProviderRequest(
