@@ -12,6 +12,8 @@ internal class AgentContextBudget(private val window: Int?) {
     private var lastRealInput: Int? = null
     /** 产生上轮真实值的那次请求的本地估算（raw 口径），用于计算本轮新增增量。 */
     private var lastEstimateAtObserve = 0
+    /** Provider 回传的 prompt cache 命中率（平滑值）；无样本时按可用处理。 */
+    private var cacheHitRate: Double? = null
 
     fun observe(usage: AgentTokenUsage?, requestEstimate: Int) {
         val input = usage?.inputTokens ?: usage?.contextTokens ?: return
@@ -23,6 +25,11 @@ internal class AgentContextBudget(private val window: Int?) {
             // 此前单次采样直接覆盖（最高 8 倍），一轮 provider 计数口径差异就会让后续估算虚高、
             // 提前触发本不该发生的上下文压缩；多轮后仍会收敛到真实比例。
             calibration = ((calibration * 2 + sample) / 3).coerceIn(1.0, 4.0)
+        }
+        val cached = usage?.cachedTokens
+        if (cached != null && input > 0) {
+            val sample = (cached.toDouble() / input).coerceIn(0.0, 1.0)
+            cacheHitRate = cacheHitRate?.let { (it * 2 + sample) / 3 } ?: sample
         }
     }
 
@@ -164,7 +171,7 @@ internal class AgentContextBudget(private val window: Int?) {
 
     fun shouldCompact(tokens: Int): Boolean {
         val w = window?.takeIf { it > 0 } ?: FALLBACK_WINDOW_TOKENS
-        return tokens >= w * TRIGGER_RATIO
+        return tokens >= w * triggerRatio()
     }
 
     fun exceedsWindow(tokens: Int): Boolean {
@@ -172,8 +179,16 @@ internal class AgentContextBudget(private val window: Int?) {
         return tokens >= w
     }
 
+    /** 低缓存命中时更早压缩，减少每轮重复发送接近满窗的历史。 */
+    fun triggerRatio(): Double =
+        if ((cacheHitRate ?: 1.0) < LOW_CACHE_HIT_THRESHOLD) LOW_CACHE_TRIGGER_RATIO else TRIGGER_RATIO
+
+    fun cacheHitRate(): Double? = cacheHitRate
+
     companion object {
         const val TRIGGER_RATIO = 0.85
+        const val LOW_CACHE_TRIGGER_RATIO = 0.70
+        const val LOW_CACHE_HIT_THRESHOLD = 0.50
         const val RECENT_MESSAGES = 4
         const val RECENT_RATIO = 0.20
         const val MAX_OVERFLOW_ATTEMPTS = 3

@@ -9,7 +9,11 @@ internal object OpenAiRequestMessages {
      * [stripReasoning] 默认 false，投影结果与历史实现逐字节一致；只有 provider 在服务端明确
      * 拒绝回传历史 `reasoning_content`（跨模型切换后最常见）时才置 true 重试一次。
      */
-    fun forChatCompletions(source: JSONArray, stripReasoning: Boolean = false): JSONArray {
+    fun forChatCompletions(
+        source: JSONArray,
+        stripReasoning: Boolean = false,
+        cache: AgentRequestProjectionCache? = null,
+    ): JSONArray {
         val system = collectInstructions(source, SYSTEM_ROLES)
         return JSONArray().also { messages ->
             if (system.isNotBlank()) {
@@ -17,22 +21,30 @@ internal object OpenAiRequestMessages {
             }
             for (index in 0 until source.length()) {
                 val message = source.optJSONObject(index) ?: continue
-                if (message.optString("role") !in SYSTEM_ROLES) messages.put(shallowCopy(message).apply {
-                    remove("_eta_context_summary")
-                    remove("_eta_compacted_users")
-                    remove("_eta_summary_through_user")
-                    remove("_eta_observation")
-                    remove("_eta_message_id")
-                    remove("_eta_character_profile")
-                    remove(ResponsesEphemeralState.OUTPUT_ITEMS_KEY)
-                    // 跨模型兼容：思考文本由上一模型写入并被 codec 持久化进历史，部分服务端
-                    // （如 DeepSeek 官方）不接受回传 reasoning_content，会直接 400。默认保留，
-                    // 与服务端是否支持无关，只在收到该类拒绝后由 provider 显式开启剥离。
-                    if (stripReasoning) remove(HISTORY_REASONING_CONTENT_KEY)
-                })
+                if (message.optString("role") !in SYSTEM_ROLES) {
+                    val projected = cache?.chatMessage(message, stripReasoning) {
+                        projectChatMessage(it, stripReasoning)
+                    } ?: projectChatMessage(message, stripReasoning)
+                    messages.put(projected)
+                }
             }
         }
     }
+
+    internal fun projectChatMessage(message: JSONObject, stripReasoning: Boolean): JSONObject =
+        shallowCopy(message).apply {
+            remove("_eta_context_summary")
+            remove("_eta_compacted_users")
+            remove("_eta_summary_through_user")
+            remove("_eta_observation")
+            remove("_eta_message_id")
+            remove("_eta_character_profile")
+            remove(ResponsesEphemeralState.OUTPUT_ITEMS_KEY)
+            // 跨模型兼容：思考文本由上一模型写入并被 codec 持久化进历史，部分服务端
+            // （如 DeepSeek 官方）不接受回传 reasoning_content，会直接 400。默认保留，
+            // 与服务端是否支持无关，只在收到该类拒绝后由 provider 显式开启剥离。
+            if (stripReasoning) remove(HISTORY_REASONING_CONTENT_KEY)
+        }
 
     /**
      * 顶层浅拷贝：新对象、新键表，值沿用原引用。

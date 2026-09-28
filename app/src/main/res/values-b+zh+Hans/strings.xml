@@ -351,6 +351,8 @@
   <string name="ui_enable_vendor_assistant_custom_models_c8e465">启用厂商助手自定义模型</string>
   <string name="ui_enable_this_provider_683a76">启用此 Provider</string>
   <string name="ui_enable_terminal_file_tools_18bb43">启用终端/文件工具</string>
+  <string name="settings_always_on_keep_alive_title">始终保活 Agent Runtime</string>
+  <string name="settings_always_on_keep_alive_summary">默认关闭：仅在任务运行或等待结果期间保活。开启后入口更易随时可用，但会增加后台周期唤醒与电量消耗。</string>
   <string name="ui_enable_web_browsing_tools_8b6b03">启用网页浏览工具</string>
   <string name="ui_enable_memory_4b69b7">启用记忆</string>
   <string name="ui_enable_device_direct_tools_e2d595">启用设备直达工具</string>

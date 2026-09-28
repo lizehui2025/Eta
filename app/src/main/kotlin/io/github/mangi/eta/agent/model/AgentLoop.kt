@@ -4,6 +4,7 @@ import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
 import io.github.mangi.eta.agent.roleplay.RoleplayRunContext
+import io.github.mangi.eta.agent.tool.AgentToolRequirements
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -24,19 +25,21 @@ internal class AgentLoop(
     private val traceFormatter: AgentTraceFormatter,
     private val onEvent: (AgentEvent) -> Unit,
     private val toolsForRound: (() -> JSONArray)? = null,
-    private val modelRetry: AgentModelRetry = AgentModelRetry(),
+    private val modelRetry: AgentModelRetry = AgentModelRetry(delayTransform = ::defaultRetryJitter),
     private val sessionId: String = java.util.UUID.randomUUID().toString(),
     private val transcript: JSONArray = JSONArray(),
     private val systemCount: Int = 0,
     private val operationId: String = sessionId,
     private val onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
-    private val onTranscript: (List<AgentModelClient.ConversationMessage>) -> Unit = {},
+    private val onTranscript: (AgentTranscriptPublisher.PublishResult) -> Unit = {},
     private val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
     private val roleplayContext: RoleplayRunContext? = null,
     initialSupplementIndex: Int = 0,
     private val subagentHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
     private val todoHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
     private val askUserHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
+    private val toolBatchExecutor: AgentToolBatchExecutor = AgentToolBatchExecutor(),
+    private val projectionCache: AgentRequestProjectionCache = AgentRequestProjectionCache(),
 ) {
     data class Result(
         val content: String,
@@ -78,15 +81,13 @@ internal class AgentLoop(
         transcript.put(message)
     }
 
-    private var publishedTranscriptSize = 0
-
     /** transcript 只追加；发布只转换新增部分，避免每轮整份重转导致的平方增长。 */
     private val transcriptPublisher = AgentTranscriptPublisher { sensitiveToolCallIds }
 
     private fun publishTranscript() {
-        if (publishedTranscriptSize == transcript.length()) return
-        onTranscript(transcriptPublisher.publish(transcript).toList())
-        publishedTranscriptSize = transcript.length()
+        val result = transcriptPublisher.publish(transcript)
+        if (result.messages.isEmpty() && !result.fullRebuild) return
+        onTranscript(result)
     }
 
     fun compactOnly(): Result {
@@ -126,7 +127,14 @@ internal class AgentLoop(
                     try {
                         val response = modelRetry.complete(
                             initialRound = round,
-                            request = ProviderRequest(config, requestMessages, roundTools, sessionId, purpose),
+                            request = ProviderRequest(
+                                config = config,
+                                messages = requestMessages,
+                                tools = roundTools,
+                                sessionId = sessionId,
+                                purpose = purpose,
+                                projectionCache = projectionCache,
+                            ),
                             provider = provider,
                             controller = runController,
                             onEvent = onEvent,
@@ -210,20 +218,29 @@ internal class AgentLoop(
             )
 
             if (toolCalls.isNotEmpty()) {
-                val outcomes = toolCalls.map { call ->
-                    val outcome = when (providerResponse.stopReason) {
-                        AssistantStopReason.TOOL_USE -> executeTool(round, call)
-                        AssistantStopReason.OUTPUT_LIMIT -> rejectedToolOutcome(
-                            round, call, "TRUNCATED_TOOL_CALL",
-                            "模型输出达到长度上限，工具参数可能不完整；本次调用未执行，请重新提交完整参数。",
-                        )
-                        else -> rejectedToolOutcome(
-                            round, call, "UNEXPECTED_TOOL_CALL",
-                            "模型在 ${providerResponse.stopReason.name} 终止状态下返回了工具调用；本批调用未执行，请重新规划。",
-                        )
+                val outcomes = if (providerResponse.stopReason == AssistantStopReason.TOOL_USE) {
+                    toolBatchExecutor.execute(
+                        items = toolCalls,
+                        parallelSafe = { call -> AgentToolRequirements.isParallelReadOnly(call.name) },
+                        execute = { call -> executeTool(round, call) },
+                    )
+                } else {
+                    toolCalls.map { call ->
+                        if (providerResponse.stopReason == AssistantStopReason.OUTPUT_LIMIT) {
+                            rejectedToolOutcome(
+                                round, call, "TRUNCATED_TOOL_CALL",
+                                "模型输出达到长度上限，工具参数可能不完整；本次调用未执行，请重新提交完整参数。",
+                            )
+                        } else {
+                            rejectedToolOutcome(
+                                round, call, "UNEXPECTED_TOOL_CALL",
+                                "模型在 ${providerResponse.stopReason.name} 终止状态下返回了工具调用；本批调用未执行，请重新规划。",
+                            )
+                        }
                     }
+                }
+                outcomes.forEach { outcome ->
                     appendMessage(AgentConversationCodec.toolResultMessage(outcome.call, outcome.result))
-                    outcome
                 }
                 // Publish the batch's tool results once: publishing per tool would refresh the UI
                 // once per tool, and the intermediate state (only some tool results written)

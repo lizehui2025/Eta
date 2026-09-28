@@ -12,7 +12,10 @@ class KeepAliveReceiver : BroadcastReceiver() {
             // AgentRuntimeService 不调用 startForeground：必须使用 startService。
             // startForegroundService 要求服务在 5 秒内进入前台，否则系统抛出
             // RemoteServiceException 杀死整个进程；闹钟触发时应用处于临时允许名单，startService 可用。
-            context.startService(Intent(context, AgentRuntimeService::class.java))
+        context.startService(
+            Intent(context, AgentRuntimeService::class.java)
+                .setAction(AgentRuntimeService.ACTION_KEEP_ALIVE),
+        )
         } catch (failure: RuntimeException) {
             AndroidAgentLogger.warn("KeepAlive receiver failed: type=${failure.javaClass.simpleName}")
         }

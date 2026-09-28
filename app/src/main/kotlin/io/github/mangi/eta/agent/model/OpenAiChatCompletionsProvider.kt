@@ -7,7 +7,6 @@ import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -63,20 +62,20 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             } else {
                 null
             }
-            val requestBody = buildRequestJson(
+            val requestJson = buildRequestJson(
                 config,
                 request.messages,
                 request.effectiveTools,
                 promptCacheKey,
                 stripReasoning,
+                request.projectionCache,
             ).apply {
                 if (!request.purpose.allowsTools) {
                     remove("tools")
                     remove("tool_choice")
                 }
             }
-                .toString()
-                .toRequestBody(JSON_MEDIA_TYPE)
+            val requestBody = AgentJsonRequestBody(requestJson, JSON_MEDIA_TYPE)
 
             val httpRequest = Request.Builder()
                 .url(url)
@@ -84,7 +83,7 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
                 .post(requestBody)
                 .build()
 
-            val call = AgentHttpClient.modelClient.newCall(httpRequest)
+            val call = AgentHttpClient.modelClientFor(request.purpose).newCall(httpRequest)
             val binding = runController.register { call.cancel() }
             var retryWithoutCacheKey = false
             var retryWithoutReasoningContent = false
@@ -163,7 +162,8 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
         messages: JSONArray,
         tools: JSONArray,
         promptCacheKey: String?,
-        stripReasoning: Boolean
+        stripReasoning: Boolean,
+        projectionCache: AgentRequestProjectionCache,
     ): JSONObject {
         val sourceType = ProviderSourceRegistry.resolve(
             providerId = config.providerId,
@@ -174,7 +174,14 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
         return JSONObject()
             .put("model", config.model)
             .put("stream", true)
-            .put("messages", OpenAiRequestMessages.forChatCompletions(messages, stripReasoning))
+            .put(
+                "messages",
+                OpenAiRequestMessages.forChatCompletions(
+                    messages,
+                    stripReasoning,
+                    cache = projectionCache,
+                ),
+            )
             .put("tools", tools)
             .put("tool_choice", "auto")
             .also { request ->

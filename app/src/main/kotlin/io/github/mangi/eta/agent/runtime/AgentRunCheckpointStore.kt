@@ -5,6 +5,7 @@ import io.github.mangi.eta.agent.model.AgentContextSnapshot
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentToolBatchRecovery
+import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.db.EtaDatabase
 import io.github.mangi.eta.data.db.RuntimeInFlightEventEntity
 import io.github.mangi.eta.data.db.RuntimeInFlightRunEntity
@@ -127,7 +128,39 @@ internal object AgentRunCheckpointStore {
     fun saveTranscript(context: Context, runId: String, transcript: List<AgentModelClient.ConversationMessage>) {
         runBlocking(Dispatchers.IO) {
             EtaDatabase.get(context.applicationContext).runtimeRunDao()
-                .updateTranscript(runId, AgentConversationCodec.encodeTranscriptForStorage(transcript))
+                .appendTranscript(runId, transcript, fullRebuild = true)
+        }
+    }
+
+    /**
+     * 追加本次发布产生的 transcript 增量。
+     *
+     * 正常路径只写新增消息分块；[fullRebuild] 为 true 时表示前缀已变化，需要整体替换。
+     */
+    fun appendTranscript(
+        context: Context,
+        runId: String,
+        messages: List<AgentModelClient.ConversationMessage>,
+        fullRebuild: Boolean,
+    ) {
+        if (messages.isEmpty() && !fullRebuild) return
+        AndroidAgentLogger.debug {
+            "Agent checkpoint transcript publish: messages=${messages.size}, full_rebuild=$fullRebuild"
+        }
+        runBlocking(Dispatchers.IO) {
+            EtaDatabase.get(context.applicationContext).runtimeRunDao()
+                .appendTranscript(runId, messages, fullRebuild)
+        }
+    }
+
+    /** 定向读取单个 run 的事件；attach 的 DB 回放使用，避免扫描全部在途 checkpoint。 */
+    fun eventsForRun(context: Context, runId: String): List<AgentEvent> {
+        if (runId.isBlank()) return emptyList()
+        return runBlocking(Dispatchers.IO) {
+            EtaDatabase.get(context.applicationContext)
+                .runtimeRunDao()
+                .inFlightEvents(runId)
+                .mapNotNull { AgentEventJsonCodec.decode(it.eventJson) }
         }
     }
 

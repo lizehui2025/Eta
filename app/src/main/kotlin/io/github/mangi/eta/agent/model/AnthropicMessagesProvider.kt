@@ -5,7 +5,6 @@ import io.github.mangi.eta.agent.runtime.AgentTokenUsage
 import java.io.InputStream
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -48,14 +47,19 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
             val httpRequest = Request.Builder()
                 .url(ProviderUrls.anthropicMessagesUrl(config.baseUrl))
                 .headers(headers)
-                .post(
-                    buildRequestJson(config, request.messages, request.effectiveTools, useCacheControl)
-                        .toString()
-                        .toRequestBody(JSON_MEDIA_TYPE)
-                )
+                .post(AgentJsonRequestBody(
+                    buildRequestJson(
+                        config = config,
+                        messages = request.messages,
+                        tools = request.effectiveTools,
+                        cacheControl = useCacheControl,
+                        projectionCache = request.projectionCache,
+                    ),
+                    JSON_MEDIA_TYPE,
+                ))
                 .build()
 
-            val call = AgentHttpClient.modelClient.newCall(httpRequest)
+            val call = AgentHttpClient.modelClientFor(request.purpose).newCall(httpRequest)
             val binding = runController.register { call.cancel() }
             var retryWithoutCacheControl = false
             try {
@@ -107,7 +111,8 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
         config: AgentModelClient.ModelConfig,
         messages: JSONArray,
         tools: JSONArray,
-        cacheControl: Boolean
+        cacheControl: Boolean,
+        projectionCache: AgentRequestProjectionCache = AgentRequestProjectionCache(),
     ): JSONObject {
         val systemParts = mutableListOf<String>()
         val anthropicMessages = JSONArray()
@@ -118,27 +123,33 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                     .takeIf { it.isNotBlank() }
                     ?.let(systemParts::add)
                 "user" -> anthropicMessages.put(
-                    JSONObject()
-                        .put("role", "user")
-                        .put("content", convertUserContent(message.opt("content")))
+                    projectionCache.anthropicMessage(message, cacheControl) {
+                        JSONObject()
+                            .put("role", "user")
+                            .put("content", convertUserContent(it.opt("content")))
+                    },
                 )
                 "assistant" -> anthropicMessages.put(
-                    JSONObject()
-                        .put("role", "assistant")
-                        .put("content", convertAssistantContent(message))
+                    projectionCache.anthropicMessage(message, cacheControl) {
+                        JSONObject()
+                            .put("role", "assistant")
+                            .put("content", convertAssistantContent(it))
+                    },
                 )
                 "tool" -> anthropicMessages.put(
-                    JSONObject()
-                        .put("role", "user")
-                        .put(
-                            "content",
-                            JSONArray().put(
-                                JSONObject()
-                                    .put("type", "tool_result")
-                                    .put("tool_use_id", message.optString("tool_call_id"))
-                                    .put("content", message.optString("content"))
+                    projectionCache.anthropicMessage(message, cacheControl) {
+                        JSONObject()
+                            .put("role", "user")
+                            .put(
+                                "content",
+                                JSONArray().put(
+                                    JSONObject()
+                                        .put("type", "tool_result")
+                                        .put("tool_use_id", it.optString("tool_call_id"))
+                                        .put("content", it.optString("content"))
+                                )
                             )
-                        )
+                    },
                 )
             }
         }

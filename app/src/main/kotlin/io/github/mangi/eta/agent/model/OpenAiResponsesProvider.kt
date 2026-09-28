@@ -5,7 +5,6 @@ import io.github.mangi.eta.agent.runtime.AgentTokenUsage
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -50,15 +49,22 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             } else {
                 null
             }
-            val body = buildRequestJson(config, request.messages, request.effectiveTools, promptCacheKey)
-                .toString()
-                .toRequestBody(JSON_MEDIA_TYPE)
+            val body = AgentJsonRequestBody(
+                buildRequestJson(
+                    config = config,
+                    messages = request.messages,
+                    tools = request.effectiveTools,
+                    promptCacheKey = promptCacheKey,
+                    projectionCache = request.projectionCache,
+                ),
+                JSON_MEDIA_TYPE,
+            )
             val httpRequest = Request.Builder()
                 .url(ProviderUrls.openAiResponsesUrl(config.baseUrl))
                 .headers(headers)
                 .post(body)
                 .build()
-            val call = AgentHttpClient.modelClient.newCall(httpRequest)
+            val call = AgentHttpClient.modelClientFor(request.purpose).newCall(httpRequest)
             val binding = runController.register(call::cancel)
             var retryWithoutCacheKey = false
 
@@ -115,6 +121,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         messages: JSONArray,
         tools: JSONArray,
         promptCacheKey: String? = null,
+        projectionCache: AgentRequestProjectionCache = AgentRequestProjectionCache(),
     ): JSONObject = ResponsesRequestBuilder.build(
         config,
         messages,
@@ -122,6 +129,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         promptCacheKey,
         config.requestOptions,
         config.codingMode,
+        projectionCache,
     )
 
     private fun readStreamingResponse(

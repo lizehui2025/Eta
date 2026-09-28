@@ -17,6 +17,12 @@ internal data class AgentTextChunkEntity(
     val content: String,
 )
 
+/** 追加/替换分块后的实际写入统计，供 transcript 引用串与调试日志使用。 */
+internal data class TextChunkAppendResult(
+    val chunkCount: Int,
+    val charCount: Int,
+)
+
 /** 由业务 DAO 在同一 Room 事务内写入主记录与分块，不暴露存储引用给领域层。 */
 internal interface ChunkedTextDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -141,6 +147,45 @@ internal interface ChunkedTextDao {
         return "$REFERENCE_PREFIX$count:$length"
     }
 
+    /**
+     * 从 [startIndex] 开始追加分块，不删除已有正文。
+     *
+     * transcript 采用“分块只追加”的持久化方式后，单次发布只需要写入新增消息对应的尾部
+     * 分块；长任务不再为每条新增消息重写整份历史。分块边界只用于控制单行大小，调用方
+     * 读取时按 index 拼回原文即可。
+     */
+    suspend fun appendTextChunks(
+        table: String,
+        owner: String,
+        field: String,
+        startIndex: Int,
+        pieces: Sequence<String>,
+    ): TextChunkAppendResult {
+        val buffer = StringBuilder()
+        var nextIndex = startIndex
+        var charCount = 0
+
+        suspend fun flush(force: Boolean) {
+            while (buffer.length > CHUNK_CHARS || (force && buffer.isNotEmpty())) {
+                var end = minOf(CHUNK_CHARS, buffer.length)
+                if (end < buffer.length && buffer[end - 1].isHighSurrogate()) end--
+                insertTextChunk(AgentTextChunkEntity(table, owner, field, nextIndex++, buffer.substring(0, end)))
+                buffer.delete(0, end)
+            }
+        }
+
+        for (piece in pieces) {
+            charCount += piece.length
+            buffer.append(piece)
+            flush(force = false)
+        }
+        flush(force = true)
+        return TextChunkAppendResult(
+            chunkCount = nextIndex - startIndex,
+            charCount = charCount,
+        )
+    }
+
     suspend fun restoreText(table: String, owner: String, field: String, stored: String): String {
         // 只有严格等于 "@eta:chunks:v1:<count>:<length>"（两段非负整数、无多余冒号或空白）才按分块引用恢复；
         // 其余以 REFERENCE_PREFIX 开头的历史文本一律原样返回，避免 ≤16 KiB 的遗留正文被误判为引用。
@@ -194,7 +239,7 @@ internal interface ChunkedTextDao {
     suspend fun corruptedOriginalRef(table: String, owner: String, field: String): String?
 
     companion object {
-        private const val CHUNK_CHARS = 16_384
+        internal const val CHUNK_CHARS = 16_384
         const val REFERENCE_PREFIX = "@eta:chunks:v1:"
 
         /**

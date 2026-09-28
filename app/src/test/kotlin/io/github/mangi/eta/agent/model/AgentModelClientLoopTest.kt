@@ -17,7 +17,7 @@ class AgentModelClientLoopTest {
     fun eachRoundUsesOneCapabilitySnapshotForDeclarationValidationAndPrompt() {
         var root = true
         var captures = 0
-        val executed = mutableListOf<String>()
+        val executed = java.util.concurrent.CopyOnWriteArrayList<String>()
         val provider = ScriptedProvider(listOf(
             { request, _ ->
                 assertTrue(request.tools.toString().contains("set_setting"))
@@ -64,7 +64,7 @@ class AgentModelClientLoopTest {
             assistant(finishReason = "tool_calls", toolCalls = listOf(toolCall("c2", "get_current_context", "{}"))),
             assistant(content = "完成", finishReason = "stop"),
         )
-        val published = mutableListOf<List<AgentModelClient.ConversationMessage>>()
+        val published = mutableListOf<AgentTranscriptPublisher.PublishResult>()
         val result = AgentModelClient.complete(
             config = modelConfig().copy(terminalTools = true),
             prompt = "开始",
@@ -94,11 +94,17 @@ class AgentModelClientLoopTest {
 
         // transcript 发布必须是单调追加，且每次都等于"整份重转"的结果。
         assertEquals("完成", result.transcript.last().content)
-        published.forEachIndexed { index, snapshot ->
+        val snapshots = mutableListOf<List<AgentModelClient.ConversationMessage>>()
+        var snapshot = emptyList<AgentModelClient.ConversationMessage>()
+        published.forEach { publish ->
+            snapshot = if (publish.fullRebuild) publish.messages else snapshot + publish.messages
+            snapshots += snapshot
+        }
+        snapshots.forEachIndexed { index, current ->
             if (index == 0) return@forEachIndexed
-            val previous = published[index - 1]
-            assertTrue("已发布的 transcript 不能变短", snapshot.size >= previous.size)
-            assertEquals("已发布的前缀不能被改写", previous, snapshot.take(previous.size))
+            val previous = snapshots[index - 1]
+            assertTrue("已发布的 transcript 不能变短", current.size >= previous.size)
+            assertEquals("已发布的前缀不能被改写", previous, current.take(previous.size))
         }
     }
 
@@ -156,7 +162,7 @@ class AgentModelClientLoopTest {
             provider = provider,
         )
 
-        assertEquals(listOf("call-1", "call-2"), executed)
+        assertEquals(setOf("call-1", "call-2"), executed.toSet())
         assertEquals("需要两个结果", result.reasoningContent)
         assertEquals(
             listOf("assistant", "tool", "tool", "assistant"),

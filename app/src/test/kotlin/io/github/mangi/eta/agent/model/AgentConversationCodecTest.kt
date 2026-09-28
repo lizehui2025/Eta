@@ -110,6 +110,26 @@ class AgentConversationCodecTest {
     }
 
     @Test
+    fun transcriptInnerPiecesAppendToTheSameJsonAsFullEncoding() {
+        val first = listOf(
+            AgentModelClient.ConversationMessage(role = "user", content = "第一问"),
+            AgentModelClient.ConversationMessage(role = "assistant", content = "第一答"),
+        )
+        val second = listOf(
+            AgentModelClient.ConversationMessage(role = "user", content = "第二问"),
+        )
+        val firstInner = AgentConversationCodec.transcriptInnerPieces(first, prependComma = false)
+            .joinToString("")
+        val secondInner = AgentConversationCodec.transcriptInnerPieces(second, prependComma = true)
+            .joinToString("")
+
+        assertEquals(
+            AgentConversationCodec.encodeTranscriptForStorage(first + second),
+            "[$firstInner$secondInner]",
+        )
+    }
+
+    @Test
     fun responsesOutputItemsPersistInStableTranscriptForNonSensitiveMessages() {
         val source = JSONObject().put("role", "assistant").put("content", "完成")
         ResponsesEphemeralState.attachOutputItems(

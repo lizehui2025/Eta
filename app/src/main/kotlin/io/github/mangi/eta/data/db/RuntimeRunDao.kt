@@ -6,6 +6,9 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Upsert
+import io.github.mangi.eta.agent.model.AgentConversationCodec
+import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.core.AndroidAgentLogger
 
 @Dao
 internal interface RuntimeRunDao : ChunkedTextDao {
@@ -25,7 +28,7 @@ internal interface RuntimeRunDao : ChunkedTextDao {
     )
 
     suspend fun restoreInFlightRun(row: RuntimeInFlightRunEntity): RuntimeInFlightRunEntity = row.copy(
-        transcriptJson = restoreText("runtime_inflight_runs", row.runId, "transcriptJson", row.transcriptJson),
+        transcriptJson = restoreInFlightTranscript(row.runId, row.transcriptJson),
         contextSnapshotJson = restoreText("runtime_inflight_runs", row.runId, "contextSnapshotJson", row.contextSnapshotJson),
     )
 
@@ -45,10 +48,173 @@ internal interface RuntimeRunDao : ChunkedTextDao {
     @Query("UPDATE runtime_inflight_runs SET transcript_json = :transcript WHERE run_id = :runId")
     suspend fun updateTranscriptRow(runId: String, transcript: String)
 
+    @Query("UPDATE runtime_inflight_runs SET transcript_json = :transcript, updated_at = :updatedAt WHERE run_id = :runId")
+    suspend fun updateTranscriptRow(runId: String, transcript: String, updatedAt: Long)
+
+    @Query("SELECT transcript_json FROM runtime_inflight_runs WHERE run_id = :runId")
+    suspend fun inFlightTranscriptReference(runId: String): String?
+
     @Transaction
     suspend fun updateTranscript(runId: String, transcript: String) {
         if (!hasInFlightRun(runId)) return
         updateTranscriptRow(runId, storeText("runtime_inflight_runs", runId, "transcriptJson", transcript))
+    }
+
+    /**
+     * 追加式 transcript 写入。
+     *
+     * 正常路径只写新增消息对应的尾部分块；full rebuild、旧格式迁移和损坏/缺失引用才整体重写。
+     * 这里使用新的 `@eta:transcript:v1:` 引用格式，它与旧 `@eta:chunks:v1:` 格式共存，
+     * 因而旧在途 run 仍可按原路径恢复。
+     */
+    @Transaction
+    suspend fun appendTranscript(
+        runId: String,
+        messages: List<AgentModelClient.ConversationMessage>,
+        fullRebuild: Boolean,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        if (!hasInFlightRun(runId)) return
+        val existingReference = inFlightTranscriptReference(runId)
+        val existingMatch = existingReference?.let(TRANSCRIPT_REFERENCE_PATTERN::matchEntire)
+
+        if (fullRebuild) {
+            replaceTranscript(runId, messages, now)
+            return
+        }
+        if (existingMatch == null) {
+            val combined = if (existingReference.isNullOrBlank() || existingReference == "[]") {
+                messages
+            } else {
+                val legacy = restoreText(
+                    table = "runtime_inflight_runs",
+                    owner = runId,
+                    field = "transcriptJson",
+                    stored = existingReference,
+                )
+                runCatching { AgentConversationCodec.decodeTranscript(legacy) }
+                    .getOrElse { throwable ->
+                        AndroidAgentLogger.warnThrottled("runtime_transcript_legacy_migration_failed") {
+                            "Runtime transcript legacy migration failed: type=${throwable.javaClass.simpleName}"
+                        }
+                        emptyList()
+                    } + messages
+            }
+            replaceTranscript(runId, combined, now)
+            return
+        }
+
+        if (messages.isEmpty()) return
+        val previousChunks = existingMatch.groupValues[1].toIntOrNull() ?: return
+        val previousLength = existingMatch.groupValues[2].toIntOrNull() ?: return
+        val previousMessages = existingMatch.groupValues[3].toIntOrNull() ?: return
+        val appended = appendTextChunks(
+            table = IN_FLIGHT_TABLE,
+            owner = runId,
+            field = TRANSCRIPT_FIELD,
+            startIndex = previousChunks,
+            pieces = AgentConversationCodec.transcriptInnerPieces(
+                messages = messages,
+                prependComma = previousMessages > 0,
+            ),
+        )
+        updateTranscriptRow(
+            runId = runId,
+            transcript = transcriptReference(
+                chunks = previousChunks + appended.chunkCount,
+                length = previousLength + appended.charCount,
+                messages = previousMessages + messages.size,
+            ),
+            updatedAt = now,
+        )
+    }
+
+    @Transaction
+    suspend fun replaceTranscript(
+        runId: String,
+        messages: List<AgentModelClient.ConversationMessage>,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        if (!hasInFlightRun(runId)) return
+        deleteTextChunks(IN_FLIGHT_TABLE, runId, TRANSCRIPT_FIELD)
+        if (messages.isEmpty()) {
+            updateTranscriptRow(runId, "[]", now)
+            return
+        }
+        val appended = appendTextChunks(
+            table = IN_FLIGHT_TABLE,
+            owner = runId,
+            field = TRANSCRIPT_FIELD,
+            startIndex = 0,
+            pieces = AgentConversationCodec.transcriptInnerPieces(messages, prependComma = false),
+        )
+        updateTranscriptRow(
+            runId = runId,
+            transcript = transcriptReference(
+                chunks = appended.chunkCount,
+                length = appended.charCount,
+                messages = messages.size,
+            ),
+            updatedAt = now,
+        )
+    }
+
+    /**
+     * 读取 transcript：新格式补回 JSON 数组括号；旧格式交给现有 restoreText 兼容处理。
+     * 校验失败时保留磁盘引用不覆盖，返回空数组并留下诊断日志。
+     */
+    private suspend fun restoreInFlightTranscript(runId: String, stored: String): String {
+        val match = TRANSCRIPT_REFERENCE_PATTERN.matchEntire(stored) ?: return restoreText(
+            table = IN_FLIGHT_TABLE,
+            owner = runId,
+            field = TRANSCRIPT_FIELD,
+            stored = stored,
+        )
+        val expectedChunks = match.groupValues[1].toIntOrNull()
+        val expectedLength = match.groupValues[2].toIntOrNull()
+        val expectedMessages = match.groupValues[3].toIntOrNull()
+        if (expectedChunks == null || expectedLength == null || expectedMessages == null) {
+            warnTranscriptRestoreFailure(runId, "引用数字超出 Int 范围")
+            return "[]"
+        }
+        val result = StringBuilder(expectedLength + 2)
+        var offset = 0
+        while (offset < expectedChunks) {
+            val page = textChunks(
+                table = IN_FLIGHT_TABLE,
+                owner = runId,
+                field = TRANSCRIPT_FIELD,
+                limit = minOf(32, expectedChunks - offset),
+                offset = offset,
+            )
+            if (page.isEmpty()) {
+                warnTranscriptRestoreFailure(runId, "分块缺失")
+                return "[]"
+            }
+            for (chunk in page) {
+                if (chunk.chunkIndex != offset) {
+                    warnTranscriptRestoreFailure(runId, "分块顺序异常")
+                    return "[]"
+                }
+                offset++
+                result.append(chunk.content)
+            }
+        }
+        if (result.length != expectedLength) {
+            warnTranscriptRestoreFailure(runId, "恢复长度不符")
+            return "[]"
+        }
+        return buildString(result.length + 2) {
+            append('[')
+            append(result)
+            append(']')
+        }
+    }
+
+    private fun warnTranscriptRestoreFailure(runId: String, reason: String) {
+        AndroidAgentLogger.warnThrottled("runtime_transcript_restore_failed") {
+            "Runtime transcript restore failed ($reason): run=${runId.take(16)}"
+        }
     }
 
     @Query("UPDATE runtime_inflight_runs SET context_snapshot_json = :snapshot WHERE run_id = :runId")
@@ -247,6 +413,9 @@ internal interface RuntimeRunDao : ChunkedTextDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertInFlightEvent(event: RuntimeInFlightEventEntity)
 
+    @Query("SELECT * FROM runtime_inflight_events WHERE run_id = :runId ORDER BY sort_index ASC")
+    suspend fun inFlightEvents(runId: String): List<RuntimeInFlightEventEntity>
+
     @Query("UPDATE runtime_inflight_runs SET updated_at = :updatedAt WHERE run_id = :runId")
     suspend fun touchInFlightRun(runId: String, updatedAt: Long)
 
@@ -278,6 +447,17 @@ internal interface RuntimeRunDao : ChunkedTextDao {
     suspend fun appendInFlightEvent(event: RuntimeInFlightEventEntity, updatedAt: Long) {
         insertInFlightEvent(event)
         touchInFlightRun(event.runId, updatedAt)
+    }
+
+    companion object {
+        private const val IN_FLIGHT_TABLE = "runtime_inflight_runs"
+        private const val TRANSCRIPT_FIELD = "transcriptJson"
+        private const val TRANSCRIPT_REFERENCE_PREFIX = "@eta:transcript:v1:"
+        private val TRANSCRIPT_REFERENCE_PATTERN =
+            Regex("${Regex.escape(TRANSCRIPT_REFERENCE_PREFIX)}(\\d+):(\\d+):(\\d+)")
+
+        private fun transcriptReference(chunks: Int, length: Int, messages: Int): String =
+            "$TRANSCRIPT_REFERENCE_PREFIX$chunks:$length:$messages"
     }
 }
 

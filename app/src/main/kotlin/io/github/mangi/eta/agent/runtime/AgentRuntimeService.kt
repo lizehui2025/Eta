@@ -122,7 +122,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
-        KeepAliveScheduler.scheduleKeepAlive(this)
+        refreshKeepAlive()
     }
 
     override fun onBind(intent: Intent): IBinder? {
@@ -131,10 +131,15 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_KEEP_ALIVE && activeSession == null) {
+        Prefs.initLocal(this)
+        val alwaysOn = runCatching {
+            Prefs.isEnabled(Prefs.Keys.AGENT_ALWAYS_ON_KEEP_ALIVE)
+        }.getOrDefault(false)
+        if (intent?.action == ACTION_KEEP_ALIVE && activeSession == null && !alwaysOn) {
             stopSelf(startId)
+            return START_NOT_STICKY
         }
-        return START_STICKY
+        return if (activeSession != null || alwaysOn) START_STICKY else START_NOT_STICKY
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -371,6 +376,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             resultSink = { result -> sendResultTo(replyTo, result) },
             // 启动方绑定失效（入口进程被回收）后不再保留该订阅者。
             initialClientAlive = { replyTo.isPeerAlive() },
+            boundedReplay = request.handoff?.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE,
         )
         // Root 入口保留原有绑定服务生命周期；新增 FGS 不能成为厂商后台入口的新前置权限。
         val allowBoundFallback = RootAccess.isGranted
@@ -385,6 +391,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             return
         }
         activeSession = session
+        refreshKeepAlive()
         lastCompletedRunContext = null
         runCatching {
             startService(Intent(this, AgentRuntimeService::class.java).setAction(ACTION_KEEP_ALIVE))
@@ -524,6 +531,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             if (activeSession !== session) return@post
             lastCompletedRunContext = completedContext
             activeSession = null
+            refreshKeepAlive()
             runCatching {
                 if (result.ok) {
                     enterFinalState(
@@ -673,18 +681,32 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
 
     private fun attachRun(runId: String, replyTo: Messenger?, senderUid: Int) {
         val session = activeSession
-        val attached = replyTo != null &&
-            runId.isNotBlank() &&
-            session?.runId == runId &&
-            session.attach(
-                eventSink = { event -> sendEventTo(replyTo, event) },
-                resultSink = { result -> sendResultTo(replyTo, result) },
-                onReplayComplete = { sendAttachRunResponse(runId, replyTo, attached = true) },
-                // 同一发送方（uid）的重复 attach（重连/重试）取代旧订阅者，避免无界累积。
-                clientKey = senderUid,
-                isClientAlive = { replyTo.isPeerAlive() },
-            )
-        if (!attached) sendAttachRunResponse(runId, replyTo, attached = false)
+        if (replyTo == null || runId.isBlank() || session?.runId != runId) {
+            sendAttachRunResponse(runId, replyTo, attached = false)
+            return
+        }
+        // DB 回放可能读取完整 checkpoint；放到后台执行，避免阻塞 Service 主线程。
+        runtimeBgScope.launch {
+            val attached = runCatching {
+                session.attach(
+                    eventSink = { event -> sendEventTo(replyTo, event) },
+                    resultSink = { result -> sendResultTo(replyTo, result) },
+                    onReplayComplete = { sendAttachRunResponse(runId, replyTo, attached = true) },
+                    // 同一发送方（uid）的重复 attach（重连/重试）取代旧订阅者，避免无界累积。
+                    clientKey = senderUid,
+                    isClientAlive = { replyTo.isPeerAlive() },
+                    replayLoader = {
+                        AgentRunCheckpointStore.eventsForRun(this@AgentRuntimeService, runId)
+                    },
+                )
+            }.getOrElse { throwable ->
+                AndroidAgentLogger.warnThrottled("runtime_attach_replay_failed") {
+                    "Agent runtime attach replay failed: type=${throwable.safeLogType()}"
+                }
+                false
+            }
+            if (!attached) sendAttachRunResponse(runId, replyTo, attached = false)
+        }
     }
 
     private fun sendAttachRunResponse(runId: String, replyTo: Messenger?, attached: Boolean) {
@@ -771,6 +793,38 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             return
         }
         cancelRun(session.runId)
+    }
+
+    /**
+     * 保活只覆盖必要场景：活跃 run、尚待确认的结果，或用户显式开启常驻。
+     * 待处理结果查询放到后台，避免 Service 主线程查 Room。
+     */
+    private fun refreshKeepAlive() {
+        Prefs.initLocal(this)
+        val alwaysOn = runCatching {
+            Prefs.isEnabled(Prefs.Keys.AGENT_ALWAYS_ON_KEEP_ALIVE)
+        }.getOrDefault(false)
+        val activeRun = activeSession != null
+        if (alwaysOn || activeRun) {
+            KeepAliveScheduler.scheduleIfNeeded(
+                context = this,
+                activeRun = activeRun,
+                pendingResults = false,
+                alwaysOn = alwaysOn,
+            )
+            return
+        }
+        runtimeBgScope.launch {
+            val pendingResults = runCatching {
+                AgentRuntimeResultStore.pendingPage(this@AgentRuntimeService).isNotEmpty()
+            }.getOrDefault(false)
+            KeepAliveScheduler.scheduleIfNeeded(
+                context = this@AgentRuntimeService,
+                activeRun = activeSession != null,
+                pendingResults = pendingResults,
+                alwaysOn = false,
+            )
+        }
     }
 
     private fun cancelRun(runId: String) {
@@ -1206,8 +1260,8 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         )
     }
 
-    private companion object {
-        const val ACTION_KEEP_ALIVE = "io.github.mangi.eta.agent.runtime.KEEP_ALIVE"
+    internal companion object {
+        internal const val ACTION_KEEP_ALIVE = "io.github.mangi.eta.agent.runtime.KEEP_ALIVE"
         const val HIDE_DELAY_MS = 2_500L
         const val RESULT_REVIEW_DELAY_MS = 120_000L
         const val RESULT_CARD_HEIGHT_RATIO = 0.5f

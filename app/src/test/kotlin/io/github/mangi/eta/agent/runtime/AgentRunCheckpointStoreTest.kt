@@ -1,8 +1,10 @@
 package io.github.mangi.eta.agent.runtime
 
 import android.content.Context
+import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.data.db.EtaDatabase
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -131,6 +133,84 @@ class AgentRunCheckpointStoreTest {
             AgentRunCheckpointStore.list(context).isEmpty()
         )
     }
+
+    @Test
+    fun appendTranscriptKeepsExistingChunksAndRestoresFullHistory() {
+        val runId = "run-append"
+        assertTrue(AgentRunCheckpointStore.start(context, request(runId)))
+
+        val first = listOf(message("user", "第一问"), message("assistant", "第一答"))
+        AgentRunCheckpointStore.appendTranscript(context, runId, first, fullRebuild = true)
+        val firstChunk = runBlocking {
+            EtaDatabase.get(context).runtimeRunDao()
+                .textChunks("runtime_inflight_runs", runId, "transcriptJson", limit = 1, offset = 0)
+                .single()
+        }
+
+        val second = listOf(message("user", "第二问"))
+        AgentRunCheckpointStore.appendTranscript(context, runId, second, fullRebuild = false)
+
+        val restored = AgentRunCheckpointStore.list(context).single().transcript
+        assertEquals(first + second, restored)
+        val chunks = runBlocking {
+            EtaDatabase.get(context).runtimeRunDao()
+                .textChunks("runtime_inflight_runs", runId, "transcriptJson", limit = 32, offset = 0)
+        }
+        assertEquals(firstChunk.content, chunks.first().content)
+        assertTrue("追加必须保留旧分块", chunks.size >= 2)
+    }
+
+    @Test
+    fun appendTranscriptMigratesLegacyInlineTranscriptOnce() {
+        val runId = "run-legacy"
+        val legacy = listOf(message("user", "旧问题"), message("assistant", "旧回答"))
+        runBlocking {
+            EtaDatabase.get(context).runtimeRunDao().replaceInFlightRun(
+                io.github.mangi.eta.data.db.RuntimeInFlightRunEntity(
+                    runId = runId,
+                    ownerInstanceId = "test",
+                    transcriptJson = AgentConversationCodec.encodeTranscriptForStorage(legacy),
+                    handoffId = runId,
+                    handoffSource = AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE,
+                    handoffPayload = "conversation-1",
+                    dismissEntrySurface = false,
+                    createdAt = 1L,
+                    updatedAt = 1L,
+                )
+            )
+        }
+
+        AgentRunCheckpointStore.appendTranscript(
+            context = context,
+            runId = runId,
+            messages = listOf(message("user", "新问题")),
+            fullRebuild = false,
+        )
+
+        assertEquals(
+            legacy + message("user", "新问题"),
+            AgentRunCheckpointStore.list(context).single().transcript,
+        )
+    }
+
+    @Test
+    fun fullRebuildReplacesTranscriptInsteadOfAppending() {
+        val runId = "run-rebuild"
+        assertTrue(AgentRunCheckpointStore.start(context, request(runId)))
+        AgentRunCheckpointStore.appendTranscript(
+            context, runId, listOf(message("user", "旧")), fullRebuild = true,
+        )
+        AgentRunCheckpointStore.appendTranscript(
+            context, runId, listOf(message("assistant", "新")), fullRebuild = true,
+        )
+        assertEquals(
+            listOf(message("assistant", "新")),
+            AgentRunCheckpointStore.list(context).single().transcript,
+        )
+    }
+
+    private fun message(role: String, content: String) =
+        AgentModelClient.ConversationMessage(role = role, content = content)
 
     private fun request(runId: String): AgentRuntimeWire.RunRequest =
         AgentRuntimeWire.RunRequest(

@@ -53,6 +53,25 @@ class AgentModelRetryTest {
     }
 
     @Test
+    fun backoffDelayTransformIsAppliedBeforeWaiting() {
+        val delays = mutableListOf<Long>()
+        val retry = AgentModelRetry(
+            maxRetries = 1,
+            delayTransform = { 1_234L },
+            waitBeforeRetry = { _, delay -> delays += delay },
+        )
+        var calls = 0
+        assertThrows(AgentModelFailure::class.java) {
+            complete(retry, provider { _, _ ->
+                calls++
+                throw SocketTimeoutException("timeout")
+            })
+        }
+        assertEquals(2, calls)
+        assertEquals(listOf(1_234L), delays)
+    }
+
+    @Test
     fun callbackFailuresAndHostedToolFailuresDoNotReplayProvider() {
         val noRetry = AgentModelRetry { _, _ -> fail("不应重试") }
         val callbackFailure = IOException("checkpoint write failed")

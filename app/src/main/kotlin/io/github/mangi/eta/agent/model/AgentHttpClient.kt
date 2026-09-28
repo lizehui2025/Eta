@@ -16,12 +16,39 @@ internal object AgentHttpClient {
     private const val WRITE_TIMEOUT_MS = 30_000L
 
     const val MODEL_READ_TIMEOUT_MS = 300_000L
+    const val CHAT_CALL_TIMEOUT_MS = 15 * 60 * 1000L
+    const val COMPACTION_CALL_TIMEOUT_MS = 90_000L
+    const val REWRITE_CALL_TIMEOUT_MS = 5 * 60 * 1000L
 
     val modelClient: OkHttpClient by lazy {
         client.newBuilder()
             .readTimeout(MODEL_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .retryOnConnectionFailure(false)
             .build()
+    }
+
+    private val chatModelClient: OkHttpClient by lazy {
+        modelClient.newBuilder().callTimeout(CHAT_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+    }
+
+    private val compactionModelClient: OkHttpClient by lazy {
+        modelClient.newBuilder().callTimeout(COMPACTION_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+    }
+
+    private val rewriteModelClient: OkHttpClient by lazy {
+        modelClient.newBuilder().callTimeout(REWRITE_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+    }
+
+    /**
+     * 按用途选择带总超时的模型客户端：
+     * - 普通对话允许长任务，但总时长有上限；
+     * - 压缩必须落在 90 秒墙钟内，避免用户无限等待；
+     * - 回复改写是用户等待中的轻量操作，限制为 5 分钟。
+     */
+    fun modelClientFor(purpose: ProviderRequestPurpose): OkHttpClient = when (purpose) {
+        ProviderRequestPurpose.CHAT -> chatModelClient
+        ProviderRequestPurpose.COMPACTION -> compactionModelClient
+        ProviderRequestPurpose.REPLY_REWRITE -> rewriteModelClient
     }
 
     val client: OkHttpClient by lazy {

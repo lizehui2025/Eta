@@ -74,6 +74,17 @@ class AgentToolRequirementsTest {
     }
 
     @Test
+    fun onlyExplicitlyMarkedReadOnlyToolsJoinParallelBatches() {
+        assertTrue(AgentToolRequirements.isParallelReadOnly("read_file"))
+        assertTrue(AgentToolRequirements.isParallelReadOnly("search_code"))
+        assertTrue(AgentToolRequirements.isParallelReadOnly("device_status"))
+        assertFalse(AgentToolRequirements.isParallelReadOnly("terminal"))
+        assertFalse(AgentToolRequirements.isParallelReadOnly("browser_use"))
+        assertFalse(AgentToolRequirements.isParallelReadOnly("set_setting"))
+        assertFalse(AgentToolRequirements.isParallelReadOnly("unknown_tool"))
+    }
+
+    @Test
     fun frameworkConnectionDoesNotGrantRootAndRootSnapshotDoesNotRequireFramework() {
         assertEquals(LsposedRequirement.OPTIONAL, AgentToolRequirements.find("search_coloros_memories")?.lsposedRequirement)
         assertEquals("ROOT_REQUIRED", AgentToolCapabilities(rootAvailable = false, lsposedAvailable = true)

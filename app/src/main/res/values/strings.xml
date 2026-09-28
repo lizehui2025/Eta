@@ -363,6 +363,8 @@
   <string name="ui_enable_vendor_assistant_custom_models_c8e465">Enable vendor assistant custom models</string>
   <string name="ui_enable_this_provider_683a76">Enable this provider</string>
   <string name="ui_enable_terminal_file_tools_18bb43">Enable terminal/file tools</string>
+  <string name="settings_always_on_keep_alive_title">Always keep Agent Runtime alive</string>
+  <string name="settings_always_on_keep_alive_summary">Off by default: keep alive only while a task is running or a result is pending. Enabling this keeps the entry ready at the cost of periodic background wakeups.</string>
   <string name="ui_enable_web_browsing_tools_8b6b03">Enable web browsing tools</string>
   <string name="ui_enable_memory_4b69b7">Enable memory</string>
   <string name="ui_enable_device_direct_tools_e2d595">Enable device direct tools</string>

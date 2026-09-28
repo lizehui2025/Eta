@@ -41,6 +41,22 @@ internal object AgentConversationCodec {
         yield("]")
     }
 
+    /**
+     * 产出 transcript JSON 数组内部元素。
+     *
+     * 追加持久化时磁盘上的分块只保存数组内部内容，读取时再补回 `[`、`]`；[prependComma]
+     * 用于已有消息之后的追加批次，避免每次追加都重写首个分块。
+     */
+    fun transcriptInnerPieces(
+        messages: List<AgentModelClient.ConversationMessage>,
+        prependComma: Boolean,
+    ): Sequence<String> = sequence {
+        messages.forEachIndexed { index, message ->
+            if (prependComma || index > 0) yield(",")
+            yield(json.encodeToString(sanitizeMessage(message)))
+        }
+    }
+
     fun decodeTranscript(raw: String?): List<AgentModelClient.ConversationMessage> =
         if (raw.isNullOrBlank()) {
             emptyList()

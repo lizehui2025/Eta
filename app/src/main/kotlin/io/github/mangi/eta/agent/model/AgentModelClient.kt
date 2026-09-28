@@ -113,7 +113,7 @@ internal object AgentModelClient {
         rewriteReply: Boolean = false,
         assistantScreenContext: String = "",
         onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
-        onTranscript: (List<ConversationMessage>) -> Unit = {},
+        onTranscript: (AgentTranscriptPublisher.PublishResult) -> Unit = {},
         onEvent: (AgentEvent) -> Unit = {}
     ): ModelResponse.Text {
         config.validate()

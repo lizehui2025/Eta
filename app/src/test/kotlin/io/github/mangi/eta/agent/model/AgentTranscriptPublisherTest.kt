@@ -37,8 +37,15 @@ class AgentTranscriptPublisherTest {
     fun everyPublishMatchesFullConversion() {
         val publisher = AgentTranscriptPublisher { sensitiveIds }
         val transcript = JSONArray()
+        var reconstructed = emptyList<AgentModelClient.ConversationMessage>()
         val publish = {
-            assertEquals(reference(transcript, sensitiveIds), publisher.publish(transcript))
+            val result = publisher.publish(transcript)
+            reconstructed = if (result.fullRebuild) {
+                result.messages
+            } else {
+                reconstructed + result.messages
+            }
+            assertEquals(reference(transcript, sensitiveIds), reconstructed)
         }
 
         transcript.put(message("user", "第一轮提问"))
@@ -70,7 +77,9 @@ class AgentTranscriptPublisherTest {
         val publisher = AgentTranscriptPublisher { sensitiveIds }
         val transcript = JSONArray()
         transcript.put(message("user", "提问"))
-        assertEquals(reference(transcript, sensitiveIds), publisher.publish(transcript))
+        val first = publisher.publish(transcript)
+        assertEquals(reference(transcript, sensitiveIds), first.messages)
+        assertTrue(!first.fullRebuild)
 
         // 模拟"调用消息已发布、工具尚未执行"的发布边界：前缀里留有未闭合调用。
         transcript.put(assistantWithCalls("call-late"))
@@ -79,13 +88,14 @@ class AgentTranscriptPublisherTest {
         sensitiveIds += "call-late"
         transcript.put(message("tool", "敏感结果", toolCallId = "call-late"))
         val published = publisher.publish(transcript)
-        assertEquals(reference(transcript, sensitiveIds), published)
+        assertTrue("敏感前缀变化必须返回 full rebuild", published.fullRebuild)
+        assertEquals(reference(transcript, sensitiveIds), published.messages)
         assertTrue("前缀里有未闭合调用时必须整份重建", publisher.fullPublishes >= 1)
         assertTrue(
             "重建后调用参数与结果都必须被脱敏",
-            published.first { it.role == "assistant" && it.toolCallsJson.isNotBlank() }
+            published.messages.first { it.role == "assistant" && it.toolCallsJson.isNotBlank() }
                 .toolCallsJson.contains("已省略") ||
-                published.first { it.role == "tool" }.content != "敏感结果",
+                published.messages.first { it.role == "tool" }.content != "敏感结果",
         )
     }
 
@@ -96,7 +106,11 @@ class AgentTranscriptPublisherTest {
         publisher.publish(transcript)
         val conversions = publisher.convertedMessages
         val publishes = publisher.incrementalPublishes
-        repeat(20) { publisher.publish(transcript) }
+        repeat(20) {
+            val result = publisher.publish(transcript)
+            assertTrue(result.messages.isEmpty())
+            assertTrue(!result.fullRebuild)
+        }
         assertEquals(conversions, publisher.convertedMessages)
         assertEquals(publishes, publisher.incrementalPublishes)
         assertEquals(0, publisher.fullPublishes)
@@ -106,14 +120,17 @@ class AgentTranscriptPublisherTest {
     fun convertingManyRoundsStaysLinearInsteadOfQuadratic() {
         val publisher = AgentTranscriptPublisher { sensitiveIds }
         val transcript = JSONArray()
+        var reconstructed = emptyList<AgentModelClient.ConversationMessage>()
         // 200 轮、每轮 3 条消息：整份重转的总量是 O(轮数²)，增量发布应保持线性。
         repeat(200) { round ->
             transcript.put(message("user", "第 $round 轮提问"))
             transcript.put(message("assistant", "第 $round 轮回答"))
             transcript.put(message("tool", "", toolCallId = ""))
-            publisher.publish(transcript)
+            val result = publisher.publish(transcript)
+            reconstructed = if (result.fullRebuild) result.messages else reconstructed + result.messages
         }
         val total = transcript.length()
+        assertEquals(reference(transcript, sensitiveIds), reconstructed)
         // 每条消息只转换一次（末尾那条空的 tool 消息也会被转换一次）。
         assertEquals(total, publisher.convertedMessages)
         assertEquals(200, publisher.incrementalPublishes)

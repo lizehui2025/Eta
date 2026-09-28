@@ -295,6 +295,19 @@ class AgentContextCompactionTest {
     }
 
     @Test
+    fun lowPromptCacheHitRateMovesCompactionTriggerEarlier() {
+        val budget = AgentContextBudget(10_000)
+        budget.observe(
+            usage = AgentTokenUsage(inputTokens = 10_000, cachedTokens = 2_000),
+            requestEstimate = 10_000,
+        )
+
+        assertFalse(budget.shouldCompact(6_999))
+        assertTrue(budget.shouldCompact(7_000))
+        assertEquals(AgentContextBudget.LOW_CACHE_TRIGGER_RATIO, budget.triggerRatio(), 0.0001)
+    }
+
+    @Test
     fun overflowClassificationDoesNotTreatEveryBadRequestAsCapacityFailure() {
         assertEquals("CONTEXT_OVERFLOW", AgentModelFailure.http(400,
             """{"error":{"code":"context_length_exceeded","message":"private fixture"}}""").code)

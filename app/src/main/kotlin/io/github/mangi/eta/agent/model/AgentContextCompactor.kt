@@ -449,7 +449,11 @@ internal class AgentContextCompactor(
     }
 
     companion object {
-        private const val COMPACTION_MAX_RETRIES = 1
+        /**
+         * 压缩请求使用 90 秒 OkHttp callTimeout；不再叠加同一次压缩内的网络重试，
+         * 否则 90 秒硬 deadline 会在重试后失效。失败由上层按原语义保留原始上下文。
+         */
+        private const val COMPACTION_MAX_RETRIES = 0
         private const val SUMMARY_CHARS_HINT = 12_000
         private const val PREVIOUS_SUMMARY_PREFIX = "此前分段摘要：\n"
         /** 并行摘要的最大并发：provider 侧限流未知，保守取 4（与子代理并发护栏同值）。 */

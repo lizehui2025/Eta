@@ -348,6 +348,17 @@ private fun SettingsPageContent(
                     )
 
                     EtaPreferenceDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_always_on_keep_alive_title),
+                        summary = stringResource(R.string.settings_always_on_keep_alive_summary),
+                        key = Prefs.Keys.AGENT_ALWAYS_ON_KEEP_ALIVE,
+                        icon = Icons.Rounded.PowerSettingsNew,
+                        iconTint = EtaPreferenceColors.Orange,
+                    )
+
+                    EtaPreferenceDivider()
                     EtaArrowPreference(
                         title = stringResource(R.string.ui_linux_tool_environment_314d22),
                         startAction = {

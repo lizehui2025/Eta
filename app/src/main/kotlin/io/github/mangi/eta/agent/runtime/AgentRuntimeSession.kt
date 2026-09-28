@@ -8,6 +8,8 @@ import kotlin.concurrent.withLock
 
 /** 回放合并上限：连续 delta 无限拼接会让单个回放事件超 Binder 事务预算；达到上限后改为新起事件。 */
 private const val MAX_REPLAY_MERGED_DELTA_CHARS = 64_000
+private const val MAX_REPLAY_ENTRIES = 4_096
+private const val MAX_REPLAY_BYTES = 2 * 1024 * 1024
 
 /**
  * 一次 Runtime run 的控制权和唯一终态。
@@ -25,6 +27,11 @@ internal class AgentRuntimeSession(
     resultSink: ((AgentRuntimeWire.RunResult) -> Unit)? = null,
     private val operation: String = AgentRuntimeWire.OP_CHAT,
     initialClientAlive: (() -> Boolean)? = null,
+    /**
+     * UI checkpoint run 才允许丢弃内存 replay；丢弃后 attach 由 DB checkpoint 回放。
+     * 没有 checkpoint 的入口继续保留完整内存 replay，避免断线后无法恢复。
+     */
+    private val boundedReplay: Boolean = false,
 ) {
     private enum class State {
         RUNNING,
@@ -33,12 +40,25 @@ internal class AgentRuntimeSession(
     }
 
     private val lock = ReentrantLock()
-    private var latestTranscript: List<AgentModelClient.ConversationMessage> = emptyList()
+    private val latestTranscript = mutableListOf<AgentModelClient.ConversationMessage>()
     val transcript: List<AgentModelClient.ConversationMessage>
-        get() = lock.withLock { latestTranscript }
+        get() = lock.withLock { latestTranscript.toList() }
 
     fun updateTranscript(messages: List<AgentModelClient.ConversationMessage>) = lock.withLock {
-        if (state == State.RUNNING) latestTranscript = messages
+        if (state == State.RUNNING) {
+            latestTranscript.clear()
+            latestTranscript += messages
+        }
+    }
+
+    /** 追加 transcript 增量；[fullRebuild] 为 true 时用增量消息整体替换。 */
+    fun appendTranscript(
+        messages: List<AgentModelClient.ConversationMessage>,
+        fullRebuild: Boolean,
+    ) = lock.withLock {
+        if (state != State.RUNNING || messages.isEmpty() && !fullRebuild) return@withLock
+        if (fullRebuild) latestTranscript.clear()
+        latestTranscript += messages
     }
 
     private var latestContext: AgentContextSnapshot? = null
@@ -50,6 +70,8 @@ internal class AgentRuntimeSession(
     }
     private var state = State.RUNNING
     private val replayEvents = mutableListOf<ReplayEntry>()
+    private var replayBytes = 0
+    private var replayTruncated = false
     private val subscribers = mutableListOf<Subscriber>()
 
     /**
@@ -106,6 +128,7 @@ internal class AgentRuntimeSession(
         onReplayComplete: () -> Unit = {},
         clientKey: Any? = null,
         isClientAlive: (() -> Boolean)? = null,
+        replayLoader: (() -> List<AgentEvent>)? = null,
     ): Boolean = lock.withLock {
         if (state == State.TERMINAL) return false
         // åæ¾ãç¡®è®¤ãè®¢éä¸èå¨åä¸æéååå­å®æï¼å¹¶å emit/complete ä¸å¾è¶è¿åæ¾è¾¹çã
@@ -116,7 +139,12 @@ internal class AgentRuntimeSession(
         if (clientKey != null) {
             subscribers.removeAll { it.clientKey == clientKey }
         }
-        replayEvents.toList().forEach { entry -> eventSink(entry.materialize()) }
+        val replay = if (replayTruncated && replayLoader != null) {
+            replayLoader()
+        } else {
+            replayEvents.map { entry -> entry.materialize() }
+        }
+        replay.forEach { event -> eventSink(event) }
         runCatching { onReplayComplete() }
         subscribers += Subscriber(
             eventSink = eventSink,
@@ -175,6 +203,7 @@ internal class AgentRuntimeSession(
 
     private fun recordForReplay(event: AgentEvent) {
         val projected = event.recoveryProjection() ?: return
+        if (boundedReplay && replayTruncated) return
         val previous = replayEvents.lastOrNull()
         if (
             previous is ReplayDeltaGroup &&
@@ -190,6 +219,13 @@ internal class AgentRuntimeSession(
             ReplaySingle(projected)
         }
         replayEvents += entry
+        replayBytes += entry.approximateBytes()
+        if (boundedReplay && (replayEvents.size > MAX_REPLAY_ENTRIES || replayBytes > MAX_REPLAY_BYTES)) {
+            // DB checkpoint 已由 AgentRunCheckpointRecorder 在 emit 前同步写入；这里只丢弃内存副本。
+            replayEvents.clear()
+            replayBytes = 0
+            replayTruncated = true
+        }
     }
 
     /**
@@ -198,10 +234,12 @@ internal class AgentRuntimeSession(
      */
     private interface ReplayEntry {
         fun materialize(): AgentEvent
+        fun approximateBytes(): Int
     }
 
     private class ReplaySingle(private val event: AgentEvent) : ReplayEntry {
         override fun materialize(): AgentEvent = event
+        override fun approximateBytes(): Int = event.toLogLine().length + 64
     }
 
     /**
@@ -235,6 +273,8 @@ internal class AgentRuntimeSession(
             materialized = event
             return event
         }
+
+        override fun approximateBytes(): Int = text.length + 64
     }
 
     /**

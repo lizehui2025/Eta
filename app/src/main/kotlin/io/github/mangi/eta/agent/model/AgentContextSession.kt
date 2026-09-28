@@ -150,11 +150,14 @@ internal class AgentContextSession(
             val stats = budget.stats()
             val cacheLine = " 估算缓存[消息=" + "%.0f".format(stats.messageHitRate * 100) + "%(未命中" +
                 stats.messageMisses + "次), 工具表=" + "%.0f".format(stats.toolSchemaHitRate * 100) + "%]"
+            val promptCacheLine = budget.cacheHitRate()?.let { rate ->
+                " 服务端缓存=" + "%.0f".format(rate * 100) + "%"
+            }.orEmpty()
             AndroidAgentLogger.info(
                 "Agent context $stage: effective=$tokens" +
                     (real?.let { " (实时锚点=$it, 校准=${"%.2f".format(budget.calibrationFactor())})" }
                         ?: " (无实时锚点, 校准=${"%.2f".format(budget.calibrationFactor())})") +
-                    cacheLine +
+                    cacheLine + promptCacheLine +
                     breakdown,
             )
         }

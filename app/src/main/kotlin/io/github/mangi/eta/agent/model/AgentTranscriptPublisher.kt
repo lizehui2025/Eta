@@ -22,6 +22,18 @@ import org.json.JSONObject
 internal class AgentTranscriptPublisher(
     private val sensitiveIds: () -> Set<String>,
 ) {
+    /**
+     * 一次发布的增量结果。
+     *
+     * [messages] 正常情况只包含本次新增转换的消息；[fullRebuild] 为 true 时表示
+     * 已发布前缀发生变化，[messages] 是完整的替换列表，调用方必须整体替换持久化内容。
+     */
+    data class PublishResult(
+        val messages: List<AgentModelClient.ConversationMessage>,
+        val fullRebuild: Boolean,
+        val messageCount: Int,
+    )
+
     private val published = mutableListOf<AgentModelClient.ConversationMessage>()
     private var consumedCount = 0
     private val openCallIds = linkedSetOf<String>()
@@ -41,8 +53,8 @@ internal class AgentTranscriptPublisher(
     var convertedMessages = 0
         private set
 
-    /** 返回完整的脱敏 transcript；没有新增内容时直接返回上次结果，不做任何转换。 */
-    fun publish(transcript: JSONArray): List<AgentModelClient.ConversationMessage> {
+    /** 返回本次新增/替换的脱敏消息；没有新增内容时返回空增量。 */
+    fun publish(transcript: JSONArray): PublishResult {
         val ids = sensitiveIds()
         val newlySensitive = if (ids == knownSensitiveIds) emptySet() else ids - knownSensitiveIds
         if (newlySensitive.any { it in publishedCallIds }) requiresFullRebuild = true
@@ -50,9 +62,10 @@ internal class AgentTranscriptPublisher(
         if (consumedCount > transcript.length()) requiresFullRebuild = true
         if (consumedCount == transcript.length() && !requiresFullRebuild) {
             knownSensitiveIds = ids
-            return published
+            return PublishResult(emptyList(), fullRebuild = false, messageCount = published.size)
         }
-        if (requiresFullRebuild) {
+        val rebuilding = requiresFullRebuild
+        if (rebuilding) {
             published.clear()
             consumedCount = 0
             openCallIds.clear()
@@ -73,7 +86,11 @@ internal class AgentTranscriptPublisher(
         // 前缀仍有未闭合调用时，下一次发布必须整份重建（见类注释）。
         requiresFullRebuild = openCallIds.isNotEmpty()
         knownSensitiveIds = ids
-        return published
+        return PublishResult(
+            messages = converted,
+            fullRebuild = rebuilding,
+            messageCount = published.size,
+        )
     }
 
     /** 记录该消息引入/闭合的工具调用 id，用于判断发布边界是否落在工具批次内部。 */

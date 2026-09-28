@@ -68,6 +68,7 @@ internal class AgentRuntimeRunExecutor(
     )
 
     private val appContext = context.applicationContext
+    private val eventCoalescer = AgentRuntimeEventCoalescer()
 
     /** 并行准备的结果：技能索引、记忆上下文、角色设定与 MCP 工具目录。 */
     private class RunPreparation(
@@ -329,9 +330,14 @@ internal class AgentRuntimeRunExecutor(
                     AgentRunCheckpointStore.saveContext(appContext, request.runId, committed)
                     session.updateContext(committed)
                 },
-                onTranscript = { transcript ->
-                    AgentRunCheckpointStore.saveTranscript(appContext, request.runId, transcript)
-                    session.updateTranscript(transcript)
+                onTranscript = { publish ->
+                    AgentRunCheckpointStore.appendTranscript(
+                        context = appContext,
+                        runId = request.runId,
+                        messages = publish.messages,
+                        fullRebuild = publish.fullRebuild,
+                    )
+                    session.appendTranscript(publish.messages, publish.fullRebuild)
                 },
                 capabilitiesProvider = { AgentToolCapabilities.capture(appContext) },
                 prompt = request.prompt,
@@ -410,6 +416,17 @@ internal class AgentRuntimeRunExecutor(
                 rewriteTargetMessageId = request.rewriteTargetMessageId,
             )
         } finally {
+            runCatching {
+                eventCoalescer.flush().forEach { event ->
+                    acceptEventNow(
+                        session = session,
+                        event = event,
+                        archivedEvents = archivedEvents,
+                        entrySurfaceGuard = entrySurfaceGuard,
+                        checkpointRecorder = checkpointRecorder,
+                    )
+                }
+            }
             runCatching { toolsBinding?.close() }
             runCatching { toolExecutor?.close() }
         }
@@ -461,6 +478,24 @@ internal class AgentRuntimeRunExecutor(
     }
 
     private fun acceptEvent(
+        session: AgentRuntimeSession,
+        event: AgentEvent,
+        archivedEvents: MutableList<AgentEvent>,
+        entrySurfaceGuard: EntrySurfaceGuard?,
+        checkpointRecorder: AgentRunCheckpointRecorder?,
+    ) {
+        eventCoalescer.offer(event).forEach { ready ->
+            acceptEventNow(
+                session = session,
+                event = ready,
+                archivedEvents = archivedEvents,
+                entrySurfaceGuard = entrySurfaceGuard,
+                checkpointRecorder = checkpointRecorder,
+            )
+        }
+    }
+
+    private fun acceptEventNow(
         session: AgentRuntimeSession,
         event: AgentEvent,
         archivedEvents: MutableList<AgentEvent>,

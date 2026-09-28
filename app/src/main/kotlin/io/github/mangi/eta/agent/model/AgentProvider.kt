@@ -58,6 +58,8 @@ internal data class ProviderRequest(
     val tools: JSONArray,
     val sessionId: String = java.util.UUID.randomUUID().toString(),
     val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
+    /** 同一 run 内跨轮复用协议投影；内部压缩/改写使用独立缓存。 */
+    val projectionCache: AgentRequestProjectionCache = AgentRequestProjectionCache(),
 ) {
     /**
      * 内部调用（压缩摘要、改写回复）不面向用户，不该继承主对话的思考档位：

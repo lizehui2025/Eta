@@ -7,6 +7,7 @@ internal enum class RootRequirement { NONE, PARTIAL, REQUIRED }
 internal enum class LsposedRequirement { NONE, OPTIONAL, REQUIRED }
 
 internal enum class ToolSystemAccess { NONE, NOTIFICATIONS, USAGE, LOCATION }
+internal enum class ToolConcurrency { SERIAL, PARALLEL_READ_ONLY }
 
 internal data class LocalToolRequirement(
     val rootRequirement: RootRequirement,
@@ -14,6 +15,7 @@ internal data class LocalToolRequirement(
     val accessibility: Boolean = false,
     val systemAccess: ToolSystemAccess = ToolSystemAccess.NONE,
     val colorOs: Boolean = false,
+    val concurrency: ToolConcurrency = ToolConcurrency.SERIAL,
 )
 
 /** 展示、模型目录与执行边界共同使用的本地工具能力合同。未登记的工具不能发布。 */
@@ -79,6 +81,20 @@ internal object AgentToolRequirements {
         listOf("search_coloros_memories", "search_saved_places", "search_personal_orders").forEach { name ->
             put(name, getValue(name).copy(lsposedRequirement = LsposedRequirement.OPTIONAL))
         }
+        // 只放行明确无副作用、且实现层没有共享 GUI/终端会话状态的只读工具。
+        // 未登记工具默认串行，避免新增工具在不知情的情况下被并行调度。
+        listOf(
+            "read_file", "list_directory", "search_code",
+            "get_current_context", "device_status", "network_info",
+            "memory_get", "skills_list", "skills_read", "skills_read_resource",
+            "search_files", "search_media", "search_audio", "search_recordings",
+            "search_calendar_events", "search_contacts", "search_call_history",
+            "search_messages", "search_downloads", "search_notification_history",
+            "recent_notifications", "recent_app_activity", "app_usage_summary",
+            "get_setting", "get_current_location", "get_device_environment",
+        ).forEach { name ->
+            put(name, getValue(name).copy(concurrency = ToolConcurrency.PARALLEL_READ_ONLY))
+        }
     }
 
     val toolNames: Set<String> get() = definitions.keys
@@ -89,6 +105,9 @@ internal object AgentToolRequirements {
         requireNotNull(find(name)) { "Missing tool requirements: $name" }.rootRequirement
 
     fun requiresAccessibility(name: String): Boolean = find(name)?.accessibility == true
+
+    fun isParallelReadOnly(name: String): Boolean =
+        find(name)?.concurrency == ToolConcurrency.PARALLEL_READ_ONLY
 
     fun rootDenied(name: String, arguments: JSONObject, rootAvailable: Boolean): Boolean {
         if (rootAvailable) return false

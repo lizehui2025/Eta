@@ -7,7 +7,6 @@ import android.app.job.JobScheduler
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.SystemClock
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
@@ -16,6 +15,29 @@ object KeepAliveScheduler {
 
     private const val JOB_ID = 1001
     private const val INTERVAL_MS = 15 * 60 * 1000L
+
+    /**
+     * 按场景刷新保活：只有活跃 run、待处理结果或用户显式开启常驻时才保留
+     * Job/闹钟；空闲且未开启常驻时主动取消，避免无任务时每 15 分钟唤醒。
+     */
+    fun scheduleIfNeeded(
+        context: Context,
+        activeRun: Boolean,
+        pendingResults: Boolean,
+        alwaysOn: Boolean,
+    ) {
+        if (shouldSchedule(activeRun, pendingResults, alwaysOn)) {
+            scheduleKeepAlive(context)
+        } else {
+            cancelKeepAlive(context)
+        }
+    }
+
+    internal fun shouldSchedule(
+        activeRun: Boolean,
+        pendingResults: Boolean,
+        alwaysOn: Boolean,
+    ): Boolean = alwaysOn || activeRun || pendingResults
 
     /**
      * 保活只是优化：任何调度失败都必须退化为"没有保活"，绝不能把调用方（服务 onCreate，在启动路径上）带崩。
@@ -69,15 +91,13 @@ object KeepAliveScheduler {
             ?.getPendingJob(JOB_ID) != null
 
     internal fun scheduleAlarmFallback(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-            val pendingIntent = createKeepAlivePendingIntent(context)
-            alarmManager?.setAndAllowWhileIdle(
-                AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                SystemClock.elapsedRealtime() + INTERVAL_MS,
-                pendingIntent
-            )
-        }
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+        val pendingIntent = createKeepAlivePendingIntent(context)
+        alarmManager?.setAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + INTERVAL_MS,
+            pendingIntent
+        )
     }
 
     private fun createKeepAlivePendingIntent(context: Context): PendingIntent {

@@ -12,8 +12,9 @@ internal object ResponsesRequestBuilder {
         promptCacheKey: String? = null,
         options: ModelRequestOptions? = null,
         codingMode: Boolean = false,
+        projectionCache: AgentRequestProjectionCache = AgentRequestProjectionCache(),
     ): JSONObject {
-        val input = buildInput(messages)
+        val input = buildInput(messages, projectionCache)
         val responseTools = buildTools(tools, config.hostedWebSearchEnabled)
         val instructions = OpenAiRequestMessages.responsesInstructions(messages)
             .ifBlank { config.systemPrompt }
@@ -45,30 +46,44 @@ internal object ResponsesRequestBuilder {
         return request
     }
 
-    private fun buildInput(messages: JSONArray): JSONArray = JSONArray().also { input ->
+    private fun buildInput(
+        messages: JSONArray,
+        cache: AgentRequestProjectionCache,
+    ): JSONArray = JSONArray().also { input ->
         for (index in 0 until messages.length()) {
             val message = messages.optJSONObject(index) ?: continue
-            ResponsesEphemeralState.outputItems(message)?.let { items ->
-                for (itemIndex in 0 until items.length()) input.put(copyJsonValue(items.opt(itemIndex)))
-                continue
+            val projected = cache.responsesInput(message) { source ->
+                projectInput(source)
             }
-            when (message.optString("role")) {
-                "tool" -> input.put(
-                    JSONObject()
-                        .put("type", "function_call_output")
-                        .put("call_id", message.optString("tool_call_id"))
-                        .put("output", message.optString("content")),
-                )
-                "assistant" -> appendAssistantInput(input, message)
-                "system", "developer" -> Unit
-                else -> input.put(
-                    JSONObject()
-                        .put("type", "message")
-                        .put("role", "user")
-                        .put("content", convertUserContent(message.opt("content"))),
-                )
+            for (projectedIndex in 0 until projected.length()) {
+                input.put(projected.opt(projectedIndex))
             }
         }
+    }
+
+    private fun projectInput(message: JSONObject): JSONArray {
+        val result = JSONArray()
+        ResponsesEphemeralState.outputItems(message)?.let { items ->
+            for (itemIndex in 0 until items.length()) result.put(copyJsonValue(items.opt(itemIndex)))
+            return result
+        }
+        when (message.optString("role")) {
+            "tool" -> result.put(
+                JSONObject()
+                    .put("type", "function_call_output")
+                    .put("call_id", message.optString("tool_call_id"))
+                    .put("output", message.optString("content")),
+            )
+            "assistant" -> appendAssistantInput(result, message)
+            "system", "developer" -> Unit
+            else -> result.put(
+                JSONObject()
+                    .put("type", "message")
+                    .put("role", "user")
+                    .put("content", convertUserContent(message.opt("content"))),
+            )
+        }
+        return result
     }
 
     private fun appendAssistantInput(input: JSONArray, message: JSONObject) {
