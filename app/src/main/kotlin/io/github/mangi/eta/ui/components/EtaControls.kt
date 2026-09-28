@@ -21,12 +21,12 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.window.WindowDialog
 
 internal object EtaControlDefaults {
-    val ButtonCornerRadius = 22.dp
-    val ButtonMinHeight = 44.dp
-    val ButtonPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
-    val DialogCornerRadius = 22.dp
-    val DialogInsideMargin = DpSize(24.dp, 24.dp)
-    val DialogOutsideMargin = DpSize(16.dp, 16.dp)
+    val ButtonCornerRadius = EtaDimens.ButtonCorner
+    val ButtonMinHeight = EtaDimens.ButtonMinHeight
+    val ButtonPadding = PaddingValues(horizontal = EtaSpacing.lg, vertical = 10.dp)
+    val DialogCornerRadius = EtaDimens.DialogCorner
+    val DialogInsideMargin = DpSize(EtaSpacing.xxl, EtaSpacing.xxl)
+    val DialogOutsideMargin = DpSize(EtaSpacing.lg, EtaSpacing.lg)
 }
 
 @Composable

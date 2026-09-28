@@ -195,7 +195,9 @@ internal class AgentLocalTools(
                 }
             }
             when (toolCall.name) {
-                "get_current_context" -> textResult(DeviceContextTool.current(context))
+                "get_current_context" -> textResult(
+                    DeviceContextTool.current(context, includeLocation = deviceContextLocationEnabled()),
+                )
                 "search_apps" -> textResult(searchApps(args))
                 "launch_app" -> textResult(launchApp(args))
                 "open_uri" -> textResult(openUri(args))
@@ -396,6 +398,13 @@ internal class AgentLocalTools(
             },
         )
     }
+
+    /**
+     * get_current_context 的位置字段与 get_current_location 同一门槛：敏感读取开关 + 后台定位授权。
+     * 否则这里会成为绕过敏感读授权的定位读取入口。
+     */
+    private fun deviceContextLocationEnabled(): Boolean =
+        deviceSensitiveReadToolsEnabled() && AgentToolCapabilities.locationAccessGranted(context)
 
     private fun observeScreen(args: JSONObject): AgentModelClient.ToolResult {
         publishedObservation.set(PublishedObservation())

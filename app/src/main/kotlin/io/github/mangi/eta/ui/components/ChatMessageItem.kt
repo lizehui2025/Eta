@@ -54,6 +54,7 @@ import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
@@ -158,6 +159,7 @@ import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
+import io.github.mangi.eta.ui.model.UserQuestionMessageUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
@@ -364,6 +366,7 @@ internal fun ChatMessageItem(
             onSelectCandidate = { onSelectReplyCandidate(message.id, it) },
             modifier = modifier,
         )
+        is UserQuestionMessageUi -> UserQuestionCard(message = message, modifier = modifier)
         is SystemNoticeMessageUi -> if (message.code == SystemNoticeCode.ContextCompaction) {
             ContextCompactionMarker(message = message, modifier = modifier)
         } else {
@@ -637,11 +640,7 @@ private fun UserMessageBubble(
     val visiblePrompt = remember(message.content) {
         AgentFileReferencePromptCodec.parse(message.content)
     }
-    val overlayBubbleColor = if (MiuixTheme.colorScheme.background.luminance() < 0.5f) {
-        Color(0xFF37393D)
-    } else {
-        Color(0xFFE5E7EA)
-    }
+    val overlayBubbleColor = overlayBubbleColor()
 
     Row(
         modifier = modifier
@@ -801,6 +800,86 @@ private fun MessageTooltipAction(
 }
 
 // ── 上下文压缩：时间线中的轻量胶囊标记 ─────────────────────────────────
+
+/**
+ * Question card: a read-only record of the question and its answer.
+ *
+ * Answering lives in the pending-question bar above the input (PendingQuestionPrompt); the card itself is not
+ * interactive,
+ * so a restored conversation replays question and answer faithfully without any interaction state.
+ */
+@Composable
+private fun UserQuestionCard(
+    message: UserQuestionMessageUi,
+    modifier: Modifier = Modifier,
+) {
+    val pulseAlpha = rememberActivePulse(active = message.running, label = "question_pulse")
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(MiuixTheme.colorScheme.surface)
+            .border(
+                0.5.dp,
+                MiuixTheme.colorScheme.outline.copy(alpha = 0.5f),
+                RoundedCornerShape(14.dp),
+            )
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Rounded.ChatBubble,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(13.dp)
+                    .graphicsLayer(alpha = if (message.running) pulseAlpha else 1f),
+                tint = if (message.running) {
+                    MiuixTheme.colorScheme.primary
+                } else {
+                    MiuixTheme.colorScheme.onSurfaceVariantSummary
+                },
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = stringResource(R.string.user_question_title),
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = message.question,
+            style = MiuixTheme.textStyles.body2,
+            color = MiuixTheme.colorScheme.onSurface,
+        )
+        if (message.options.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = message.options.joinToString(separator = " · "),
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = message.answer?.takeIf(String::isNotBlank)
+                ?: stringResource(
+                    when {
+                        message.timedOut -> R.string.user_question_timed_out
+                        message.cancelled -> R.string.user_question_cancelled
+                        else -> R.string.user_question_waiting
+                    },
+                ),
+            style = MiuixTheme.textStyles.footnote1,
+            color = if (message.answer.isNullOrBlank()) {
+                MiuixTheme.colorScheme.onSurfaceVariantSummary
+            } else {
+                MiuixTheme.colorScheme.primary
+            },
+        )
+    }
+}
 
 /**
  * 压缩不是一轮对话结果，而是上下文维护事件；用居中胶囊标记与助手正文区分，

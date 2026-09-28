@@ -83,6 +83,7 @@ import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolGroupUi
 import io.github.mangi.eta.ui.model.ToolItemUi
 import io.github.mangi.eta.ui.model.UserMessageUi
+import io.github.mangi.eta.ui.model.UserQuestionMessageUi
 import io.github.mangi.eta.ui.model.canDeleteUserSkill
 import io.github.mangi.eta.ui.model.contentMatches
 import java.io.InputStream
@@ -2143,6 +2144,38 @@ internal class AgentAppState(
                 insertSupplementMessage(runId, event.index, event.text, persist = persistSupplement)
             }
 
+            is AgentEvent.UserQuestionAsked -> {
+                // The question card is its own entry on the timeline and must not be folded into the work-process card.
+                updateMessages(runId) { messages ->
+                    val id = userQuestionMessageId(event.questionId)
+                    messages.filterNot { it.id == id } + UserQuestionMessageUi(
+                        id = id,
+                        questionId = event.questionId,
+                        question = event.question,
+                        options = event.options,
+                        multiSelect = event.multiSelect,
+                        allowFreeform = event.allowFreeform,
+                        running = true,
+                    )
+                }
+            }
+
+            is AgentEvent.UserQuestionAnswered -> {
+                updateMessages(runId) { messages ->
+                    messages.map { message ->
+                        if (message !is UserQuestionMessageUi || message.questionId != event.questionId) {
+                            message
+                        } else {
+                            message.copy(
+                                answer = event.answer.takeIf { it.isNotBlank() },
+                                timedOut = event.timedOut,
+                                running = false,
+                            )
+                        }
+                    }
+                }
+            }
+
             is AgentEvent.ToolStarted -> {
                 updateRunTrace(runId) { messages ->
                     val finalizedThinking =
@@ -2366,6 +2399,52 @@ internal class AgentAppState(
                     message
                 }
             }
+        }
+    }
+
+    /**
+     * Stable message id for the question card: re-projecting the same questionId replaces it in
+     * place instead of duplicating.
+     */
+    private fun userQuestionMessageId(questionId: String): String = "question-$questionId"
+
+    /**
+     * The user answers in the UI: land it locally first (the event that follows confirms it again), then deliver it
+     * to the waiting run.
+     * A failed delivery only affects this one answer (a question that already timed out, say); it neither interrupts
+     * the conversation nor rolls the card back.
+     */
+    fun answerUserQuestion(questionId: String, answer: String, selectedOptions: List<String>) {
+        val runId = currentRunId ?: return
+        val text = answer.trim()
+        if (questionId.isBlank() || text.isBlank()) return
+        val selected = selectedOptions.map { it.trim() }.filter { it.isNotBlank() }
+
+        val conversationId = conversationIdForRun(runId) ?: selectedConversationId
+        val state = conversationId?.let { conversationsById[it] }
+        if (conversationId != null && state != null) {
+            updateConversation(
+                conversationId,
+                state.copy(
+                    messages = state.messages.map { message ->
+                        if (message !is UserQuestionMessageUi || message.questionId != questionId) {
+                            message
+                        } else {
+                            message.copy(answer = text, timedOut = false, running = false)
+                        }
+                    },
+                ),
+            )
+            refreshConversationSummaries()
+        }
+
+        scope.launch(Dispatchers.IO) {
+            AgentRuntimeClient(appContext, AndroidAgentLogger).answerUserQuestion(
+                runId = runId,
+                questionId = questionId,
+                answer = text,
+                selectedOptions = selected,
+            )
         }
     }
 

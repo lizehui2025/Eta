@@ -9,6 +9,7 @@ import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import io.github.mangi.eta.ui.model.UserMessageUi
+import io.github.mangi.eta.ui.model.UserQuestionMessageUi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -620,5 +621,51 @@ class AgentRunMessageProjectorTest {
         assertEquals("上下文压缩已中断", interruptedNotice.detail)
         assertFalse(interruptedNotice.running)
         assertEquals(base + completed, projector.finishContextCompaction(runId, base + completed, "上下文压缩已中断"))
+    }
+
+    @Test
+    fun finalizeRunSettlesPendingQuestionAsCancelled() {
+        val projector = AgentRunMessageProjector { 1_000L }
+        val runId = "run-question"
+        val pending = UserQuestionMessageUi(
+            id = "question-call-1",
+            questionId = "call-1",
+            question = "继续吗？",
+            options = listOf("继续", "停止"),
+            running = true,
+        )
+        val answered = UserQuestionMessageUi(
+            id = "question-call-2",
+            questionId = "call-2",
+            question = "选择",
+            answer = "继续",
+            running = true,
+        )
+
+        val finalized = projector.finalizeRun(runId, listOf(pending, answered))
+
+        val settledPending = finalized.filterIsInstance<UserQuestionMessageUi>().first()
+        assertFalse(settledPending.running)
+        assertTrue(settledPending.cancelled)
+        val settledAnswered = finalized.filterIsInstance<UserQuestionMessageUi>().last()
+        assertFalse(settledAnswered.running)
+        assertFalse(settledAnswered.cancelled)
+    }
+
+    @Test
+    fun interruptRunningToolsSettlesPendingQuestion() {
+        val projector = AgentRunMessageProjector { 1_000L }
+        val pending = UserQuestionMessageUi(
+            id = "question-call-9",
+            questionId = "call-9",
+            question = "继续吗？",
+            running = true,
+        )
+
+        val interrupted = projector.interruptRunningTools("已中断", listOf(pending))
+
+        val settled = interrupted.filterIsInstance<UserQuestionMessageUi>().single()
+        assertFalse(settled.running)
+        assertTrue(settled.cancelled)
     }
 }

@@ -37,6 +37,8 @@ internal object AgentToolRequirements {
             "character_memory_get", "character_memory_write",
             "skills_list", "skills_read", "skills_read_resource", "skills_list_curated",
             "skills_inspect_github", "skills_install_from_github", "spawn_agents", "todo_write",
+            // Only talks to the user and touches no device capability, so it needs no permission.
+            "ask_user",
         )
         register(
             RootRequirement.PARTIAL,

@@ -82,6 +82,28 @@ data class SystemNoticeMessageUi(
     val running: Boolean = false,
 ) : AgentChatMessageUi
 
+/**
+ * A message where the agent asks the user something: it needs an on-the-spot pick or a typed answer.
+ *
+ * Unlike a tool trace it is its own card on the timeline, which is why it gets a dedicated message type;
+ * the answer lands in [answer], and [timedOut] turns true when the wait expires.
+ */
+@Immutable
+data class UserQuestionMessageUi(
+    override val id: String,
+    val questionId: String,
+    val question: String,
+    val options: List<String> = emptyList(),
+    val multiSelect: Boolean = false,
+    val allowFreeform: Boolean = true,
+    val answer: String? = null,
+    val timedOut: Boolean = false,
+    /** The run was stopped or failed before an answer arrived; distinct from a timeout. */
+    val cancelled: Boolean = false,
+    /** Runtime only: whether an answer is still pending; restored questions from history always count as finished. */
+    val running: Boolean = false,
+) : AgentChatMessageUi
+
 @Immutable
 data class TokenUsageUi(
     val contextTokens: Int? = null,

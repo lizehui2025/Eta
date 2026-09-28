@@ -207,7 +207,7 @@ class AgentConversationStoreTest {
             )
         }
 
-        val snapshot = AgentConversationStore.load(context)
+        val snapshot = runBlocking { AgentConversationStore.load(context) }
 
         assertEquals("conv-1", snapshot.selectedConversationId)
         assertEquals("屏幕分析", snapshot.titles.getValue("conv-1"))
@@ -245,7 +245,7 @@ class AgentConversationStoreTest {
             )
         }
 
-        val snapshot = AgentConversationStore.load(context)
+        val snapshot = runBlocking { AgentConversationStore.load(context) }
         assertEquals("", snapshot.titles.getValue("conv-notice"))
         assertEquals(
             notice,
@@ -272,7 +272,7 @@ class AgentConversationStoreTest {
             )
         }
 
-        val restored = AgentConversationStore.load(context)
+        val restored = runBlocking { AgentConversationStore.load(context) }
             .conversationsById
             .getValue("conv-unknown")
 
@@ -331,7 +331,7 @@ class AgentConversationStoreTest {
             )
         }
 
-        val snapshot = AgentConversationStore.load(context)
+        val snapshot = runBlocking { AgentConversationStore.load(context) }
 
         assertEquals(60, snapshot.conversationsById.size)
         val restored = snapshot.conversationsById.getValue("conv-0")
@@ -380,7 +380,7 @@ class AgentConversationStoreTest {
                 .conversationDao()
                 .contextCheckpoint("conv-large")!!
         }
-        val restored = AgentConversationStore.load(context)
+        val restored = runBlocking { AgentConversationStore.load(context) }
             .conversationsById
             .getValue("conv-large")
 
@@ -420,7 +420,7 @@ class AgentConversationStoreTest {
             )
         }
 
-        val restored = AgentConversationStore.load(context)
+        val restored = runBlocking { AgentConversationStore.load(context) }
             .conversationsById
             .getValue("conv-legacy-large")
 
@@ -430,7 +430,7 @@ class AgentConversationStoreTest {
 
     @Test
     fun loadKeepsDatabaseEmptyUntilFirstMessageIsSent() {
-        val snapshot = AgentConversationStore.load(context)
+        val snapshot = runBlocking { AgentConversationStore.load(context) }
 
         assertTrue(snapshot.conversationsById.isEmpty())
         assertEquals(null, snapshot.selectedConversationId)
@@ -517,7 +517,7 @@ class AgentConversationStoreTest {
             )
         }
 
-        val snapshot = AgentConversationStore.load(context)
+        val snapshot = runBlocking { AgentConversationStore.load(context) }
         assertTrue(snapshot.conversationsById.isEmpty())
         assertEquals(null, snapshot.selectedConversationId)
     }

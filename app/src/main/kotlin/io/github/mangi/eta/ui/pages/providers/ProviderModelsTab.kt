@@ -183,7 +183,7 @@ internal fun ProviderModelsTab(
     contentSidePadding: Dp,
 ) {
     val context = LocalContext.current
-    val selectedModelId by RuntimeConfigRepository.selectedModelIdFlow().collectAsState(initial = null)
+    val selectedModelId by remember { RuntimeConfigRepository.selectedModelIdFlow() }.collectAsState(initial = null)
     var isFetching by remember { mutableStateOf(false) }
     var isMutatingModel by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }

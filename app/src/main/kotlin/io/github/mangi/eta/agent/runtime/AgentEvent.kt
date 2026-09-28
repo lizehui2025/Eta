@@ -152,6 +152,37 @@ internal sealed interface AgentEvent {
             "user_supplement_received index=$index, chars=${text.length}"
     }
 
+    /**
+     * The agent asks the user a question; the run blocks there until an answer arrives.
+     * [questionId] reuses the originating toolCallId: the UI can align it with the tool trace without minting extra ids.
+     */
+    data class UserQuestionAsked(
+        val questionId: String,
+        val round: Int,
+        val toolCallId: String,
+        val question: String,
+        val options: List<String>,
+        val multiSelect: Boolean,
+        val allowFreeform: Boolean,
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "user_question_asked id=${questionId.toSafeLogToken()}, round=$round, " +
+                "options=${options.size}, multi=$multiSelect, freeform=$allowFreeform, " +
+                "chars=${question.length}"
+    }
+
+    /** The question was answered, timed out or died with the run; [answer] is empty when [timedOut] is true. */
+    data class UserQuestionAnswered(
+        val questionId: String,
+        val answer: String,
+        val selectedOptions: List<String>,
+        val timedOut: Boolean,
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "user_question_answered id=${questionId.toSafeLogToken()}, " +
+                "selected=${selectedOptions.size}, timed_out=$timedOut, chars=${answer.length}"
+    }
+
     data class ToolStarted(
         val round: Int,
         val toolCallId: String,

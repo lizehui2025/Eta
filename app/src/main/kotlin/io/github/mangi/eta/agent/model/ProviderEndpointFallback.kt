@@ -23,11 +23,15 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
  * 2. Decides whether a failure means "this address is not this endpoint", which is the only kind
  *    of failure allowed to trigger a retry against the other protocol.
  *
- * Deliberately not done: guessing "endpoint unsupported" from a 400/422 response body. Failures
- * carry only a length-bounded reason summary (see AgentModelFailure) and the raw body never
- * reaches this layer; fuzzy matching would risk routing a request that could have succeeded to
- * the wrong endpoint, while 404/405/501 plus a mismatched stream shape are structured signals
- * that already cover the real cases.
+ * Deliberately narrow: a 400/422 is only trusted when the server names the protocol explicitly
+ * (`ModelProtocolUnsupported` or the equivalent phrase). That classification happens at the failure
+ * layer, where the body is still available, so this layer keeps seeing nothing but a code. A generic
+ * bad-request 400 is never read as "wrong endpoint"; 404/405/501 and a mismatched stream shape stay
+ * the structural signals. The field showed this gap is real: a gateway that implements only one
+ * protocol answers the other one with 400 + an explicit rejection and no stream to inspect — the
+ * old rule left the user with a permanent "invalid request parameters" and no way to recover.
+ * Worst case of a wrong call is one extra request against the other protocol, and the request had
+ * already failed, so the trade-off is bounded.
  */
 internal object ProviderEndpointFallback {
 

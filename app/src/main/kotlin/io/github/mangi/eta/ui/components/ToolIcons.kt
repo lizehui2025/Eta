@@ -24,6 +24,7 @@ import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.Extension
+import androidx.compose.material.icons.rounded.Face
 import androidx.compose.material.icons.rounded.FindReplace
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Image
@@ -85,8 +86,10 @@ internal fun iconForTool(toolId: String): ImageVector = when (toolId) {
     "image_generation", "image_generation_call", "图像生成" -> Icons.Rounded.Image
     "mcp_call", "MCP 工具" -> Icons.Rounded.Extension
     "memory_get", "memory_write" -> Icons.Rounded.Psychology
+    "character_memory_get", "character_memory_write" -> Icons.Rounded.Face
     "spawn_agents", "subagent" -> Icons.Rounded.Psychology
     "todo_write" -> Icons.Rounded.Checklist
+    "ask_user" -> Icons.Rounded.ChatBubble
     "press_key" -> Icons.Rounded.KeyboardCommandKey
     "open_system_panel" -> Icons.Rounded.WebAsset
     "read_image" -> Icons.Rounded.Image

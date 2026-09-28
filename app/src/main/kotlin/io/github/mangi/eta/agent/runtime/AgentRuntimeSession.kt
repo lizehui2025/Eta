@@ -149,6 +149,30 @@ internal class AgentRuntimeSession(
         return event
     }
 
+    /**
+     * Deliver the user's answer to [AgentEvent.UserQuestionAsked]: wake the waiting tool and broadcast
+     * [AgentEvent.UserQuestionAnswered] so every subscriber (including replay after a reconnect) sees the same answer.
+     *
+     * False means no pending question matched (already timed out, already answered or another run's) —
+     * nothing changes in that case, so a late answer cannot pollute a later run.
+     */
+    fun answerQuestion(questionId: String, answer: String, selectedOptions: List<String>): Boolean {
+        if (questionId.isBlank()) return false
+        if (!controller.answerUserQuestion(questionId, answer, selectedOptions)) return false
+        val event = AgentEvent.UserQuestionAnswered(
+            questionId = questionId,
+            answer = answer,
+            selectedOptions = selectedOptions,
+            timedOut = false,
+        )
+        val sinks = lock.withLock {
+            recordForReplay(event)
+            subscribers.map { it.eventSink }
+        }
+        sinks.forEach { sink -> runCatching { sink(event) } }
+        return true
+    }
+
     private fun recordForReplay(event: AgentEvent) {
         val projected = event.recoveryProjection() ?: return
         val previous = replayEvents.lastOrNull()

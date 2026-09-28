@@ -61,6 +61,21 @@ internal fun AgentOverlayState.applyEvent(event: AgentEvent): AgentOverlayState 
         status = AgentOverlayStatus.ModelResponded,
     )
 
+    // Questions: while an answer is pending the overlay only shows the status and the question;
+    // answering happens in the main app.
+    is AgentEvent.UserQuestionAsked -> copy(
+        phase = AgentOverlayPhase.RUNNING,
+        round = event.round,
+        status = AgentOverlayStatus.WaitingUserAnswer,
+        detailText = event.question,
+    )
+
+    is AgentEvent.UserQuestionAnswered -> copy(
+        phase = AgentOverlayPhase.RUNNING,
+        status = AgentOverlayStatus.Reasoning,
+        detailText = "",
+    )
+
     is AgentEvent.AssistantBlockStart -> when (event.kind) {
         AgentEvent.AssistantBlockKind.TEXT,
         AgentEvent.AssistantBlockKind.THINKING -> this

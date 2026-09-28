@@ -145,11 +145,11 @@ private fun SettingsPageContent(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Provider / Model 选中状态展示
-    val providers by ProviderRepository.providersFlow().collectAsState(initial = emptyList())
-    val selectedProviderId by RuntimeConfigRepository.selectedProviderIdFlow()
+    // Provider / Model 选中状态展示；flow 实例要 remember：每次重组新建 flow 会反复重订阅。
+    val providers by remember { ProviderRepository.providersFlow() }.collectAsState(initial = emptyList())
+    val selectedProviderId by remember { RuntimeConfigRepository.selectedProviderIdFlow() }
         .collectAsState(initial = null)
-    val selectedModelId by RuntimeConfigRepository.selectedModelIdFlow()
+    val selectedModelId by remember { RuntimeConfigRepository.selectedModelIdFlow() }
         .collectAsState(initial = null)
     val selectedProvider = remember(providers, selectedProviderId) {
         providers.find { it.id == selectedProviderId }

@@ -43,9 +43,14 @@ internal object ContextualSearchHooks {
             return
         }
         hooks.intercept("system.contextual-search-config", method, "SystemServer.deviceHasConfigString") { chain ->
-            if (chain.getArg(1) == resourceId) true else chain.proceed()
+            if (chain.getArg(1) == resourceId && circleToSearchEnabled()) true else chain.proceed()
         }
     }
+
+    /** 两个入口手势都关闭时不再伪装 Contextual Search 的目标包，保持系统原样。 */
+    private fun circleToSearchEnabled(): Boolean =
+        Prefs.isEnabled(Prefs.Keys.GESTURE_BAR_CIRCLE_TO_SEARCH) ||
+            Prefs.isEnabled(Prefs.Keys.DOUBLE_FINGER_CIRCLE_TO_SEARCH)
 
     private fun hookContextualSearchBootstrap(
         module: XposedModule,
@@ -107,7 +112,9 @@ internal object ContextualSearchHooks {
             id = "system.contextual-search-package",
             executable = method,
             description = "ContextualSearchManagerService.getContextualSearchPackageName"
-        ) { ModuleConfig.GOOGLE_PACKAGE }
+        ) { chain ->
+            if (circleToSearchEnabled()) ModuleConfig.GOOGLE_PACKAGE else chain.proceed()
+        }
     }
 
     private fun hookContextualSearchPermission(

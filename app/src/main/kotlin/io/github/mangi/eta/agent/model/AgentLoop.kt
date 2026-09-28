@@ -36,6 +36,7 @@ internal class AgentLoop(
     initialSupplementIndex: Int = 0,
     private val subagentHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
     private val todoHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
+    private val askUserHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
 ) {
     data class Result(
         val content: String,
@@ -347,6 +348,38 @@ internal class AgentLoop(
                 }
                 emitToolFinished(round, toolCall, todoResult)
                 return ToolOutcome(toolCall, todoResult)
+            }
+        }
+        if (toolCall.name == AgentInteractionToolCatalog.TOOL_NAME && askUserHandler != null) {
+            onEvent(
+                AgentEvent.ToolStarted(
+                    round = round,
+                    toolCallId = toolCall.id,
+                    name = toolCall.name,
+                    argsPreview = traceFormatter.summarizeArguments(toolCall),
+                    command = traceFormatter.displayCommand(toolCall),
+                ),
+            )
+            val askResult = try {
+                askUserHandler.invoke(round, toolCall)
+            } catch (throwable: Throwable) {
+                // Cancellation must keep propagating; every other failure becomes a tool error so the model learns
+                // the question was never delivered instead of losing the whole round.
+                runController.throwIfCancelled()
+                AgentModelClient.ToolResult(
+                    content = JSONObject()
+                        .put("ok", false)
+                        .put("code", "USER_QUESTION_FAILED")
+                        .put("message", throwable.message ?: throwable.javaClass.simpleName)
+                        .toString(),
+                )
+            }
+            if (askResult != null) {
+                if (askResult.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
+                    sensitiveToolCallIds += toolCall.id
+                }
+                emitToolFinished(round, toolCall, askResult)
+                return ToolOutcome(toolCall, askResult)
             }
         }
         onEvent(

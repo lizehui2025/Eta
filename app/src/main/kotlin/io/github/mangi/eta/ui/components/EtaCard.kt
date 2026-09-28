@@ -11,7 +11,7 @@ import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
 internal object EtaCardDefaults {
-    val CornerRadius = 24.dp
+    val CornerRadius = EtaDimens.CardCorner
 }
 
 @Composable

@@ -127,6 +127,9 @@ internal object AgentSubagentPolicy {
         "wait_for_text", "wait_for_package", "launch_app", "open_uri", "browser_use",
         // 记忆写入、spawn 自身与主代理任务清单
         "memory_write", "character_memory_write", "spawn_agents", "todo_write",
+        // Interrupting the user backwards: subagents are a read-only isolated fan-out and must not
+        // stop to wait for an answer
+        "ask_user",
         // 安装类
         "skills_install_from_github",
         // 敏感写操作

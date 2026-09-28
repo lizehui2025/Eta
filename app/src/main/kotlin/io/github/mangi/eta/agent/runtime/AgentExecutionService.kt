@@ -57,7 +57,7 @@ internal class AgentExecutionService : Service() {
             ensureForeground()
             refreshNotification()
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

@@ -27,6 +27,7 @@ import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import io.github.mangi.eta.ui.model.ToolStepUi
 import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
+import io.github.mangi.eta.ui.model.UserQuestionMessageUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -54,8 +55,8 @@ internal object AgentConversationStore {
     /** 上一次成功落盘的会话指纹；只在事务提交成功后推进，失败时保持旧值以便下次重写。 */
     private var savedConversations: Map<String, AgentConversationPersistence.Saved> = emptyMap()
 
-    fun load(context: Context): Snapshot =
-        runBlocking(Dispatchers.IO) {
+    suspend fun load(context: Context): Snapshot =
+        withContext(Dispatchers.IO) {
             loadSnapshot(context.applicationContext)
         }
 
@@ -295,6 +296,24 @@ internal object AgentConversationStore {
                 renderMarkdown = false,
             )
 
+            is UserQuestionMessageUi -> ConversationMessageEntity(
+                id = id,
+                conversationId = conversationId,
+                sortIndex = sortIndex,
+                type = TYPE_USER_QUESTION,
+                content = question,
+                argumentsSummary = AgentUserQuestionPayload.encode(
+                    questionId = questionId,
+                    options = options,
+                    multiSelect = multiSelect,
+                    allowFreeform = allowFreeform,
+                    timedOut = timedOut,
+                    cancelled = cancelled,
+                ),
+                resultSummary = answer,
+                renderMarkdown = false,
+            )
+
             is ThinkingMessageUi -> ConversationMessageEntity(
                 id = id,
                 conversationId = conversationId,
@@ -360,6 +379,21 @@ internal object AgentConversationStore {
                     code = code,
                     detail = resultSummary,
                     contextTokens = contextTokens,
+                )
+            }
+
+            TYPE_USER_QUESTION -> {
+                val payload = AgentUserQuestionPayload.decode(argumentsSummary)
+                UserQuestionMessageUi(
+                    id = id,
+                    questionId = payload.questionId.ifBlank { id },
+                    question = content,
+                    options = payload.options,
+                    multiSelect = payload.multiSelect,
+                    allowFreeform = payload.allowFreeform,
+                    answer = resultSummary?.takeIf { it.isNotBlank() },
+                    timedOut = payload.timedOut,
+                    cancelled = payload.cancelled,
                 )
             }
 
@@ -468,11 +502,70 @@ internal object AgentConversationStore {
     private const val TYPE_USER = "user"
     private const val TYPE_ASSISTANT = "assistant"
     private const val TYPE_SYSTEM_NOTICE = "system_notice"
+    private const val TYPE_USER_QUESTION = "user_question"
     private const val TYPE_THINKING = "thinking"
     private const val TYPE_TOOL = "tool"
     private const val TYPE_TOOL_SUMMARY = "tool_summary"
     private const val MESSAGE_LOAD_PAGE_SIZE = 128
     private const val LEGACY_UNNAMED_TITLE = "新对话"
+}
+
+/**
+ * Options and flags of a question message go to the argumentsSummary column as JSON, the answer goes to
+ * resultSummary.
+ * That avoids a new table shape: older versions skip an unknown type instead of needing a migration.
+ */
+private object AgentUserQuestionPayload {
+    fun encode(
+        questionId: String,
+        options: List<String>,
+        multiSelect: Boolean,
+        allowFreeform: Boolean,
+        timedOut: Boolean,
+        cancelled: Boolean = false,
+    ): String = JSONObject()
+        .put(KEY_QUESTION_ID, questionId)
+        .put(KEY_OPTIONS, JSONArray(options))
+        .put(KEY_MULTI_SELECT, multiSelect)
+        .put(KEY_ALLOW_FREEFORM, allowFreeform)
+        .put(KEY_TIMED_OUT, timedOut)
+        .put(KEY_CANCELLED, cancelled)
+        .toString()
+
+    fun decode(raw: String?): Decoded {
+        val json = runCatching { JSONObject(raw.orEmpty()) }.getOrNull() ?: return Decoded()
+        val array = json.optJSONArray(KEY_OPTIONS)
+        val options = buildList {
+            if (array == null) return@buildList
+            for (index in 0 until array.length()) {
+                array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+        return Decoded(
+            questionId = json.optString(KEY_QUESTION_ID),
+            options = options,
+            multiSelect = json.optBoolean(KEY_MULTI_SELECT, false),
+            allowFreeform = json.optBoolean(KEY_ALLOW_FREEFORM, true),
+            timedOut = json.optBoolean(KEY_TIMED_OUT, false),
+            cancelled = json.optBoolean(KEY_CANCELLED, false),
+        )
+    }
+
+    data class Decoded(
+        val questionId: String = "",
+        val options: List<String> = emptyList(),
+        val multiSelect: Boolean = false,
+        val allowFreeform: Boolean = true,
+        val timedOut: Boolean = false,
+        val cancelled: Boolean = false,
+    )
+
+    private const val KEY_QUESTION_ID = "questionId"
+    private const val KEY_OPTIONS = "options"
+    private const val KEY_MULTI_SELECT = "multiSelect"
+    private const val KEY_ALLOW_FREEFORM = "allowFreeform"
+    private const val KEY_TIMED_OUT = "timedOut"
+    private const val KEY_CANCELLED = "cancelled"
 }
 
 /**

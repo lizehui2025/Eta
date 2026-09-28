@@ -130,37 +130,43 @@ internal object HotwordSelfHealHooks {
 
         lateinit var retryRunnable: Runnable
         retryRunnable = Runnable {
-            if (resumeGeneration.get() != generation) {
-                return@Runnable
-            }
-            // 即时关闭：开关在延迟任务排队期间可能已被用户关闭。
-            if (!Prefs.isEnabled(Prefs.Keys.HOTWORD_SELF_HEAL)) {
-                cancelPendingResume(resetCooldown = true)
-                return@Runnable
-            }
-            if (!isDeviceNonInteractive(context)) {
-                cancelPendingResume(resetCooldown = true)
-                return@Runnable
-            }
+            try {
+                if (resumeGeneration.get() != generation) {
+                    return@Runnable
+                }
+                // 即时关闭：开关在延迟任务排队期间可能已被用户关闭。
+                if (!Prefs.isEnabled(Prefs.Keys.HOTWORD_SELF_HEAL)) {
+                    cancelPendingResume(resetCooldown = true)
+                    return@Runnable
+                }
+                if (!isDeviceNonInteractive(context)) {
+                    cancelPendingResume(resetCooldown = true)
+                    return@Runnable
+                }
 
-            val resumed = AssistantManager.resumeSoftwareHotwordDetection(
-                logger = logger,
-                source = "ScreenOffHotwordSelfHeal$attempt",
-                logFailures = attempt == RESUME_RETRY_COUNT
-            )
-            if (resumed) {
-                cancelPendingResume(resetCooldown = false)
-                logger.debug { "ScreenOffHotwordSelfHeal: 已恢复 Google 软件热词检测" }
-                return@Runnable
-            }
+                val resumed = AssistantManager.resumeSoftwareHotwordDetection(
+                    logger = logger,
+                    source = "ScreenOffHotwordSelfHeal$attempt",
+                    logFailures = attempt == RESUME_RETRY_COUNT
+                )
+                if (resumed) {
+                    cancelPendingResume(resetCooldown = false)
+                    logger.debug { "ScreenOffHotwordSelfHeal: 已恢复 Google 软件热词检测" }
+                    return@Runnable
+                }
 
-            if (attempt >= RESUME_RETRY_COUNT) {
+                if (attempt >= RESUME_RETRY_COUNT) {
+                    clearPendingResume(resetCooldown = false)
+                    return@Runnable
+                }
+
+                attempt += 1
+                handler.postDelayed(retryRunnable, RESUME_STEP_DELAY_MS)
+            } catch (failure: Throwable) {
+                // 任务投递到 system_server 主线程：任何未捕获异常都会崩掉系统服务，必须就地兜底。
+                logger.warn("ScreenOffHotwordSelfHeal failed: type=${failure.javaClass.simpleName}")
                 clearPendingResume(resetCooldown = false)
-                return@Runnable
             }
-
-            attempt += 1
-            handler.postDelayed(retryRunnable, RESUME_STEP_DELAY_MS)
         }
 
         replacePendingResume(handler, retryRunnable)

@@ -21,6 +21,8 @@ internal sealed interface AgentOverlayStatus {
     data object PreparingAnswer : AgentOverlayStatus
     data class PlanningTools(val names: List<String>) : AgentOverlayStatus
     data object SupplementReceived : AgentOverlayStatus
+    /** The agent is waiting for the user; the overlay only shows the hint, answering happens in the app. */
+    data object WaitingUserAnswer : AgentOverlayStatus
     data class RunningTool(val name: String) : AgentOverlayStatus
     data class ToolCompleted(val name: String) : AgentOverlayStatus
     data class HostedToolRunning(val name: String) : AgentOverlayStatus
@@ -59,6 +61,7 @@ internal fun AgentOverlayStatus.localizedText(): String = when (this) {
         stringResource(R.string.overlay_planning_tools, ListFormatter.getInstance(locale).format(labels))
     }
     AgentOverlayStatus.SupplementReceived -> stringResource(R.string.overlay_supplement_received)
+    AgentOverlayStatus.WaitingUserAnswer -> stringResource(R.string.overlay_waiting_user_answer)
     is AgentOverlayStatus.RunningTool -> stringResource(R.string.overlay_running_tool, toolDisplayName(name))
     is AgentOverlayStatus.ToolCompleted -> stringResource(R.string.overlay_tool_completed, toolDisplayName(name))
     is AgentOverlayStatus.HostedToolRunning -> stringResource(R.string.overlay_hosted_tool_running, name)
@@ -124,6 +127,9 @@ internal fun toolDisplayNameResource(name: String): Int? = when (name) {
     "todo_write" -> R.string.tool_todo_write
     "memory_get" -> R.string.tool_memory_get
     "memory_write" -> R.string.tool_memory_write
+    "character_memory_get" -> R.string.tool_character_memory_get
+    "character_memory_write" -> R.string.tool_character_memory_write
+    "ask_user" -> R.string.tool_ask_user
     "set_alarm" -> R.string.tool_set_alarm
     "set_timer" -> R.string.tool_set_timer
     "device_status" -> R.string.tool_device_status

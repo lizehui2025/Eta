@@ -34,6 +34,15 @@ internal class AgentModelFailure(
             if (isContextOverflow(error)) return AgentModelFailure(
                 "CONTEXT_OVERFLOW", false, "模型上下文超过容量限制。",
             )
+            // 服务端明确回绝协议（如 ModelProtocolUnsupported）和"响应体形态不符当前协议"是同一回事：
+            // baseUrl 上的协议选错了。归到同一个失败码，端点回退才会去试另一种协议；
+            // 否则用户只看到一句 HTTP 400 参数错误，永远切不过去。
+            if ((status == 400 || status == 422) && isProtocolUnsupported(body, error)) {
+                logServerRejection(status, body, error)
+                return endpointProtocolMismatch(
+                    "模型接口不支持当前协议（HTTP $status），请检查接口地址是否正确。",
+                )
+            }
             val permanent = isPermanent(error, body)
             logServerRejection(status, body, error)
             val base = if (permanent) {
@@ -77,8 +86,8 @@ internal class AgentModelFailure(
         fun incompleteStream(message: String) = AgentModelFailure("STREAM_INCOMPLETE", true, message)
 
         /**
-         * The endpoint returned data, but none of it is shaped for the current protocol: the baseUrl
-         * most likely points at a different API.
+         * The endpoint does not serve the current protocol: either it answered with data shaped for
+         * the other one, or it rejected the request stating the protocol is unsupported.
          *
          * Distinct from [incompleteStream]: truncation is transient (a retry may succeed), whereas a
          * protocol mismatch would fail again against the same endpoint. This one is therefore
@@ -111,6 +120,20 @@ internal class AgentModelFailure(
             val message = error.optString("message").lowercase()
             return message.contains("maximum context length") || message.contains("prompt is too long") ||
                 message.contains("exceeds the context window") || message.contains("input token count exceeds")
+        }
+
+        /**
+         * OpenAI 兼容服务对不支持的协议有时直接回 400/422（带 ModelProtocolUnsupported 之类的
+         * 错误体），而不是回一个形态不符的响应。两者都必须走端点回退。
+         */
+        private fun isProtocolUnsupported(body: String, error: JSONObject?): Boolean {
+            val haystack = buildString {
+                append(body)
+                error?.optString("message")?.let { append(' ').append(it) }
+                error?.optString("type")?.let { append(' ').append(it) }
+            }
+            return haystack.contains("ModelProtocolUnsupported", ignoreCase = true) ||
+                haystack.contains("does not support this protocol", ignoreCase = true)
         }
 
         private fun isPermanent(error: JSONObject?, body: String): Boolean =

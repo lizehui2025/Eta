@@ -1108,7 +1108,8 @@ internal class RootShellDeviceController(
     private fun UiNode.toJson(): JSONObject =
         JSONObject()
             .put("index", index)
-            .put("text", text)
+            // 密码框只输出占位符：文本仍留在内存节点里用于身份匹配与输入，但不能随观察结果发给模型。
+            .put("text", if (password) PASSWORD_TEXT_MASK else text)
             .put("desc", desc)
             .put("class", className)
             .put("package", packageName)
@@ -1178,10 +1179,10 @@ internal class RootShellDeviceController(
         val output = ByteArrayOutputCollector()
         val stderr = ByteArrayOutputCollector()
         val outputThread = thread(name = "agent-root-stdout") {
-            process.inputStream.use { input -> output.readFrom(input) }
+            process.inputStream.use { input -> output.readFrom(input, MAX_PROCESS_STDOUT_BYTES) }
         }
         val stderrThread = thread(name = "agent-root-stderr") {
-            process.errorStream.use { input -> stderr.readFrom(input) }
+            process.errorStream.use { input -> stderr.readFrom(input, MAX_PROCESS_STDERR_BYTES) }
         }
 
         val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
@@ -1393,7 +1394,8 @@ internal class RootShellDeviceController(
         @Volatile var completed: Boolean = false
             private set
 
-        fun readFrom(input: java.io.InputStream) {
+        /** 持续排空管道、只保留前 [maxBytes] 字节：dumpsys/screencap 失控输出不能无上限留在内存里。 */
+        fun readFrom(input: java.io.InputStream, maxBytes: Int = Int.MAX_VALUE) {
             runCatching {
                 val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                 while (true) {
@@ -1402,7 +1404,10 @@ internal class RootShellDeviceController(
                         completed = true
                         break
                     }
-                    output.write(buffer, 0, read)
+                    val allowed = (maxBytes - output.size()).coerceAtLeast(0)
+                    if (allowed > 0) {
+                        output.write(buffer, 0, read.coerceAtMost(allowed))
+                    }
                 }
             }.onFailure { throwable ->
                 if (throwable !is IOException) throw throwable
@@ -1416,6 +1421,11 @@ internal class RootShellDeviceController(
         private const val MAX_INPUT_TEXT_CHARS = 1_000
         private const val MAX_REPLACE_TEXT_CHARS = 4_000
         private const val MAX_CLIPBOARD_TEXT_CHARS = 20_000
+        private const val PASSWORD_TEXT_MASK = "••••••"
+
+        /** 读取线程持续排空、只保留前 N 字节：dumpsys/screencap 等失控输出不能无上限留在内存里。 */
+        private const val MAX_PROCESS_STDOUT_BYTES = 32 * 1024 * 1024
+        private const val MAX_PROCESS_STDERR_BYTES = 256 * 1024
         private val ROOT_OBSERVATION_IDS = AtomicLong(0)
     }
 }

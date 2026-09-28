@@ -91,6 +91,13 @@ internal data class AgentToolCapabilities(
         fun isColorOsDevice(): Boolean = Build.MANUFACTURER.lowercase(Locale.ROOT) in
             setOf("oppo", "oneplus", "realme")
 
+        /** 与 LOCATION 能力同一口径：后台定位与粗略/精确定位都要授予。 */
+        fun locationAccessGranted(context: Context): Boolean =
+            context.checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED &&
+                (context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                    context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
+
         fun capture(context: Context): AgentToolCapabilities = AgentToolCapabilities(
             rootAvailable = RootAccess.isGranted,
             lsposedAvailable = EtaApp.serviceInstance != null,
@@ -99,10 +106,7 @@ internal data class AgentToolCapabilities(
                 AccessibilityProtectionClient.isEnabled(context),
             notificationsAllowed = AgentNotificationHistoryService.isEnabled(context),
             usageAllowed = AgentPersonalContextTools.hasUsageAccess(context),
-            locationAllowed = context.checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) ==
-                PackageManager.PERMISSION_GRANTED &&
-                (context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-                    context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED),
+            locationAllowed = locationAccessGranted(context),
             colorOs = isColorOsDevice(),
         )
     }

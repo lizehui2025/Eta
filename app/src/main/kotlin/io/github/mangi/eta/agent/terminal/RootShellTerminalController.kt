@@ -40,6 +40,13 @@ internal class RootShellTerminalController(
         const val MAX_ASYNC_OUTPUT_CHARS = 64_000
 
         /**
+         * 常驻会话的输出上限（读取线程持续排空、只保留前 N 字节）。
+         * 会话命令靠 stdout 里的状态标记判定结束：超出上限时标记会丢失，命令按超时收场而不是打爆内存。
+         */
+        const val SESSION_STDOUT_LIMIT_BYTES = 8 * 1024 * 1024
+        const val SESSION_STDERR_LIMIT_BYTES = 1024 * 1024
+
+        /**
          * 进程级 grep 能力缓存：控制器实例每个 run 重建，缓存若随实例走，
          * 每个 run 的首次 search_code 都要重跑最多 5 次 su 探测。
          * 读写统一用 [GREP_TOOL_CACHE_LOCK] 保护，探测在锁内完成。
@@ -174,10 +181,10 @@ internal class RootShellTerminalController(
             stderr = stderr
         )
         session.stdoutThread = thread(name = "agent-terminal-session-stdout-$id", isDaemon = true) {
-            process.inputStream.use { input -> stdout.readFrom(input) }
+            process.inputStream.use { input -> stdout.readFrom(input, SESSION_STDOUT_LIMIT_BYTES) }
         }
         session.stderrThread = thread(name = "agent-terminal-session-stderr-$id", isDaemon = true) {
-            process.errorStream.use { input -> stderr.readFrom(input) }
+            process.errorStream.use { input -> stderr.readFrom(input, SESSION_STDERR_LIMIT_BYTES) }
         }
         session.waiterThread = thread(name = "agent-terminal-session-waiter-$id", isDaemon = true) {
             runCatching { process.waitFor() }

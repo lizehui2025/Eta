@@ -66,7 +66,7 @@ internal fun McpServersScreen(
     val context = LocalContext.current
     val resources = LocalResources.current
     val scope = rememberCoroutineScope()
-    val servers by McpServerRepository.serversFlow().collectAsState(initial = emptyList())
+    val servers by remember { McpServerRepository.serversFlow() }.collectAsState(initial = emptyList())
     var showAdd by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
@@ -318,7 +318,7 @@ internal fun McpServerDetailScreen(
     val context = LocalContext.current
     val resources = LocalResources.current
     val scope = rememberCoroutineScope()
-    val servers by McpServerRepository.serversFlow().collectAsState(initial = emptyList())
+    val servers by remember { McpServerRepository.serversFlow() }.collectAsState(initial = emptyList())
     val server = servers.firstOrNull { it.id == serverId }
     var working by remember { mutableStateOf(false) }
     var pendingRiskyTool by remember { mutableStateOf<McpToolDefinition?>(null) }

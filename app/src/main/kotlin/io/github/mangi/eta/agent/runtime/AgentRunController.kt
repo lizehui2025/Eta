@@ -20,6 +20,8 @@ internal class AgentRunController {
     private val lock = ReentrantLock()
     private val pauseCondition = lock.newCondition()
     private val steeringMessages = ArrayDeque<String>()
+    /** The question currently waiting for an answer; this run executes sequentially, so at most one is pending. */
+    private var pendingQuestion: PendingQuestion? = null
     private var acceptingSteering = true
     @Volatile
     private var paused = false
@@ -119,6 +121,59 @@ internal class AgentRunController {
         throwIfCancelled()
     }
 
+    /**
+     * Ask the user a question and wait for the answer: blocks the worker thread until an answer,
+     * the timeout or cancellation.
+     *
+     * Shaped like [awaitRetryDelay] (cancellable wait plus bounded timeout). Cancellation wins over timeout:
+     * [cancel] sets cancelled before waking the wait (through [register]), so after waking [throwIfCancelled]
+     * always throws: a cancellation is never disguised as "the user did not answer".
+     */
+    fun awaitUserAnswer(
+        questionId: String,
+        timeoutMs: Long,
+        onAsked: () -> Unit,
+    ): UserAnswer {
+        throwIfCancelled()
+        val pending = PendingQuestion(questionId)
+        // Register before asking: an answer racing ahead of the registration would find no waiter and be dropped.
+        lock.withLock {
+            if (cancelled) throw AgentRunCancelledException()
+            pendingQuestion = pending
+        }
+        val binding = register {
+            // Only wakes the wait; cancelled is already set, so the wake-up value is never returned (see above).
+            pending.complete(UserAnswer(answer = "", selectedOptions = emptyList()))
+        }
+        try {
+            onAsked()
+            pending.latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw AgentRunCancelledException()
+        } finally {
+            binding.close()
+            lock.withLock { if (pendingQuestion === pending) pendingQuestion = null }
+        }
+        throwIfCancelled()
+        // 超时也要原子地占用结果槽：否则在 latch 超时返回与 finally 清理之间到达的答案
+        // 会被 answerUserQuestion 接住并广播一条与 timedOut 相冲突的回答事件。
+        pending.complete(UserAnswer(answer = "", selectedOptions = emptyList(), timedOut = true))
+        return checkNotNull(pending.answer)
+    }
+
+    /** Deliver an answer; false means the question already timed out, was already answered or belongs to another run. */
+    fun answerUserQuestion(
+        questionId: String,
+        answer: String,
+        selectedOptions: List<String>,
+    ): Boolean {
+        val pending = lock.withLock {
+            pendingQuestion?.takeIf { it.questionId == questionId } ?: return false
+        }
+        return pending.complete(UserAnswer(answer = answer, selectedOptions = selectedOptions))
+    }
+
     fun register(cancel: () -> Unit): ResourceBinding {
         val resource = CancellableResource(cancel)
         resources.add(resource)
@@ -139,6 +194,32 @@ internal class AgentRunController {
             if (cancelled.compareAndSet(false, true)) cancelBlock()
         }
     }
+
+    /**
+     * A pending question; [complete] only takes the first result, so an answer racing cancellation
+     * or timeout cannot overwrite it.
+     */
+    private class PendingQuestion(val questionId: String) {
+        val latch = CountDownLatch(1)
+
+        @Volatile
+        var answer: UserAnswer? = null
+            private set
+
+        fun complete(result: UserAnswer): Boolean = synchronized(this) {
+            if (answer != null) return false
+            answer = result
+            latch.countDown()
+            true
+        }
+    }
 }
+
+/** Result of [AgentRunController.awaitUserAnswer]; on timeout [timedOut] is true and [answer] is empty. */
+internal data class UserAnswer(
+    val answer: String,
+    val selectedOptions: List<String>,
+    val timedOut: Boolean = false,
+)
 
 internal class AgentRunCancelledException : RuntimeException("Agent run cancelled")

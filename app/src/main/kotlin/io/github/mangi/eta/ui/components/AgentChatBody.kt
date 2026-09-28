@@ -88,6 +88,7 @@ import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
+import io.github.mangi.eta.ui.model.UserQuestionMessageUi
 import io.github.mangi.eta.ui.model.latestContextUsage
 import kotlin.math.exp
 import kotlin.math.min
@@ -137,6 +138,7 @@ internal fun AgentChatBody(
     canCompactContext: Boolean,
     onModelSelected: (String) -> Unit,
     onSubmit: (String) -> Unit,
+    onAnswerUserQuestion: (String, String, List<String>) -> Unit,
     onStop: () -> Unit,
     onAttachImage: (String) -> Unit,
     onRemoveImage: (String) -> Unit,
@@ -228,12 +230,22 @@ internal fun AgentChatBody(
         keepBottomAnchored = keepBottomAnchored,
         onBottomAnchorChanged = { keepBottomAnchored = it },
         onSubmit = { text ->
-            sentFromKeyboard = true
-            // 发送即重新锚定底部：用户从历史上方直接发送时，同帧内 isStreaming 与
-            // 新消息一起到位，立即回到底部并恢复后续的流式平滑跟底。
-            keepBottomAnchored = true
-            onSubmit(text)
+            val pending = visibleMessages.lastOrNull { it is UserQuestionMessageUi && it.running }
+                as? UserQuestionMessageUi
+            if (pending != null) {
+                // While a question is pending the send key answers it (free-form input) instead of starting another turn.
+                onAnswerUserQuestion(pending.questionId, text, emptyList())
+            } else {
+                sentFromKeyboard = true
+                // 发送即重新锚定底部：用户从历史上方直接发送时，同帧内 isStreaming 与
+                // 新消息一起到位，立即回到底部并恢复后续的流式平滑跟底。
+                keepBottomAnchored = true
+                onSubmit(text)
+            }
         },
+        onAnswerUserQuestion = onAnswerUserQuestion,
+        pendingQuestion = visibleMessages.lastOrNull { it is UserQuestionMessageUi && it.running }
+            as? UserQuestionMessageUi,
         onReasoningEffortChange = onReasoningEffortChange,
         onCompactContext = onCompactContext,
         canCompactContext = canCompactContext,
@@ -279,6 +291,8 @@ private fun AgentChatScaffold(
     keepBottomAnchored: Boolean,
     onBottomAnchorChanged: (Boolean) -> Unit,
     onSubmit: (String) -> Unit,
+    onAnswerUserQuestion: (String, String, List<String>) -> Unit,
+    pendingQuestion: UserQuestionMessageUi?,
     onReasoningEffortChange: (ReasoningEffort) -> Unit,
     onCompactContext: () -> Unit,
     canCompactContext: Boolean,
@@ -333,6 +347,8 @@ private fun AgentChatScaffold(
                 pendingFileReferences = pendingFileReferences,
                 messageEdit = messageEdit,
                 onSubmit = onSubmit,
+                onAnswerUserQuestion = onAnswerUserQuestion,
+                pendingQuestion = pendingQuestion,
                 onReasoningEffortChange = onReasoningEffortChange,
                 onCompactContext = onCompactContext,
                 canCompactContext = canCompactContext,
@@ -472,7 +488,7 @@ internal fun AgentConversationMessages(
             // 显现完成后还会切换稳定排版并插入操作行，等其完成测量再收口跟底。
             withFrameNanos { }
             withFrameNanos { }
-            snapshotFlow { !scrollState.canScrollForward }.first { it }
+            snapshotFlow { !isUserDragging && !scrollState.canScrollForward }.first { it }
             isBottomSettling = false
         }
     }
@@ -863,6 +879,8 @@ private fun AgentChatBottomBar(
     pendingFileReferences: List<PendingFileReferenceUi>,
     messageEdit: MessageEditUiState?,
     onSubmit: (String) -> Unit,
+    onAnswerUserQuestion: (String, String, List<String>) -> Unit,
+    pendingQuestion: UserQuestionMessageUi?,
     onReasoningEffortChange: (ReasoningEffort) -> Unit,
     onCompactContext: () -> Unit,
     canCompactContext: Boolean,
@@ -945,6 +963,8 @@ private fun AgentChatBottomBar(
                 availableReasoningEfforts = availableReasoningEfforts,
                 pendingImages = pendingImages,
                 pendingFileReferences = pendingFileReferences,
+                pendingQuestion = pendingQuestion,
+                onAnswerUserQuestion = onAnswerUserQuestion,
                 isEditingMessage = messageEdit != null,
                 editHasLaterTurns = messageEdit?.hasLaterTurns == true,
                 preserveFollowingMessages = messageEdit?.preserveFollowingMessages == true,
@@ -1110,15 +1130,9 @@ private fun SuggestionCard(
 ) {
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(MiuixTheme.colorScheme.surface)
-            .border(
-                width = 0.5.dp,
-                color = MiuixTheme.colorScheme.outline.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(12.dp),
-            )
+            .liquidGlassSurface(cornerRadius = 20.dp)
             .clickable(onClick = onClick)
-            .padding(horizontal = 13.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 14.dp),
     ) {
         Icon(
             imageVector = item.icon,

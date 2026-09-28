@@ -58,4 +58,20 @@ class DeviceContextToolTest {
             assertFalse(has("latitude"))
         }
     }
+
+    @Test
+    fun omitsLocationWhenTheCallerGatesItOff() {
+        val result = JSONObject(
+            DeviceContextTool.current(
+                clock = Clock.fixed(
+                    Instant.parse("2026-01-01T00:00:00Z"),
+                    ZoneId.of("Asia/Kathmandu"),
+                ),
+                location = null,
+            )
+        )
+
+        assertEquals("2026-01-01T05:45:00+05:45", result.getString("datetime"))
+        assertEquals("not_included", result.getJSONObject("location").getString("status"))
+    }
 }

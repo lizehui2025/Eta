@@ -375,9 +375,18 @@ internal object AgentBrowserSession {
         }
     }
 
+    /** 只允许 http/https：file://、content://、javascript: 等会把本地文件读取或脚本执行引进来。 */
+    private fun requireHttpUrl(rawUrl: String) {
+        val scheme = runCatching { Uri.parse(rawUrl).scheme?.lowercase(Locale.ROOT) }.getOrNull()
+        if (scheme != "http" && scheme != "https") {
+            throw BrowserFailure("URL_NOT_ALLOWED", "只允许 http/https 地址", "denied")
+        }
+    }
+
     private fun navigate(args: JSONObject): BrowserToolResult {
         val rawUrl = args.optString("url").trim()
         if (rawUrl.isBlank()) throw BrowserFailure("INVALID_ARGUMENT", "navigate 缺少 url")
+        requireHttpUrl(rawUrl)
         val view = ensureWebView()
         val epoch = activeOperationEpoch
         val waiter = LoadWaiter()
@@ -662,8 +671,10 @@ internal object AgentBrowserSession {
                     setBackgroundColor(Color.WHITE)
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    settings.allowFileAccess = true
-                    settings.allowContentAccess = true
+                    // 不允许 file:// 与 content:// 访问：否则页面或注入脚本可以读取本地文件
+                    // （相册、下载、应用私有数据）并把内容送回模型，绕过敏感读授权。
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
                     settings.javaScriptCanOpenWindowsAutomatically = true
                     settings.mediaPlaybackRequiresUserGesture = false
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
@@ -982,6 +993,21 @@ internal object AgentBrowserSession {
     }
 
     private class BrowserClient : WebViewClient() {
+        /**
+         * 页面发起的跳转同样只放行 http/https：否则 302/JS 跳转可以把主框架引到
+         * file:// 或 content://（配合读取正文的脚本绕开 navigate 的地址校验）。
+         */
+        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+            val url = request.url?.toString().orEmpty()
+            val scheme = runCatching { Uri.parse(url).scheme?.lowercase(Locale.ROOT) }.getOrNull()
+            if (scheme == "http" || scheme == "https" || scheme == "about") return false
+            if (request.isForMainFrame) {
+                currentError = "已阻止非 http(s) 页面跳转"
+                publishSnapshotOnMain()
+            }
+            return true
+        }
+
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             currentUrl = url.orEmpty()
             currentHost = hostOf(currentUrl)

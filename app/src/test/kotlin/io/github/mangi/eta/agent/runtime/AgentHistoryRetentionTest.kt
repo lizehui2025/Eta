@@ -61,14 +61,14 @@ class AgentHistoryRetentionTest {
             assertTrue(it.getInt(0) <= 16_384)
         }
         EtaDatabase.closeForTests()
-        val restored = AgentConversationStore.load(context).conversationsById.getValue("c")
+        val restored = runBlocking { AgentConversationStore.load(context) }.conversationsById.getValue("c")
         assertEquals(journal, restored.journal)
         assertEquals(listOf(summary), restored.history)
         assertEquals(text, (restored.messages.single() as UserMessageUi).content)
         assertEquals(listOf("run"), restored.appliedRuntimeRunIds)
         // 重复保存、缩短正文、删除会话都清理对应分块。
         runBlocking { AgentConversationStore.save(context, "c", mapOf("c" to restored), mapOf("c" to "历史"), mapOf("c" to 2L)) }
-        assertEquals(journal, AgentConversationStore.load(context).conversationsById.getValue("c").journal)
+        assertEquals(journal, runBlocking { AgentConversationStore.load(context) }.conversationsById.getValue("c").journal)
         runBlocking { AgentConversationStore.save(context, null, emptyMap(), emptyMap(), emptyMap()) }
         EtaDatabase.get(context).openHelper.readableDatabase.query("SELECT COUNT(*) FROM agent_text_chunks").use {
             assertTrue(it.moveToFirst()); assertEquals(0, it.getInt(0))

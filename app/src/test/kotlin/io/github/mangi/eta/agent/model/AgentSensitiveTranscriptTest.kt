@@ -20,6 +20,13 @@ class AgentSensitiveTranscriptTest {
     }
 
     @Test
+    fun locationBearingContextToolIsSensitive() {
+        // get_current_context 与 get_current_location 共用同一位置来源：带位置的原始结果不落库。
+        assertTrue(AgentSensitiveToolPolicy.isSensitive("get_current_location"))
+        assertTrue(AgentSensitiveToolPolicy.isSensitive("get_current_context"))
+    }
+
+    @Test
     fun sensitiveToolArgumentsAndResultAreRemovedTogether() {
         val callId = "call_sensitive"
         val messages = JSONArray()

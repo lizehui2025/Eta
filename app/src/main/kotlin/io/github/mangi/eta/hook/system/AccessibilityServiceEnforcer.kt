@@ -62,6 +62,28 @@ internal class AccessibilityServiceEnforcer(
         }
     }
 
+    fun stop(context: Context) {
+        if (!started.compareAndSet(true, false)) return
+        unregisterActiveObservers(context)
+        if (controlSettingObserverRegistered) {
+            try {
+                controlSettingObserver?.let(context.contentResolver::unregisterContentObserver)
+                controlSettingObserverRegistered = false
+            } catch (failure: RuntimeException) {
+                logFailure("无法注销无障碍保护开关监听", failure)
+            }
+        }
+        if (controlReceiverRegistered) {
+            try {
+                controlReceiver?.let(context::unregisterReceiver)
+                controlReceiverRegistered = false
+            } catch (failure: RuntimeException) {
+                logFailure("无法注销无障碍保护控制入口", failure)
+            }
+        }
+        handler.removeCallbacksAndMessages(null)
+    }
+
     private fun reconcile(context: Context, reason: String) {
         val enabled = isEnforcementEnabled(context)
         ensureObserversRegistered(context, enabled)

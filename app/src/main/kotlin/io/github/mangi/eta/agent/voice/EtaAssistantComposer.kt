@@ -127,27 +127,30 @@ private fun AssistantInputBar(
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val canSubmit = input.isNotBlank() && state.phase != EtaVoicePhase.PROCESSING
+    // 等待作答时输入框保持可用：提交即回答提问，而不是被 PROCESSING 挡住的"停止"。
+    val answeringQuestion = state.status == EtaVoiceStatus.WaitingUserAnswer
+    val canSubmit = input.isNotBlank() && (state.phase != EtaVoicePhase.PROCESSING || answeringQuestion)
     var textFocused by remember { mutableStateOf(false) }
     val inputHighlighted = textFocused || keyboardVisible
     val contentColor = colors.inputPrimary
     val secondaryColor = colors.inputSecondary
     val hintColor = colors.inputTertiary
     val inputShape = RoundedCornerShape(24.dp)
+    val stopAction = state.phase == EtaVoicePhase.PROCESSING && !answeringQuestion
     val trailingIcon = when {
-        speech.active || state.phase == EtaVoicePhase.PROCESSING -> R.drawable.ic_assistant_stop
+        speech.active || stopAction -> R.drawable.ic_assistant_stop
         canSubmit -> R.drawable.ic_assistant_send
         else -> R.drawable.ic_assistant_voice
     }
     val trailingDescription = when {
         speech.active -> R.string.voice_finish_speech
-        state.phase == EtaVoicePhase.PROCESSING -> R.string.action_stop
+        stopAction -> R.string.action_stop
         canSubmit -> R.string.voice_send
         else -> R.string.voice_tap_to_speak
     }
     val trailingAction = when {
         speech.active -> onFinishSpeech
-        state.phase == EtaVoicePhase.PROCESSING -> onStop
+        stopAction -> onStop
         canSubmit -> onSubmit
         else -> onMicrophone
     }
@@ -190,7 +193,7 @@ private fun AssistantInputBar(
                 .padding(start = 4.dp, end = 2.dp, top = 6.dp, bottom = 6.dp)
                 .onFocusChanged { textFocused = it.isFocused }
                 .focusRequester(focusRequester),
-            enabled = state.phase != EtaVoicePhase.PROCESSING && !speech.active,
+            enabled = (state.phase != EtaVoicePhase.PROCESSING || answeringQuestion) && !speech.active,
             textStyle = TextStyle(
                 color = contentColor,
                 fontSize = 16.sp,
@@ -205,7 +208,9 @@ private fun AssistantInputBar(
                 Box(contentAlignment = Alignment.CenterStart) {
                     if (input.isEmpty()) {
                         Text(
-                            text = stringResource(R.string.voice_input_hint),
+                            text = stringResource(
+                                if (answeringQuestion) R.string.user_question_hint else R.string.voice_input_hint,
+                            ),
                             color = hintColor,
                             fontSize = 16.sp,
                             maxLines = 1,

@@ -120,6 +120,32 @@ internal class AgentRuntimeClient(
         }
     }
 
+    /**
+     * Submit the user's answer to an ask_user question.
+     *
+     * Fire-and-forget: the waiter lives on the runtime side, so a failed delivery (run finished, question timed out)
+     * only affects this one answer
+     * and the UI converges from later events instead of needing a synchronous result here.
+     */
+    fun answerUserQuestion(
+        runId: String,
+        questionId: String,
+        answer: String,
+        selectedOptions: List<String>,
+    ) {
+        if (runId.isBlank() || questionId.isBlank()) return
+        withRuntimeMessenger(Unit) { serviceMessenger ->
+            val msg = Message.obtain(null, AgentRuntimeWire.MSG_ANSWER_QUESTION)
+            msg.data = AgentRuntimeWire.answerQuestionBundle(
+                runId = runId,
+                questionId = questionId,
+                answer = answer,
+                selectedOptions = selectedOptions,
+            )
+            serviceMessenger.send(msg)
+        }
+    }
+
     fun ackResult(runId: String): Boolean {
         if (runId.isBlank()) return false
         return withRuntimeMessenger(false) { serviceMessenger ->

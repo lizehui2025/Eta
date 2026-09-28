@@ -1872,14 +1872,20 @@ internal object BreenoHooks {
         return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
             when (method.name) {
                 "invoke" -> {
-                    val result = args?.firstOrNull()
-                    val insertResult = parseHistoryInsertResult(result)
-                    logger.debug {
-                        "Breeno history callback[$label]: " +
-                            "saved=${insertResult.saved}, " +
-                            "resultType=${result?.javaClass?.simpleName.toSafeLogToken()}"
+                    // 回调由目标进程稍后触发：HookRegistrar 的 PROTECTIVE 只兜 hooker 本体，
+                    // 这里抛出的异常会直接打回小布进程，必须就地捕获。
+                    runCatching {
+                        val result = args?.firstOrNull()
+                        val insertResult = parseHistoryInsertResult(result)
+                        logger.debug {
+                            "Breeno history callback[$label]: " +
+                                "saved=${insertResult.saved}, " +
+                                "resultType=${result?.javaClass?.simpleName.toSafeLogToken()}"
+                        }
+                        onResult(insertResult)
+                    }.onFailure { failure ->
+                        logger.warn("Breeno history callback[$label] failed: type=${failure.javaClass.simpleName}")
                     }
-                    onResult(insertResult)
                     unit
                 }
                 "toString" -> "BreenoHistoryCallback($label)"

@@ -16,12 +16,13 @@ import org.json.JSONObject
 internal object DeviceContextTool {
     fun current(
         context: Context,
+        includeLocation: Boolean,
         clock: Clock = Clock.systemDefaultZone(),
-    ): String = current(clock, DeviceLocationProvider.latest(context))
+    ): String = current(clock, if (includeLocation) DeviceLocationProvider.latest(context) else null)
 
     internal fun current(
         clock: Clock,
-        location: DeviceLocationProvider.Result,
+        location: DeviceLocationProvider.Result?,
     ): String {
         val localTime = ZonedDateTime.now(clock).truncatedTo(ChronoUnit.SECONDS)
         return JSONObject()
@@ -31,7 +32,7 @@ internal object DeviceContextTool {
                 "weekday",
                 localTime.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.SIMPLIFIED_CHINESE),
             )
-            .put("location", location.toJson())
+            .put("location", location?.toJson() ?: JSONObject().put("status", "not_included"))
             .toString()
     }
 

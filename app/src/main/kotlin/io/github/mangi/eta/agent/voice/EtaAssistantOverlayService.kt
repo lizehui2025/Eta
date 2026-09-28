@@ -151,6 +151,7 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
     private var runJob: Job? = null
     private var dismissalJob: Job? = null
     private var activeRunId: String? = null
+    private var pendingQuestion: AgentEvent.UserQuestionAsked? = null
     private var entryGeneration = 0L
     private var presentedEntryGeneration = -1L
     private var entryScreenContext: EtaAssistantScreenContext? = null
@@ -391,8 +392,49 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
 
     private fun submitInput() {
         val prompt = inputText.trim()
-        if (prompt.isBlank() || activeRunId != null) return
+        if (prompt.isBlank()) return
+        val question = pendingQuestion
+        val runId = activeRunId
+        if (question != null && runId != null) {
+            // 面板没有候选按钮：输入即是作答，命中的候选项同时按 selected_options 回传。
+            val (answer, selectedOptions) = resolveAnswer(question, prompt)
+            pendingQuestion = null
+            inputText = ""
+            updateSoftInput(visible = false)
+            uiState = uiState.copy(
+                phase = EtaVoicePhase.PROCESSING,
+                status = EtaVoiceStatus.Reasoning,
+                messages = uiState.messages + UserMessageUi(
+                    id = "user-answer-${question.questionId}",
+                    content = answer,
+                ),
+            )
+            runCatching { runtimeClient.answerUserQuestion(runId, question.questionId, answer, selectedOptions) }
+            return
+        }
+        if (runId != null) return
         submitPrompt(prompt)
+    }
+
+    /** 支持按序号或原文选择候选项；都不匹配时按自由文本作答。 */
+    private fun resolveAnswer(
+        question: AgentEvent.UserQuestionAsked,
+        raw: String,
+    ): Pair<String, List<String>> {
+        val byNumber = raw.toIntOrNull()?.let { index -> question.options.getOrNull(index - 1) }
+        val byText = question.options.firstOrNull { it.equals(raw, ignoreCase = true) }
+        val option = byNumber ?: byText
+        return if (option != null) option to listOf(option) else raw to emptyList()
+    }
+
+    private fun questionMessageText(event: AgentEvent.UserQuestionAsked): String = buildString {
+        append(event.question)
+        if (event.options.isNotEmpty()) {
+            append("\n")
+            event.options.forEachIndexed { index, option -> append("\n${index + 1}. $option") }
+            append("\n\n")
+            append(getString(R.string.user_question_hint))
+        }
     }
 
     private fun submitPrompt(prompt: String) {
@@ -443,6 +485,7 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
                 if (activeRunId != runId) return@withContext false
                 flushPendingDelta(runId)
                 activeRunId = null
+                pendingQuestion = null
                 runJob = null
                 if (result.contextSnapshot != null) {
                     conversationHistory = result.contextSnapshot.messages
@@ -683,6 +726,30 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
                 status = EtaVoiceStatus.Reasoning
             }
             is AgentEvent.ProviderRequestStarted -> status = EtaVoiceStatus.Reasoning
+            is AgentEvent.UserQuestionAsked -> {
+                // 浮窗直接作答：问题（含候选项）进消息流并弹出键盘，提交走 submitInput 的作答分支。
+                pendingQuestion = event
+                status = EtaVoiceStatus.WaitingUserAnswer
+                messages = messages.filterNot { it.id == userQuestionMessageId(event.questionId) } +
+                    AgentMessageUi(
+                        id = userQuestionMessageId(event.questionId),
+                        content = questionMessageText(event),
+                        isStreaming = false,
+                    )
+                updateSoftInput(visible = true)
+                inputFocusRequestKey++
+            }
+
+            is AgentEvent.UserQuestionAnswered -> {
+                if (pendingQuestion?.questionId == event.questionId) pendingQuestion = null
+                status = EtaVoiceStatus.Reasoning
+                messages = messages.map { message ->
+                    if (message.id != userQuestionMessageId(event.questionId)) return@map message
+                    // A timeout has no answer to show, so the question stays; the model continues with the safest default.
+                    if (event.timedOut) return@map message
+                    AgentMessageUi(id = message.id, content = event.answer, isStreaming = false)
+                }
+            }
             is AgentEvent.SubagentsStarted -> {
                 messages = runMessageProjector.startSubagents(runId, event, messages)
             }
@@ -718,6 +785,9 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
         }
         return state.copy(messages = messages, phase = phase, status = status)
     }
+
+    /** Questions use a single assistant message in the overlay; the typed answer is submitted through submitInput. */
+    private fun userQuestionMessageId(questionId: String): String = "question-$questionId"
 
     private fun finishRunMessages(
         runId: String,
@@ -804,6 +874,7 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
         if (runId != null) {
             flushPendingDelta(runId)
             activeRunId = null
+            pendingQuestion = null
             requestRuntimeCancellation(runId)
             runJob?.cancel()
             runJob = null
@@ -829,6 +900,7 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
     private fun cancelCurrentRun() {
         speechInput.cancel()
         speechState = EtaSpeechState()
+        pendingQuestion = null
         val runId = activeRunId ?: return
         flushPendingDelta(runId)
         activeRunId = null

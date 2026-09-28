@@ -513,6 +513,13 @@ internal const val ETA_PROCESS_OWNER_ENV = "ETA_PROCESS_OWNER"
 internal fun shellQuote(value: String): String =
     "'" + value.replace("'", "'\\''") + "'"
 
+/**
+ * 一次性命令的输出上限：读取线程继续排空管道，只保留前 N 字节。
+ * 没有上限时 `cat 大文件`、`yes` 这类命令会把全部输出留在内存里。
+ */
+private const val ONE_SHOT_STDOUT_LIMIT_BYTES = 4 * 1024 * 1024
+private const val ONE_SHOT_STDERR_LIMIT_BYTES = 256 * 1024
+
 internal data class OneShotShellResult(
     val exitCode: Int,
     val output: ByteArray,
@@ -567,10 +574,10 @@ internal fun runOneShotShell(
         val output = ByteArrayOutputCollector()
         val stderr = ByteArrayOutputCollector()
         val outputThread = thread(name = "agent-terminal-stdout") {
-            process.inputStream.use { input -> output.readFrom(input) }
+            process.inputStream.use { input -> output.readFrom(input, ONE_SHOT_STDOUT_LIMIT_BYTES) }
         }
         val stderrThread = thread(name = "agent-terminal-stderr") {
-            process.errorStream.use { input -> stderr.readFrom(input) }
+            process.errorStream.use { input -> stderr.readFrom(input, ONE_SHOT_STDERR_LIMIT_BYTES) }
         }
         val stdinThread = thread(name = "agent-terminal-stdin") {
             process.outputStream.use { out ->

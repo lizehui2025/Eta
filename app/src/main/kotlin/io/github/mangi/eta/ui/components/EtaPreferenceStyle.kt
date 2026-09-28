@@ -25,20 +25,20 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal object EtaPreferenceColors {
-    val Blue = Color(0xFF0080FF)
-    val Green = StatusSuccess
-    val Orange = Color(0xFFFF7700)
-    val Yellow = StatusWarning
+    val Blue = EtaColors.PreferenceBlue
+    val Green = EtaColors.SuccessLight
+    val Orange = EtaColors.PreferenceOrange
+    val Yellow = EtaColors.WarningLight
 }
 
 internal object EtaPreferenceDefaults {
-    val SidePadding = 16.dp
-    val GroupSpacing = 16.dp
-    val IconSize = 24.dp
-    val IconTextGap = 16.dp
+    val SidePadding = EtaSpacing.lg
+    val GroupSpacing = EtaSpacing.lg
+    val IconSize = EtaDimens.IconSize
+    val IconTextGap = EtaSpacing.lg
     val ContentStart = SidePadding + IconSize + IconTextGap
     fun contentStart(hasLeading: Boolean) = if (hasLeading) ContentStart else SidePadding
-    val RowMinHeight = 52.dp
+    val RowMinHeight = EtaDimens.RowMinHeight
 }
 
 @Composable
@@ -46,7 +46,7 @@ internal fun EtaPreferenceTheme(content: @Composable () -> Unit) {
     val colors = MiuixTheme.colorScheme
     val appearance = LocalAppearanceSettings.current
     val pageColors = if (!appearance.monetEnabled && colors.background.luminance() > 0.5f) {
-        colors.copy(background = Color(0xFFF0F1F2), primary = EtaPreferenceColors.Blue)
+        colors.copy(background = EtaColors.PreferenceBackgroundFallback, primary = EtaPreferenceColors.Blue)
     } else {
         colors
     }
@@ -69,7 +69,7 @@ internal fun EtaPreferenceGroupTitle(text: String, modifier: Modifier = Modifier
         text = text,
         style = MiuixTheme.textStyles.subtitle,
         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-        modifier = modifier.padding(start = 32.dp, end = 32.dp, top = 4.dp, bottom = 8.dp),
+        modifier = modifier.padding(start = EtaSpacing.xxl, end = EtaSpacing.xxl, top = EtaSpacing.xs, bottom = EtaSpacing.sm),
     )
 }
 

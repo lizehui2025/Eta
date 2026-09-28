@@ -207,6 +207,7 @@ internal object AgentModelClient {
             }.getOrNull()
         }
         val todoList = AgentTodoList()
+        val askUserTool = AgentUserQuestionTool(controller = runController, onEvent = onEvent)
         val loop = AgentLoop(
             transcript = transcript,
             systemCount = systemCount,
@@ -231,6 +232,9 @@ internal object AgentModelClient {
                 }
             },
             todoHandler = { round: Int, call: ToolCall -> todoList.write(round, call, onEvent) },
+            askUserHandler = { round: Int, call: ToolCall ->
+                if (call.name == AgentInteractionToolCatalog.TOOL_NAME) askUserTool.ask(round, call) else null
+            },
             toolsForRound = {
                 val capabilities = capabilitiesProvider()
                 if (capabilities.rootAvailable != promptRootAvailable) {

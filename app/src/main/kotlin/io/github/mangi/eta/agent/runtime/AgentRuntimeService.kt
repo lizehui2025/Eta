@@ -2,6 +2,12 @@ package io.github.mangi.eta.agent.runtime
 
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -70,11 +76,13 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         get() = savedStateRegistryController.savedStateRegistry
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val resultIo = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "agent-result-io") }
+    private val resultIo = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "agent-result-io").apply { isDaemon = true } }
     /** 后台 run/ingest 共用有界池，避免每次请求裸 thread() 瞬时堆线程。 */
+    private val runtimeBgDispatcher = Dispatchers.IO.limitedParallelism(2)
     private val runtimeBg = Executors.newFixedThreadPool(2) { runnable ->
         Thread(runnable, "agent-runtime-bg").apply { isDaemon = true }
     }
+    private val runtimeBgScope = CoroutineScope(runtimeBgDispatcher + SupervisorJob())
     private val serviceMessenger = Messenger(IncomingHandler())
 
     @Volatile
@@ -114,6 +122,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        KeepAliveScheduler.scheduleKeepAlive(this)
     }
 
     override fun onBind(intent: Intent): IBinder? {
@@ -122,10 +131,10 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action != ACTION_KEEP_ALIVE || activeSession == null) {
+        if (intent?.action == ACTION_KEEP_ALIVE && activeSession == null) {
             stopSelf(startId)
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -155,7 +164,10 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         pendingStartRequest = null
         activeSession?.cancel("Agent Runtime 服务已停止")
         activeSession = null
-        resultIo.shutdownNow()
+        // 优雅关闭：cancel() 刚把取消终态排进队列，shutdownNow() 会把它丢掉，
+        // 入口进程的 resultLatch 就再也等不到结果。
+        resultIo.shutdown()
+        runtimeBgScope.cancel()
         runCatching { runtimeBg.shutdownNow() }
         mainHandler.removeCallbacksAndMessages(null)
         resultCardView?.let { view -> runCatching { windowManager?.removeView(view) } }
@@ -173,6 +185,23 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         windowManager = null
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        resultCardView?.let { view -> runCatching { windowManager?.removeView(view) } }
+        bubbleView?.let { view -> runCatching { windowManager?.removeView(view) } }
+        orbView?.let { view -> runCatching { windowManager?.removeView(view) } }
+        glowView?.let { view -> runCatching { windowManager?.removeView(view) } }
+        resultCardView = null
+        bubbleView = null
+        orbView = null
+        glowView = null
+        resultCardParams = null
+        bubbleParams = null
+        orbParams = null
+        glowParams = null
+        windowManager = null
+        super.onTaskRemoved(rootIntent)
     }
 
     private inner class IncomingHandler : Handler(Looper.getMainLooper()) {
@@ -211,6 +240,14 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                 AgentRuntimeWire.MSG_CANCEL -> {
                     val runId = msg.data?.let(AgentRuntimeWire::runIdFromBundle).orEmpty()
                     if (runId.isNotBlank()) cancelRun(runId)
+                }
+
+                AgentRuntimeWire.MSG_ANSWER_QUESTION -> {
+                    msg.data?.let(AgentRuntimeWire::answerQuestionFromBundle)?.let { payload ->
+                        if (payload.runId.isNotBlank() && payload.questionId.isNotBlank()) {
+                            answerUserQuestion(payload)
+                        }
+                    }
                 }
 
                 AgentRuntimeWire.MSG_ACK_RESULT -> {
@@ -270,51 +307,51 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         val pending = PendingStartRequest(generation, incoming, replyTo)
         pendingStartRequest = pending
         try {
-            runtimeBg.execute {
-            val prepared = runCatching {
-                val request = AgentRuntimeImageTransfer.materialize(incoming)
-                if (!AgentRuntimeRequestConfigResolver.requiresRuntimeConfig(request)) {
-                    request
-                } else {
-                    val runtimeConfig = runBlocking {
-                        RuntimeConfigRepository.currentRuntimeConfig()
-                    } ?: throw RuntimeConfigUnavailableException()
-                    AgentRuntimeRequestConfigResolver.applyRuntimeConfig(request, runtimeConfig)
+            runtimeBgScope.launch {
+                val prepared = runCatching {
+                    val request = AgentRuntimeImageTransfer.materialize(incoming)
+                    if (!AgentRuntimeRequestConfigResolver.requiresRuntimeConfig(request)) {
+                        request
+                    } else {
+                        val runtimeConfig = withContext(Dispatchers.IO) {
+                            RuntimeConfigRepository.currentRuntimeConfig()
+                        } ?: throw RuntimeConfigUnavailableException()
+                        AgentRuntimeRequestConfigResolver.applyRuntimeConfig(request, runtimeConfig)
+                    }
                 }
-            }
-            mainHandler.post {
-                if (generation != startRequestGeneration || pendingStartRequest !== pending) return@post
-                pendingStartRequest = null
-                sendRequestIngestedTo(replyTo, incoming.request.runId)
-                prepared.fold(
-                    onSuccess = { request ->
-                        val permissions = AgentRuntimePolicy.permissions(
-                            Prefs.localAgentPreferences()
-                        )
-                        startRun(
-                            request.copy(
-                                config = AgentRuntimePolicy.constrain(request.config, permissions),
-                            ),
-                            replyTo,
-                        )
-                    },
-                    onFailure = { throwable ->
-                        AndroidAgentLogger.warnThrottled("runtime_request_prepare_failed") {
-                            "Agent runtime request preparation failed: type=${throwable.safeLogType()}"
-                        }
-                        finishWithFailure(
-                            when (throwable) {
-                                is AgentRuntimeImageTransfer.ImageTransferException ->
-                                    throwable.message ?: "Agent Runtime 无法读取图片"
-                                is RuntimeConfigUnavailableException ->
-                                    "请先在 Eta 中配置可用的模型"
-                                else -> "Agent Runtime 无法准备请求"
-                            },
-                            replyTo,
-                        )
-                    },
-                )
-            }
+                mainHandler.post {
+                    if (generation != startRequestGeneration || pendingStartRequest !== pending) return@post
+                    pendingStartRequest = null
+                    sendRequestIngestedTo(replyTo, incoming.request.runId)
+                    prepared.fold(
+                        onSuccess = { request ->
+                            val permissions = AgentRuntimePolicy.permissions(
+                                Prefs.localAgentPreferences()
+                            )
+                            startRun(
+                                request.copy(
+                                    config = AgentRuntimePolicy.constrain(request.config, permissions),
+                                ),
+                                replyTo,
+                            )
+                        },
+                        onFailure = { throwable ->
+                            AndroidAgentLogger.warnThrottled("runtime_request_prepare_failed") {
+                                "Agent runtime request preparation failed: type=${throwable.safeLogType()}"
+                            }
+                            finishWithFailure(
+                                when (throwable) {
+                                    is AgentRuntimeImageTransfer.ImageTransferException ->
+                                        throwable.message ?: "Agent Runtime 无法读取图片"
+                                    is RuntimeConfigUnavailableException ->
+                                        "请先在 Eta 中配置可用的模型"
+                                    else -> "Agent Runtime 无法准备请求"
+                                },
+                                replyTo,
+                            )
+                        },
+                    )
+                }
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             pendingStartRequest = null
@@ -762,6 +799,22 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         if (!session.isTerminal) {
             session.controller.cancel()
             state.value = state.value.copy(status = AgentOverlayStatus.Stopping)
+        }
+    }
+
+    /**
+     * Deliver a user answer. A runId that does not match the active run is only logged and dropped: the question
+     * belonged to that run,
+     * and a late or mismatched answer must not disturb whatever run is executing now.
+     */
+    private fun answerUserQuestion(payload: AgentRuntimeWire.AnswerQuestion) {
+        val session = activeSession
+        if (session == null || payload.runId != session.runId) {
+            AndroidAgentLogger.debug { "Agent runtime ignored stale question answer" }
+            return
+        }
+        if (!session.answerQuestion(payload.questionId, payload.answer, payload.selectedOptions)) {
+            AndroidAgentLogger.debug { "Agent runtime ignored unmatched question answer" }
         }
     }
 

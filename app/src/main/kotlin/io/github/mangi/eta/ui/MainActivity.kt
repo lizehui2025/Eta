@@ -11,6 +11,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
@@ -37,7 +38,7 @@ class MainActivity : ComponentActivity() {
             val initialAppearance = AppearanceSettingsRepository.settings()
             appliedPredictiveBackEnabled = initialAppearance.predictiveBackEnabled
             setContent {
-                val appearance by AppearanceSettingsRepository.settingsFlow()
+                val appearance by remember { AppearanceSettingsRepository.settingsFlow() }
                     .collectAsState(initial = initialAppearance)
 
                 LaunchedEffect(appearance.themeMode) {

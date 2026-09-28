@@ -11,6 +11,7 @@ import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import io.github.mangi.eta.ui.model.ToolStepUi
 import io.github.mangi.eta.ui.model.UserMessageUi
+import io.github.mangi.eta.ui.model.UserQuestionMessageUi
 
 internal class AgentRunMessageProjector(
     private val nowElapsedRealtime: () -> Long = { SystemClock.elapsedRealtime() },
@@ -203,17 +204,25 @@ internal class AgentRunMessageProjector(
     /** 终态不依赖各块结束事件全部到齐；缺少工具结果时只能标为未知，不能推断执行成功。 */
     fun finalizeRun(runId: String, messages: List<AgentChatMessageUi>): List<AgentChatMessageUi> =
         finalizeText(runId, finalizeThinking(runId, messages)).map { message ->
-            if (
+            when {
+                message is UserQuestionMessageUi && message.running -> message.settle()
                 message is ToolActivityMessageUi &&
-                (message.id.startsWith("$runId-tool-") ||
-                    message.id.startsWith(subagentMessagePrefix(runId))) &&
-                message.status == ToolActivityStatusUi.Running
-            ) {
-                message.copy(status = ToolActivityStatusUi.Unknown)
-            } else {
-                message
+                    (message.id.startsWith("$runId-tool-") ||
+                        message.id.startsWith(subagentMessagePrefix(runId))) &&
+                    message.status == ToolActivityStatusUi.Running ->
+                    message.copy(status = ToolActivityStatusUi.Unknown)
+                else -> message
             }
         }
+
+    /**
+     * 提问还没有得到回答（既未超时也无答案）时，把它标记为被取消；否则只关闭等待态。
+     * 运行结束时提问不可能再被回答，继续留在 running 会把输入路由到一个已不存在的提问上。
+     */
+    private fun UserQuestionMessageUi.settle(): UserQuestionMessageUi = copy(
+        running = false,
+        cancelled = cancelled || (answer.isNullOrBlank() && !timedOut),
+    )
 
     fun finalizeThinkingRound(
         runId: String,
@@ -660,14 +669,15 @@ internal class AgentRunMessageProjector(
         messages: List<AgentChatMessageUi>,
     ): List<AgentChatMessageUi> =
         messages.map { message ->
-            if (message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running) {
-                message.copy(
-                    status = ToolActivityStatusUi.Unknown,
-                    resultSummary = reason.take(MAX_TOOL_RESULT_PREVIEW_CHARS),
-                    steps = message.steps.settleRunningSteps(),
-                )
-            } else {
-                message
+            when {
+                message is UserQuestionMessageUi && message.running -> message.settle()
+                message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running ->
+                    message.copy(
+                        status = ToolActivityStatusUi.Unknown,
+                        resultSummary = reason.take(MAX_TOOL_RESULT_PREVIEW_CHARS),
+                        steps = message.steps.settleRunningSteps(),
+                    )
+                else -> message
             }
         }
 

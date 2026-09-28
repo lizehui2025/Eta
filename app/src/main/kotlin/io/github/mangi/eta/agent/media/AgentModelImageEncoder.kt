@@ -24,6 +24,12 @@ internal object AgentModelImageEncoder {
     private const val MODEL_JPEG_QUALITY = 95
     private const val PREVIEW_JPEG_QUALITY = 80
 
+    /**
+     * 原尺寸档案（附件/工具图片）的解码像素上限：几十 KB 的 PNG 可以声明上亿像素，
+     * 按原尺寸展开就是数 GB 的位图（解压炸弹）。超出时按比例降采样，正常截图（<10MP）不受影响。
+     */
+    private const val MAX_DECODE_PIXELS = 64_000_000.0
+
     private data class EncodingProfile(
         val format: Bitmap.CompressFormat,
         val mimeType: String,
@@ -131,7 +137,7 @@ internal object AgentModelImageEncoder {
         profile: EncodingProfile,
     ): AgentModelClient.ModelImage? {
         if (bounds.width <= 0 || bounds.height <= 0) return null
-        val target = bounds.targetSize(profile)
+        val target = bounds.targetSize(profile).cappedToDecodePixels()
         val options = BitmapFactory.Options().apply {
             inPreferredConfig = Bitmap.Config.ARGB_8888
             inSampleSize = sampleSize(bounds.width, bounds.height, target)
@@ -247,6 +253,16 @@ internal object AgentModelImageEncoder {
                 scale *= sqrt(limit / scaledPixels)
             }
         }
+        return TargetSize(
+            width = (width * scale).toInt().coerceIn(1, width),
+            height = (height * scale).toInt().coerceIn(1, height),
+        )
+    }
+
+    private fun TargetSize.cappedToDecodePixels(): TargetSize {
+        val pixels = width.toDouble() * height
+        if (pixels <= MAX_DECODE_PIXELS) return this
+        val scale = sqrt(MAX_DECODE_PIXELS / pixels)
         return TargetSize(
             width = (width * scale).toInt().coerceIn(1, width),
             height = (height * scale).toInt().coerceIn(1, height),

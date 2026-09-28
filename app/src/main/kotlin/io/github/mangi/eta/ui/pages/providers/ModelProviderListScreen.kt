@@ -50,8 +50,8 @@ internal fun ModelProviderListScreen(
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val providers by ProviderRepository.providersFlow().collectAsState(initial = emptyList())
-    val selectedProviderId by RuntimeConfigRepository.selectedProviderIdFlow().collectAsState(initial = null)
+    val providers by remember { ProviderRepository.providersFlow() }.collectAsState(initial = emptyList())
+    val selectedProviderId by remember { RuntimeConfigRepository.selectedProviderIdFlow() }.collectAsState(initial = null)
     var searchQuery by remember { mutableStateOf("") }
     var providerToDelete by remember { mutableStateOf<ProviderSetting?>(null) }
 

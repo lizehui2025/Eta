@@ -75,6 +75,7 @@ import io.github.mangi.eta.ui.model.AgentContextUsageUi
 import io.github.mangi.eta.ui.model.AgentModelPickerUiState
 import io.github.mangi.eta.ui.model.PendingFileReferenceUi
 import io.github.mangi.eta.ui.model.PendingImageUi
+import io.github.mangi.eta.ui.model.UserQuestionMessageUi
 import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.basic.DropdownImpl
 import top.yukonga.miuix.kmp.basic.Icon
@@ -110,6 +111,8 @@ internal fun AgentChatInputBar(
     availableReasoningEfforts: List<ReasoningEffort>,
     pendingImages: List<PendingImageUi>,
     pendingFileReferences: List<PendingFileReferenceUi>,
+    pendingQuestion: UserQuestionMessageUi?,
+    onAnswerUserQuestion: (String, String, List<String>) -> Unit,
     isEditingMessage: Boolean,
     editHasLaterTurns: Boolean,
     preserveFollowingMessages: Boolean,
@@ -168,6 +171,22 @@ internal fun AgentChatInputBar(
             .fillMaxWidth(),
     ) {
         AnimatedVisibility(
+            visible = pendingQuestion != null,
+            enter = fadeIn(tween(160)),
+            exit = fadeOut(tween(100)) + shrinkVertically(tween(160)),
+        ) {
+            pendingQuestion?.let { question ->
+                PendingQuestionPrompt(
+                    question = question,
+                    onAnswer = { answer, selected ->
+                        onAnswerUserQuestion(question.questionId, answer, selected)
+                    },
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+        }
+
+        AnimatedVisibility(
             visible = pendingFileReferences.isNotEmpty(),
             enter = fadeIn(tween(160)),
             exit = fadeOut(tween(100)) + shrinkVertically(tween(160)),
@@ -223,21 +242,13 @@ internal fun AgentChatInputBar(
                     .dropShadow(
                         shape = InputContainerShape,
                         shadow = Shadow(
-                            radius = 8.dp,
+                            radius = 12.dp,
                             color = Color.Black,
-                            alpha = 0.08f,
+                            alpha = 0.10f,
                         ),
                     )
-                    .squircleSurface(
-                        color = MiuixTheme.colorScheme.surfaceContainer,
-                        cornerRadius = 20.dp,
-                    )
-                    .squircleBorder(
-                        width = 0.5.dp,
-                        color = MiuixTheme.colorScheme.outline.copy(alpha = 0.55f),
-                        cornerRadius = 20.dp,
-                    )
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                    .liquidGlassSurface(cornerRadius = 24.dp)
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
                 Box(
                     modifier = Modifier
@@ -248,7 +259,11 @@ internal fun AgentChatInputBar(
                 ) {
                     if (textFieldState.text.isBlank()) {
                         Text(
-                            text = if (isStreaming) stringResource(R.string.chat_eta_working) else stringResource(R.string.chat_input_hint),
+                            text = when {
+                                pendingQuestion != null -> stringResource(R.string.user_question_hint)
+                                isStreaming -> stringResource(R.string.chat_eta_working)
+                                else -> stringResource(R.string.chat_input_hint)
+                            },
                             style = MiuixTheme.textStyles.body1,
                             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         )
@@ -330,7 +345,9 @@ internal fun AgentChatInputBar(
                         )
 
                         IconButton(
-                            onClick = if (isStreaming) {
+                            // 等待作答时发送键用于提交答案：提问期间 run 仍在流式，若沿用"停止"语义，
+                            // 自由输入作答就永远没有入口。没有可提交内容时保持原来的停止行为。
+                            onClick = if (isStreaming && (pendingQuestion == null || !canSend)) {
                                 onStop
                             } else {
                                 {

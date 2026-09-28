@@ -4,6 +4,8 @@ import io.github.mangi.eta.core.AgentLogger
 
 import android.content.Context
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -74,6 +76,9 @@ internal class DetachedTaskSupervisor(
         /** 单任务日志上限与轮转保留：超限只留尾部，避免 >> 追加吃满存储。 */
         const val MAX_LOG_FILE_BYTES = 2L * 1024L * 1024L
         const val PRUNE_KEEP_TAIL_BYTES = 1L * 1024L * 1024L
+
+        /** 启动阶段的输出上限：进程已 detach，日志在文件里；启动回显只保留前 1MB。 */
+        const val MAX_LAUNCH_OUTPUT_BYTES = 1024 * 1024
 
         // 进程内允许 AI 侧与 UI 侧各持一个实例；记录文件的读-改-写必须经同一把锁串行。
         private val RECORDS_LOCK = Any()
@@ -413,7 +418,7 @@ internal class DetachedTaskSupervisor(
         }
         val output = ByteArrayOutputCollector()
         val reader = thread(name = "agent-daemon-launch-reader", isDaemon = true) {
-            process.inputStream.use { input -> output.readFrom(input) }
+            process.inputStream.use { input -> output.readFrom(input, MAX_LAUNCH_OUTPUT_BYTES) }
         }
         val finished = runCatching { process.waitFor(timeoutSeconds, TimeUnit.SECONDS) }.getOrDefault(false)
         if (!finished) {
@@ -501,7 +506,12 @@ internal class DetachedTaskSupervisor(
                 array.getJSONObject(index).toTask()
             }
         }.getOrElse {
-            logger.warn("Agent terminal daemon records corrupted, resetting")
+            // 记录损坏不能让守护任务凭空消失：保留现场文件以便人工恢复，而不是直接清空覆盖。
+            val backup = File(recordsFile.parentFile, recordsFile.name + ".corrupt-" + System.currentTimeMillis())
+            val preserved = runCatching { recordsFile.renameTo(backup) }.getOrDefault(false)
+            logger.warn(
+                "Agent terminal daemon records corrupted, preserved=${if (preserved) backup.name else "false"}"
+            )
             mutableListOf()
         }
     }
@@ -513,9 +523,8 @@ internal class DetachedTaskSupervisor(
             tasks.forEach { array.put(it.toJson()) }
             val tmp = File(recordsFile.parentFile, recordsFile.name + ".tmp")
             tmp.writeText(array.toString())
-            if (!tmp.renameTo(recordsFile)) {
-                recordsFile.writeText(array.toString())
-            }
+            // 非原子回退（直接 writeText 覆盖）在写入中断时会留下半截记录，下一次读取即触发损坏处理。
+            Files.move(tmp.toPath(), recordsFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
             true
         }.getOrElse {
             logger.warn("Agent terminal daemon records save failed")

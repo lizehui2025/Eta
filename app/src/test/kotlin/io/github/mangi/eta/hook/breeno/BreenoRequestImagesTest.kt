@@ -2,6 +2,10 @@ package io.github.mangi.eta.hook.breeno
 
 import io.github.mangi.eta.agent.model.AgentModelClient
 
+import android.graphics.Bitmap
+import android.util.Base64
+import java.io.ByteArrayOutputStream
+import java.util.Random
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -258,8 +262,22 @@ class BreenoRequestImagesTest {
 
     @Test
     fun inlineImageIsNoLongerRejectedByBinderStringBudget() {
+        // 用真实 PNG 而不是占位文本：内联数据现在会校验图片内容，
+        // 本用例要覆盖的是"大体积内联不再按字符串预算被拒绝"。
+        val side = 256
+        val bitmap = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
+        val random = Random(7L)
+        bitmap.setPixels(IntArray(side * side) { random.nextInt() }, 0, side, 0, 0, side, side)
+        val pngBytes = ByteArrayOutputStream().use { output ->
+            assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+            output.toByteArray()
+        }
+        bitmap.recycle()
+        val payload = "data:image/png;base64," + Base64.encodeToString(pngBytes, Base64.NO_WRAP)
+        assertTrue(payload.length > 300_000)
+
         val snapshot = BreenoRequestImages.captureText(
-            text = "data:image/png;base64," + "A".repeat(300_000),
+            text = payload,
             source = "image.data",
         )
 

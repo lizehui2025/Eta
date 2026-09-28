@@ -13,6 +13,8 @@ internal object AgentSensitiveToolPolicy {
         "recent_app_activity",
         "app_usage_summary",
         "get_current_location",
+        // get_current_context 与 get_current_location 共用同一位置来源：带位置的原始结果同样不落库。
+        "get_current_context",
         "get_device_environment",
         "list_alarms",
         "list_active_timers",

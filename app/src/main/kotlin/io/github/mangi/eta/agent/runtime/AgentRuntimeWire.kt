@@ -83,11 +83,17 @@ internal object AgentRuntimeWire {
     /** service -> client：返回是否成功重新订阅指定 run。 */
     const val MSG_ATTACH_RUN_RESPONSE = 12
 
+    /** client -> service: submit the user's answer to an ask_user question, matched by questionId. */
+    const val MSG_ANSWER_QUESTION = 16
+
     private const val MODULE_PACKAGE = "io.github.mangi.eta"
     private const val SERVICE_CLASS = "io.github.mangi.eta.agent.runtime.AgentRuntimeService"
 
     private const val KEY_TYPE = "type"
     private const val KEY_RUN_ID = "run_id"
+    private const val KEY_QUESTION_ID = "question_id"
+    private const val KEY_ANSWER = "answer"
+    private const val KEY_SELECTED_OPTIONS = "selected_options"
     private const val KEY_PROMPT = "prompt"
     private const val KEY_ASSISTANT_SCREEN_CONTEXT = "assistant_screen_context"
     private const val KEY_MODEL_SESSION_ID = "model_session_id"
@@ -595,6 +601,36 @@ internal object AgentRuntimeWire {
         putString(KEY_RUN_ID, runId)
     }
 
+    /**
+     * Answer payload: the question is matched by questionId, and both free-form text and options
+     * are defensively truncated.
+     */
+    fun answerQuestionBundle(
+        runId: String,
+        questionId: String,
+        answer: String,
+        selectedOptions: List<String>,
+    ): Bundle = Bundle().apply {
+        putString(KEY_RUN_ID, runId)
+        putString(KEY_QUESTION_ID, questionId)
+        putString(KEY_ANSWER, answer.boundedText(MAX_WIRE_ANSWER_CHARS))
+        putStringArrayList(KEY_SELECTED_OPTIONS, ArrayList(selectedOptions.map { it.boundedText(MAX_WIRE_OPTION_CHARS) }))
+    }
+
+    fun answerQuestionFromBundle(bundle: Bundle): AnswerQuestion = AnswerQuestion(
+        runId = bundle.getString(KEY_RUN_ID).orEmpty(),
+        questionId = bundle.getString(KEY_QUESTION_ID).orEmpty(),
+        answer = bundle.getString(KEY_ANSWER).orEmpty(),
+        selectedOptions = bundle.getStringArrayList(KEY_SELECTED_OPTIONS).orEmpty(),
+    )
+
+    data class AnswerQuestion(
+        val runId: String,
+        val questionId: String,
+        val answer: String,
+        val selectedOptions: List<String>,
+    )
+
     fun attachRunResponseBundle(runId: String, attached: Boolean): Bundle = Bundle().apply {
         putString(KEY_RUN_ID, runId)
         putBoolean(KEY_OK, attached)
@@ -610,6 +646,12 @@ internal object AgentRuntimeWire {
 
     /** detail 防御性截断上限（含省略号）：detail 可能承载工具原始输出，避免单个事件撑爆 Binder 事务预算。 */
     private const val MAX_WIRE_DETAIL_CHARS = 4_000
+
+    /** Free-form answer cap: longer input is truncated so one answer cannot blow the Binder transaction budget. */
+    private const val MAX_WIRE_ANSWER_CHARS = 2_000
+
+    /** Maximum length of a single option label. */
+    private const val MAX_WIRE_OPTION_CHARS = 200
     private const val WIRE_DETAIL_ELLIPSIS = "…"
 
     /**
@@ -729,6 +771,25 @@ internal object AgentRuntimeWire {
                 putString(KEY_TYPE, "user_supplement_received")
                 putInt("index", event.index)
                 putString("text", event.text)
+            }
+
+            is AgentEvent.UserQuestionAsked -> {
+                putString(KEY_TYPE, "user_question_asked")
+                putString("question_id", event.questionId)
+                putInt("round", event.round)
+                putString("tool_call_id", event.toolCallId)
+                putString("question", event.question)
+                putStringArrayList("options", ArrayList(event.options))
+                putBoolean("multi_select", event.multiSelect)
+                putBoolean("allow_freeform", event.allowFreeform)
+            }
+
+            is AgentEvent.UserQuestionAnswered -> {
+                putString(KEY_TYPE, "user_question_answered")
+                putString("question_id", event.questionId)
+                putString("answer", event.answer)
+                putStringArrayList("selected_options", ArrayList(event.selectedOptions))
+                putBoolean("timed_out", event.timedOut)
             }
 
             is AgentEvent.ToolStarted -> {
@@ -943,6 +1004,23 @@ internal object AgentRuntimeWire {
         "user_supplement_received" -> AgentEvent.UserSupplementReceived(
             index = bundle.getInt("index"),
             text = bundle.getString("text").orEmpty(),
+        )
+
+        "user_question_asked" -> AgentEvent.UserQuestionAsked(
+            questionId = bundle.getString("question_id").orEmpty(),
+            round = bundle.getInt("round"),
+            toolCallId = bundle.getString("tool_call_id").orEmpty(),
+            question = bundle.getString("question").orEmpty(),
+            options = bundle.getStringArrayList("options").orEmpty(),
+            multiSelect = bundle.getBoolean("multi_select"),
+            allowFreeform = bundle.getBoolean("allow_freeform"),
+        )
+
+        "user_question_answered" -> AgentEvent.UserQuestionAnswered(
+            questionId = bundle.getString("question_id").orEmpty(),
+            answer = bundle.getString("answer").orEmpty(),
+            selectedOptions = bundle.getStringArrayList("selected_options").orEmpty(),
+            timedOut = bundle.getBoolean("timed_out"),
         )
 
         "tool_started" -> AgentEvent.ToolStarted(

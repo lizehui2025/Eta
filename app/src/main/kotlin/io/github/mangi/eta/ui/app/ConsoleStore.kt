@@ -71,6 +71,7 @@ internal class ConsoleStore(
     private companion object {
         const val FLUSH_INTERVAL_MS = 50L
         const val SCROLLBACK_LINES = 500
+        const val MAX_PENDING_OUTPUT_BYTES = 256 * 1024
     }
 
     private val appContext = context.applicationContext
@@ -91,6 +92,12 @@ internal class ConsoleStore(
     /** 每个会话独立的屏幕缓冲区；写入只能在 IO 线程持锁进行，UI 线程持锁读快照。 */
     private val buffers = mutableMapOf<String, TerminalScreenBuffer>()
     private val sessionSizes = mutableMapOf<String, Pair<Int, Int>>()
+
+    /** 缓冲登记前到达的输出：open() 返回前就会出 bootstrap，先暂存、登记后回放，避免首屏丢失。 */
+    private val pendingOutput = mutableMapOf<String, ByteArray>()
+
+    /** 跨分片的 UTF-8 残字节：读取线程的切分点会落在多字节字符中间。 */
+    private val utf8Carry = mutableMapOf<String, ByteArray>()
 
     private val _uiState = MutableStateFlow(
         ConsoleUiState(
@@ -174,7 +181,11 @@ internal class ConsoleStore(
             controller.closeSession(sessionId)
             sessionLeases.remove(sessionId)?.release()
         }
-        synchronized(bufferLock) { buffers.remove(sessionId) }
+        synchronized(bufferLock) {
+            buffers.remove(sessionId)
+            pendingOutput.remove(sessionId)
+            utf8Carry.remove(sessionId)
+        }
         sessionSizes.remove(sessionId)
         _uiState.update { state ->
             val sessions = state.sessions.filterNot { it.id == sessionId }
@@ -205,7 +216,11 @@ internal class ConsoleStore(
             controller.closeSession(sessionId)
             sessionLeases.remove(sessionId)?.release()
         }
-        synchronized(bufferLock) { buffers.remove(sessionId) }
+        synchronized(bufferLock) {
+            buffers.remove(sessionId)
+            pendingOutput.remove(sessionId)
+            utf8Carry.remove(sessionId)
+        }
         sessionSizes.remove(sessionId)
         _uiState.update { state ->
             state.copy(sessions = state.sessions.filterNot { it.id == sessionId })
@@ -293,7 +308,13 @@ internal class ConsoleStore(
                         }
                     }
                     synchronized(bufferLock) {
-                        buffers[result.sessionId] = TerminalScreenBuffer(cols, rows, SCROLLBACK_LINES)
+                        val buffer = TerminalScreenBuffer(cols, rows, SCROLLBACK_LINES)
+                        buffers[result.sessionId] = buffer
+                        val pending = pendingOutput.remove(result.sessionId)
+                        if (pending != null && pending.isNotEmpty()) {
+                            val text = decodeUtf8Locked(result.sessionId, pending)
+                            if (text.isNotEmpty()) buffer.process(text)
+                        }
                     }
                     sessionSizes[result.sessionId] = cols to rows
                     _uiState.update { state ->
@@ -317,7 +338,19 @@ internal class ConsoleStore(
 
     private fun onOutput(sessionId: String, chunk: ByteArray) {
         synchronized(bufferLock) {
-            buffers[sessionId]?.process(String(chunk, Charsets.UTF_8))
+            val buffer = buffers[sessionId]
+            if (buffer == null) {
+                // open() 返回前就会出 bootstrap 输出：先按会话暂存，登记缓冲后回放。
+                val merged = (pendingOutput[sessionId] ?: ByteArray(0)) + chunk
+                pendingOutput[sessionId] = if (merged.size <= MAX_PENDING_OUTPUT_BYTES) {
+                    merged
+                } else {
+                    merged.copyOfRange(merged.size - MAX_PENDING_OUTPUT_BYTES, merged.size)
+                }
+                return
+            }
+            val text = decodeUtf8Locked(sessionId, chunk)
+            if (text.isNotEmpty()) buffer.process(text)
         }
         if (sessionId != _uiState.value.activeSessionId) return
         val now = System.currentTimeMillis()
@@ -326,6 +359,43 @@ internal class ConsoleStore(
         } else {
             scheduleFlush(sessionId)
         }
+    }
+
+    /**
+     * 增量解码 UTF-8：每个 read() 分片独立解码会把跨分片的多字节字符切成替换字符，
+     * 这里把不完整的尾部字节留到下一次分片一起解码。
+     */
+    private fun decodeUtf8Locked(sessionId: String, chunk: ByteArray): String {
+        val carry = utf8Carry[sessionId]
+        val bytes = if (carry == null || carry.isEmpty()) chunk else carry + chunk
+        val incomplete = incompleteUtf8TailLength(bytes)
+        val complete = bytes.size - incomplete
+        utf8Carry[sessionId] = if (incomplete > 0) bytes.copyOfRange(complete, bytes.size) else ByteArray(0)
+        return if (complete > 0) String(bytes, 0, complete, Charsets.UTF_8) else ""
+    }
+
+    /** 末尾不完整 UTF-8 序列的字节数（0–3）；无法判断时按完整处理，交给解码器容错。 */
+    private fun incompleteUtf8TailLength(bytes: ByteArray): Int {
+        var index = bytes.size - 1
+        var continuation = 0
+        while (index >= 0 && continuation < 3) {
+            val byte = bytes[index].toInt() and 0xFF
+            if (byte and 0xC0 == 0x80) {
+                index--
+                continuation++
+                continue
+            }
+            val expected = when {
+                byte and 0x80 == 0x00 -> 1
+                byte and 0xE0 == 0xC0 -> 2
+                byte and 0xF0 == 0xE0 -> 3
+                byte and 0xF8 == 0xF0 -> 4
+                else -> return 0
+            }
+            val have = bytes.size - index
+            return if (have < expected) have else 0
+        }
+        return 0
     }
 
     private fun scheduleFlush(sessionId: String) {

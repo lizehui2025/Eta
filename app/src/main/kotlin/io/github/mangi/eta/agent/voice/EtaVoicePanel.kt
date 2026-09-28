@@ -88,6 +88,8 @@ internal sealed interface EtaVoiceStatus {
     data class RunningTool(val name: String) : EtaVoiceStatus
     data class Failed(val detail: String?) : EtaVoiceStatus
     data object Stopped : EtaVoiceStatus
+    /** The agent is waiting for the user; the overlay only displays it, answering happens in the app. */
+    data object WaitingUserAnswer : EtaVoiceStatus
 }
 
 internal data class EtaVoicePanelColors(

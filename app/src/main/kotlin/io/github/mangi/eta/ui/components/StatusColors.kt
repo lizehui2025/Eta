@@ -8,9 +8,8 @@ import io.github.mangi.eta.ui.model.PermissionStatusUi
 import io.github.mangi.eta.ui.model.RunStatusUi
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-// 语义状态色
-val StatusSuccess = Color(0xFF00BD13)
-val StatusWarning = Color(0xFFFFB200)
+val StatusSuccess: Color @Composable get() = statusSuccessColor()
+val StatusWarning: Color @Composable get() = statusWarningColor()
 val StatusError: Color @Composable get() = MiuixTheme.colorScheme.error
 val StatusRunning: Color @Composable get() = MiuixTheme.colorScheme.primary
 val StatusIdle: Color @Composable get() = MiuixTheme.colorScheme.onSurfaceVariantSummary

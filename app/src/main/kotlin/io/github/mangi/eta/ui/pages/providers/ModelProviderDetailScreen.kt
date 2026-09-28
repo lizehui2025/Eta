@@ -83,7 +83,7 @@ internal fun ModelProviderDetailScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val providers by ProviderRepository.providersFlow().collectAsState(initial = emptyList())
+    val providers by remember { ProviderRepository.providersFlow() }.collectAsState(initial = emptyList())
     var createdId by remember { mutableStateOf<String?>(null) }
     val effectiveId = providerId ?: createdId
     val provider = remember(providers, effectiveId) {

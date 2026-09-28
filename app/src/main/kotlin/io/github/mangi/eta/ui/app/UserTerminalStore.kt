@@ -130,8 +130,11 @@ internal class UserTerminalStore(
     private var blockId = 0L
 
     /** 每个会话独立的块列表与流式输出缓冲；只有当前会话投影进 uiState.blocks。 */
-    private val sessionBlocks = mutableMapOf<String, List<TerminalBlockUi>>()
-    private val sessionBuffers = mutableMapOf<String, SessionOutput>()
+    private val sessionBlocks = ConcurrentHashMap<String, List<TerminalBlockUi>>()
+    private val sessionBuffers = ConcurrentHashMap<String, SessionOutput>()
+
+    /** 块列表的读-改-写要串行：输出线程与主线程都会修改同一会话的列表。 */
+    private val sessionStateLock = Any()
 
     fun refreshLinuxReady() {
         val selected = LinuxEnvironmentSettingsRepository.current(appContext).terminalEnvironment
@@ -482,8 +485,9 @@ internal class UserTerminalStore(
                 } else {
                     val combined = block.output + chunk
                     if (combined.length > MAX_BLOCK_OUTPUT_CHARS) {
+                        // 保留尾部而不是头部：头部一旦截断后后续取头部会永远看到同一段旧文本（输出像是卡死）。
                         block.copy(
-                            output = combined.take(MAX_BLOCK_OUTPUT_CHARS),
+                            output = combined.takeLast(MAX_BLOCK_OUTPUT_CHARS),
                             truncated = true,
                         )
                     } else {
@@ -534,8 +538,9 @@ internal class UserTerminalStore(
     }
 
     private fun updateSessionBlocks(sessionId: String, transform: (List<TerminalBlockUi>) -> List<TerminalBlockUi>) {
-        val updated = transform(sessionBlocks[sessionId].orEmpty())
-        sessionBlocks[sessionId] = updated
+        val updated = synchronized(sessionStateLock) {
+            transform(sessionBlocks[sessionId].orEmpty()).also { sessionBlocks[sessionId] = it }
+        }
         _uiState.update { state ->
             if (state.activeSessionId == sessionId) state.copy(blocks = updated) else state
         }

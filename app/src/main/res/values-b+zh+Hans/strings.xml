@@ -212,6 +212,13 @@
   <string name="overlay_preparing_answer">整理回答中</string>
   <string name="overlay_planning_tools">计划执行：%1$s</string>
   <string name="overlay_supplement_received">收到补充，继续执行</string>
+  <string name="overlay_waiting_user_answer">Agent 在等你回答，请到 Eta 内作答</string>
+  <string name="user_question_title">向你提问</string>
+  <string name="user_question_waiting">等待你回答…</string>
+  <string name="user_question_timed_out">未回答（已超时，Agent 按默认继续）</string>
+  <string name="user_question_cancelled">未回答（任务已停止）</string>
+  <string name="user_question_hint">选一个，或直接输入你的答案</string>
+  <string name="user_question_submit">回答</string>
   <string name="overlay_running_tool">执行：%1$s</string>
   <string name="overlay_tool_completed">完成：%1$s</string>
   <string name="overlay_hosted_tool_running">%1$s中</string>
@@ -438,6 +445,9 @@
   <string name="tool_current_context">时间与位置</string>
   <string name="tool_memory_get">读取记忆</string>
   <string name="tool_memory_write">整理记忆</string>
+  <string name="tool_character_memory_get">读取角色记忆</string>
+  <string name="tool_character_memory_write">更新角色记忆</string>
+  <string name="tool_ask_user">向你提问</string>
   <string name="tool_set_alarm">设置闹钟</string>
   <string name="tool_set_timer">设置计时器</string>
   <string name="tool_device_status">设备状态</string>

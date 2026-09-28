@@ -48,5 +48,8 @@ internal object AgentToolCatalog {
             }
             if (planTools) AgentPlanToolCatalog.appendTo(tools)
             if (subagentTools) AgentSubagentToolCatalog.appendTo(tools)
+            // Interactive asking is always available: it touches no device capability, and whether to
+            // wait for an answer is the run layer's call.
+            AgentInteractionToolCatalog.appendTo(tools)
         })
 }

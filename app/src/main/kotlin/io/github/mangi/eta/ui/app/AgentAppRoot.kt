@@ -313,6 +313,11 @@ fun AgentAppRoot(
                                 is AgentHomeAction.ModelSelected -> agentState.selectModel(action.modelId)
                                 is AgentHomeAction.SubmitMessage -> { requestExecutionNotifications(); agentState.sendCurrentMessage(action.text) }
                                 AgentHomeAction.StopRun -> agentState.stopCurrentRun()
+                                is AgentHomeAction.AnswerUserQuestion -> agentState.answerUserQuestion(
+                                    questionId = action.questionId,
+                                    answer = action.answer,
+                                    selectedOptions = action.selectedOptions,
+                                )
                                 is AgentHomeAction.ImageAttached -> agentState.attachImage(action.uri)
                                 is AgentHomeAction.RemoveImage -> agentState.removePendingImage(action.id)
                                 is AgentHomeAction.FilesAttached -> agentState.attachFiles(action.uris)
@@ -364,6 +369,11 @@ fun AgentAppRoot(
                                 is AgentChatAction.ModelSelected -> agentState.selectModel(action.modelId)
                                 is AgentChatAction.SubmitMessage -> { requestExecutionNotifications(); agentState.sendCurrentMessage(action.text) }
                                 AgentChatAction.StopRun -> agentState.stopCurrentRun()
+                                is AgentChatAction.AnswerUserQuestion -> agentState.answerUserQuestion(
+                                    questionId = action.questionId,
+                                    answer = action.answer,
+                                    selectedOptions = action.selectedOptions,
+                                )
                                 AgentChatAction.OpenBrowser -> pushRoute(AppRoute.Browser)
                                 is AgentChatAction.ImageAttached -> agentState.attachImage(action.uri)
                                 is AgentChatAction.RemoveImage -> agentState.removePendingImage(action.id)

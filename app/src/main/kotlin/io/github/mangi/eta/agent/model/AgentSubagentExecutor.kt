@@ -9,6 +9,7 @@ import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReferenceArray
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -185,7 +186,7 @@ internal class AgentSubagentExecutor(
         // 终态单次提交：同一 subIndex 只允许一个终态（成功/失败/超时/取消）上报，迟到结果不得覆盖。
         val terminalClaimed = Array(tasks.size) { AtomicBoolean(false) }
         val terminalResults = arrayOfNulls<JSONObject>(tasks.size)
-        val subControllers = arrayOfNulls<AgentRunController>(tasks.size)
+        val subControllers = AtomicReferenceArray<AgentRunController?>(tasks.size)
         // 并行封顶：一次扇出最多同时跑 MAX_PARALLEL_TASKS 个，超出的排队等待；
         // 避免任务一多就线程暴涨导致切换与内存争抢。任务数本身不限。
         val poolSize = minOf(tasks.size, AgentSubagentPolicy.MAX_PARALLEL_TASKS)
@@ -193,8 +194,12 @@ internal class AgentSubagentExecutor(
             Thread(r, "agent-subagent-${parentOperationId.takeLast(6)}").apply { isDaemon = true }
         }
         // 父取消时联动取消所有已创建的子控制器。
+        // 各子线程只写自己的下标；AtomicReferenceArray 保证父线程能看到刚写入的控制器
+        //（普通数组元素没有 happens-before，父取消可能漏掉尚未可见的子控制器）。
         val parentBinding = parentRunController.register {
-            subControllers.forEach { runCatching { it?.cancel() } }
+            for (index in 0 until subControllers.length()) {
+                runCatching { subControllers.get(index)?.cancel() }
+            }
         }
         try {
             parentRunController.throwIfCancelled()
@@ -342,7 +347,9 @@ internal class AgentSubagentExecutor(
             )
             return result
         } catch (t: Throwable) {
-            subControllers.forEach { runCatching { it?.cancel() } }
+            for (index in 0 until subControllers.length()) {
+                runCatching { subControllers.get(index)?.cancel() }
+            }
             parentRunController.throwIfCancelled()
             return err("SUBAGENT_FANOUT_FAILED", t.message ?: t.javaClass.simpleName)
         } finally {
@@ -357,7 +364,7 @@ internal class AgentSubagentExecutor(
         index: Int,
         task: SubTask,
         subTools: JSONArray,
-        holders: Array<AgentRunController?>,
+        holders: AtomicReferenceArray<AgentRunController?>,
         mode: SubagentMode,
         contextMode: SubagentContextMode,
         mounts: List<Pair<String, String>>,
@@ -372,7 +379,7 @@ internal class AgentSubagentExecutor(
         val startNano = System.nanoTime()
         val threadName = Thread.currentThread().name
         val subController = AgentRunController()
-        holders[index] = subController
+        holders.set(index, subController)
         val binding = parentRunController.register { subController.cancel() }
         // 子 loop 的 ToolStarted/Finished 转译为 SubagentTool* 事件（带 subIndex/label），
         // 其余子内部事件（Round/Provider/Assistant 流）不再透出，避免悬浮窗与主时间线乱跳。
