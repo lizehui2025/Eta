@@ -54,7 +54,10 @@ internal class AgentLoop(
 
     private var toolCallValidator = AgentToolCallValidator(tools)
     private val accumulatedReasoning = StringBuilder()
-    private val sensitiveToolCallIds = linkedSetOf<String>()
+    // 只读工具并行执行时，事件回调与敏感 id 收集仍可能来自多个工具线程；
+    // 这里串行化事件发布，并用同步集合保护收集结果。
+    private val eventLock = Any()
+    private val sensitiveToolCallIds = java.util.Collections.synchronizedSet(linkedSetOf<String>())
     private var pendingToolImageMessage: JSONObject? = null
 
     /** 思考链有界：超限丢弃最旧的一半，避免单轮发散吃掉内存。 */
@@ -97,7 +100,12 @@ internal class AgentLoop(
 
     fun reasoningSnapshot(): String = accumulatedReasoning.toString().trim()
 
-    fun sensitiveToolCallIdsSnapshot(): Set<String> = sensitiveToolCallIds.toSet()
+    fun sensitiveToolCallIdsSnapshot(): Set<String> =
+        synchronized(sensitiveToolCallIds) { sensitiveToolCallIds.toSet() }
+
+    private fun publishEvent(event: AgentEvent) {
+        synchronized(eventLock) { onEvent(event) }
+    }
 
     fun run(): Result {
         var round = 1
@@ -208,7 +216,7 @@ internal class AgentLoop(
                     toolCalls = toolCalls,
                 ).put("_eta_message_id", "assistant-$operationId-$round")
             )
-            onEvent(
+            publishEvent(
                 AgentEvent.AssistantReceived(
                     round = round,
                     contentChars = assistantMessage.optString("content").length,
@@ -269,7 +277,7 @@ internal class AgentLoop(
 
             publishTranscript()
             if (purpose.allowsTools) context.compact(roundTools, final = true)
-            onEvent(AgentEvent.RunFinished(round = round, contentChars = content.length))
+            publishEvent(AgentEvent.RunFinished(round = round, contentChars = content.length))
             return Result(
                 content = content,
                 reasoningContent = reasoningSnapshot(),
@@ -318,7 +326,7 @@ internal class AgentLoop(
             )
         }
         if (toolCall.name == AgentSubagentPolicy.TOOL_NAME && subagentHandler != null) {
-            onEvent(
+            publishEvent(
                 AgentEvent.ToolStarted(
                     round = round,
                     toolCallId = toolCall.id,
@@ -349,7 +357,7 @@ internal class AgentLoop(
             }
         }
         if (toolCall.name == AgentTodoList.TOOL_NAME && todoHandler != null) {
-            onEvent(
+            publishEvent(
                 AgentEvent.ToolStarted(
                     round = round,
                     toolCallId = toolCall.id,
@@ -368,7 +376,7 @@ internal class AgentLoop(
             }
         }
         if (toolCall.name == AgentInteractionToolCatalog.TOOL_NAME && askUserHandler != null) {
-            onEvent(
+            publishEvent(
                 AgentEvent.ToolStarted(
                     round = round,
                     toolCallId = toolCall.id,
@@ -399,7 +407,7 @@ internal class AgentLoop(
                 return ToolOutcome(toolCall, askResult)
             }
         }
-        onEvent(
+        publishEvent(
             AgentEvent.ToolStarted(
                 round = round,
                 toolCallId = toolCall.id,
@@ -435,7 +443,7 @@ internal class AgentLoop(
         code: String,
         message: String,
     ): ToolOutcome {
-        onEvent(
+        publishEvent(
             AgentEvent.ToolStarted(
                 round = round,
                 toolCallId = toolCall.id,
@@ -462,7 +470,7 @@ internal class AgentLoop(
         toolCall: AgentModelClient.ToolCall,
         result: AgentModelClient.ToolResult,
     ) {
-        onEvent(
+        publishEvent(
             AgentEvent.ToolFinished(
                 round = round,
                 toolCallId = toolCall.id,
@@ -499,7 +507,7 @@ internal class AgentLoop(
         ).put("_eta_observation", true).also(messages::put)
 
         imageOutcomes.forEach { outcome ->
-            onEvent(
+            publishEvent(
                 AgentEvent.ToolImagesAttached(
                     round = round,
                     toolName = outcome.call.name,

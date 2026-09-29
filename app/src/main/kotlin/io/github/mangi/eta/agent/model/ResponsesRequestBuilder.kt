@@ -13,6 +13,7 @@ internal object ResponsesRequestBuilder {
         options: ModelRequestOptions? = null,
         codingMode: Boolean = false,
         projectionCache: AgentRequestProjectionCache = AgentRequestProjectionCache(),
+        includeReasoningSummary: Boolean = true,
     ): JSONObject {
         val input = buildInput(messages, projectionCache)
         val responseTools = buildTools(tools, config.hostedWebSearchEnabled)
@@ -42,7 +43,7 @@ internal object ResponsesRequestBuilder {
         }
         request.remove("previous_response_id")
         request.remove("reasoning")
-        ProviderReasoning.applyResponsesRequest(request, config)
+        ProviderReasoning.applyResponsesRequest(request, config, includeReasoningSummary)
         return request
     }
 

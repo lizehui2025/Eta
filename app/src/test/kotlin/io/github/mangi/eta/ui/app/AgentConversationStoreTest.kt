@@ -341,6 +341,70 @@ class AgentConversationStoreTest {
     }
 
     @Test
+    fun coldLoadOnlyDecodesSelectedTranscriptAndSaveKeepsUnloadedCheckpointIntact() = runBlocking {
+        val selectedHistory = listOf(
+            AgentModelClient.ConversationMessage(role = "user", content = "当前会话"),
+        )
+        val unloadedHistory = listOf(
+            AgentModelClient.ConversationMessage(
+                role = "assistant",
+                content = "未打开会话-" + "u".repeat(40_000),
+            ),
+        )
+        val conversations = mapOf(
+            "selected" to AgentChatHomeUiState(
+                messages = listOf(UserMessageUi(id = "selected-user", content = "当前会话")),
+                history = selectedHistory,
+                journal = selectedHistory,
+                input = "",
+                isStreaming = false,
+                thinkingEnabled = false,
+            ),
+            "unloaded" to AgentChatHomeUiState(
+                messages = listOf(UserMessageUi(id = "unloaded-user", content = "未打开会话")),
+                history = unloadedHistory,
+                journal = unloadedHistory,
+                input = "",
+                isStreaming = false,
+                thinkingEnabled = false,
+            ),
+        )
+        val titles = mapOf("selected" to "当前", "unloaded" to "未打开")
+        val updatedAt = mapOf("selected" to 2L, "unloaded" to 1L)
+        AgentConversationStore.save(
+            context = context,
+            selectedConversationId = "selected",
+            conversationsById = conversations,
+            titles = titles,
+            updatedAt = updatedAt,
+        )
+
+        val lazySnapshot = AgentConversationStore.load(context)
+        assertEquals(setOf("selected"), lazySnapshot.transcriptLoadedIds)
+        assertEquals(selectedHistory, lazySnapshot.conversationsById.getValue("selected").history)
+        assertTrue(lazySnapshot.conversationsById.getValue("unloaded").history.isEmpty())
+        assertTrue(lazySnapshot.conversationsById.getValue("unloaded").journal.isEmpty())
+
+        // 模拟切换会话/刷新摘要触发的保存：未加载会话不能把空 history/journal 写回。
+        AgentConversationStore.save(
+            context = context,
+            selectedConversationId = lazySnapshot.selectedConversationId,
+            conversationsById = lazySnapshot.conversationsById,
+            titles = lazySnapshot.titles,
+            updatedAt = lazySnapshot.updatedAt,
+            transcriptLoadedConversationIds = lazySnapshot.transcriptLoadedIds,
+        )
+
+        val fullSnapshot = AgentConversationStore.load(context, loadAllTranscripts = true)
+        assertEquals(unloadedHistory, fullSnapshot.conversationsById.getValue("unloaded").history)
+        assertEquals(unloadedHistory, fullSnapshot.conversationsById.getValue("unloaded").journal)
+
+        val onDemand = AgentConversationStore.loadConversationTranscript(context, "unloaded")
+        assertEquals(unloadedHistory, onDemand.history)
+        assertEquals(unloadedHistory, onDemand.journal)
+    }
+
+    @Test
     fun savePreservesCompleteContextAndDisplayedMessages() {
         val displayedContent = "展示消息-${"d".repeat(120_000)}"
         val history = buildList {

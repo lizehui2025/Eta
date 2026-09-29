@@ -7,6 +7,7 @@ import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
+import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.db.ConversationDao
 import io.github.mangi.eta.data.db.ConversationEntity
@@ -14,6 +15,7 @@ import io.github.mangi.eta.data.db.ConversationMetadata
 import io.github.mangi.eta.data.db.ConversationMessageEntity
 import io.github.mangi.eta.data.db.ConversationStateEntity
 import io.github.mangi.eta.data.db.EtaDatabase
+import io.github.mangi.eta.data.db.TextChunkRead
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
@@ -33,10 +35,13 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromStream
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.InputStream
 
 internal object AgentConversationStore {
     private val json = Json {
@@ -49,15 +54,52 @@ internal object AgentConversationStore {
         val conversationsById: Map<String, AgentChatHomeUiState>,
         val titles: Map<String, String>,
         val updatedAt: Map<String, Long>,
+        /**
+         * history/journal 已从 checkpoint 解码进内存的会话。
+         *
+         * 冷启动只加载当前会话的完整 transcript；其余会话保留空列表并由
+         * [loadConversationTranscript] 在真正需要时按需加载。保存时必须依靠这个集合
+         * 跳过未加载会话的 checkpoint，否则空列表会把磁盘上的完整历史覆盖掉。
+         */
+        val transcriptLoadedIds: Set<String> = emptySet(),
+    )
+
+    /** 单个会话的模型投影历史与完整脱敏 journal。 */
+    data class Transcript(
+        val history: List<AgentModelClient.ConversationMessage>,
+        val journal: List<AgentModelClient.ConversationMessage>,
     )
 
     private val saveMutex = Mutex()
     /** 上一次成功落盘的会话指纹；只在事务提交成功后推进，失败时保持旧值以便下次重写。 */
     private var savedConversations: Map<String, AgentConversationPersistence.Saved> = emptyMap()
 
-    suspend fun load(context: Context): Snapshot =
+    suspend fun load(
+        context: Context,
+        /** 测试和备份导入需要一次性拿到全部正文；正常 UI 冷启动保持 false。 */
+        loadAllTranscripts: Boolean = false,
+    ): Snapshot =
         withContext(Dispatchers.IO) {
-            loadSnapshot(context.applicationContext)
+            loadSnapshot(context.applicationContext, loadAllTranscripts)
+        }
+
+    /** 按需加载指定会话的 checkpoint 正文；旧格式内联正文与分块正文都由 DAO 统一还原。 */
+    suspend fun loadConversationTranscript(
+        context: Context,
+        conversationId: String,
+    ): Transcript =
+        withContext(Dispatchers.IO) {
+            val dao = EtaDatabase.get(context.applicationContext).conversationDao()
+            val transcripts = loadCheckpointTranscripts(dao, conversationId)
+            val history = (transcripts?.history ?: emptyList()).ifEmpty {
+                loadMessages(dao, conversationId)
+                    .sortedBy { it.sortIndex }
+                    .toLegacyHistory()
+            }
+            Transcript(
+                history = history,
+                journal = transcripts?.journal ?: emptyList(),
+            )
         }
 
     suspend fun save(
@@ -66,6 +108,8 @@ internal object AgentConversationStore {
         conversationsById: Map<String, AgentChatHomeUiState>,
         titles: Map<String, String>,
         updatedAt: Map<String, Long>,
+        /** null 表示所有会话正文都已加载（旧调用与测试默认行为）。 */
+        transcriptLoadedConversationIds: Set<String>? = null,
     ) {
         val appContext = context.applicationContext
         saveMutex.withLock {
@@ -155,11 +199,15 @@ internal object AgentConversationStore {
                     }
                     messagesByConversation[id] = state.messages
                         .mapIndexedNotNull { index, message -> message.toEntityOrNull(id, index) }
-                    // 检查点正文逐条产出分片直接写块：不先拼出整份 JSON，长会话下这一项就是几十 MB 的堆分配。
-                    streamedCheckpoints[id] = ConversationDao.StreamedCheckpoint(
-                        history = AgentConversationCodec.transcriptPieces(state.history),
-                        journal = AgentConversationCodec.transcriptPieces(state.journal.ifEmpty { state.history }),
-                    )
+                    // 未加载的会话 history/journal 是空占位，不能写回 checkpoint。
+                    // 消息仍可安全写入；正文保持磁盘原样，等会话真正打开后再整份刷新。
+                    if (transcriptLoadedConversationIds == null || id in transcriptLoadedConversationIds) {
+                        // 检查点正文逐条产出分片直接写块：不先拼出整份 JSON，长会话下这一项就是几十 MB 的堆分配。
+                        streamedCheckpoints[id] = ConversationDao.StreamedCheckpoint(
+                            history = AgentConversationCodec.transcriptPieces(state.history),
+                            journal = AgentConversationCodec.transcriptPieces(state.journal.ifEmpty { state.history }),
+                        )
+                    }
                 }
                 dao.saveIncremental(
                     conversations = conversations,
@@ -173,7 +221,10 @@ internal object AgentConversationStore {
         }
     }
 
-    private suspend fun loadSnapshot(context: Context): Snapshot {
+    private suspend fun loadSnapshot(
+        context: Context,
+        loadAllTranscripts: Boolean,
+    ): Snapshot {
         val dao = EtaDatabase.get(context).conversationDao()
         val conversations = dao.conversations()
         if (conversations.isEmpty()) {
@@ -182,49 +233,54 @@ internal object AgentConversationStore {
                 conversationsById = emptyMap(),
                 titles = emptyMap(),
                 updatedAt = emptyMap(),
+                transcriptLoadedIds = emptySet(),
             )
         }
 
         val messagesByConversation = conversations.associate { conversation ->
-            conversation.id to buildList {
-                var offset = 0
-                while (true) {
-                    val page = dao.messagesPage(
-                        conversationId = conversation.id,
-                        limit = MESSAGE_LOAD_PAGE_SIZE,
-                        offset = offset,
-                    )
-                    addAll(page)
-                    if (page.size < MESSAGE_LOAD_PAGE_SIZE) break
-                    offset += page.size
-                }
-            }
+            conversation.id to loadMessages(dao, conversation.id)
         }
         val states = linkedMapOf<String, AgentChatHomeUiState>()
         val titles = mutableMapOf<String, String>()
         val updatedAt = mutableMapOf<String, Long>()
 
+        val storedSelected = dao.state()?.selectedConversationId
+            ?.takeIf { selectedId -> conversations.any { it.id == selectedId } }
+        val selected = storedSelected ?: conversations.first().id
+        val transcriptLoadedIds = if (loadAllTranscripts) {
+            conversations.mapTo(mutableSetOf()) { it.id }
+        } else {
+            mutableSetOf(selected)
+        }
+
         conversations.forEach { conversation ->
-            val checkpoint = dao.contextCheckpoint(conversation.id)
+            val transcriptLoaded = conversation.id in transcriptLoadedIds
+            val transcripts = if (transcriptLoaded) {
+                loadCheckpointTranscripts(dao, conversation.id)
+            } else {
+                null
+            }
+            val history = if (transcriptLoaded) {
+                (transcripts?.history ?: emptyList()).ifEmpty {
+                        messagesByConversation[conversation.id]
+                            .orEmpty()
+                            .sortedBy { it.sortIndex }
+                            .toLegacyHistory()
+                    }
+            } else {
+                emptyList()
+            }
             states[conversation.id] = AgentChatHomeUiState(
                 roleplay = conversation.roleplayJson.takeIf(String::isNotBlank)?.let { json.decodeFromString<RoleplayBinding>(it) },
                 roleplayMessages = conversation.revisionsJson.takeIf(String::isNotBlank)?.let {
                     json.decodeFromString<RoleplayMessageState>(it)
                 } ?: RoleplayMessageState(),
-                journal = AgentConversationCodec.decodeTranscript(checkpoint?.journalJson),
+                journal = transcripts?.journal ?: emptyList(),
                 messages = messagesByConversation[conversation.id]
                     .orEmpty()
                     .sortedBy { it.sortIndex }
                     .mapNotNull { it.toMessageOrNull() },
-                history = AgentConversationCodec.decodeTranscript(
-                    checkpoint?.historyJson
-                )
-                    .ifEmpty {
-                        messagesByConversation[conversation.id]
-                            .orEmpty()
-                            .sortedBy { it.sortIndex }
-                            .toLegacyHistory()
-                    },
+                history = history,
                 appliedRuntimeRunIds = conversation.appliedRuntimeRunIdsJson.toStringList(),
                 input = "",
                 isStreaming = false,
@@ -235,16 +291,93 @@ internal object AgentConversationStore {
             updatedAt[conversation.id] = conversation.updatedAt
         }
 
-        val selected = dao.state()?.selectedConversationId
-            ?.takeIf { it in states }
-            ?: states.keys.first()
-
         return Snapshot(
             selectedConversationId = selected,
             conversationsById = states,
             titles = titles,
             updatedAt = updatedAt,
+            transcriptLoadedIds = transcriptLoadedIds,
         )
+    }
+
+    private data class CheckpointTranscripts(
+        val history: List<AgentModelClient.ConversationMessage>,
+        val journal: List<AgentModelClient.ConversationMessage>,
+    )
+
+    /**
+     * 读取 checkpoint 的两个 transcript。
+     * 引用相同时只解码一次并共享列表；分块正文走流式 JSON 解码，不构造单个大字符串。
+     */
+    private suspend fun loadCheckpointTranscripts(
+        dao: ConversationDao,
+        conversationId: String,
+    ): CheckpointTranscripts? {
+        val row = dao.contextCheckpointRow(conversationId) ?: return null
+        val history = decodeCheckpointField(dao, conversationId, "history", row.historyJson)
+        val journal = if (row.historyJson.isNotBlank() && row.historyJson == row.journalJson) {
+            history
+        } else {
+            decodeCheckpointField(dao, conversationId, "journal", row.journalJson)
+        }
+        return CheckpointTranscripts(history = history, journal = journal)
+    }
+
+    private suspend fun decodeCheckpointField(
+        dao: ConversationDao,
+        conversationId: String,
+        field: String,
+        stored: String,
+    ): List<AgentModelClient.ConversationMessage> =
+        when (
+            val read = dao.readTextChunks(
+                table = CHECKPOINT_TABLE,
+                owner = conversationId,
+                field = field,
+                stored = stored,
+            )
+        ) {
+            TextChunkRead.Inline -> AgentConversationCodec.decodeTranscript(stored)
+            is TextChunkRead.Chunks -> if (read.contents.all(String::isEmpty)) {
+                emptyList()
+            } else {
+                try {
+                    decodeChunkedTranscript(read.contents)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (throwable: Throwable) {
+                    AndroidAgentLogger.error(
+                        "Agent transcript stream decode failed: type=${throwable.safeLogType()}"
+                    )
+                    emptyList()
+                }
+            }
+            TextChunkRead.Corrupted -> emptyList()
+        }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private fun decodeChunkedTranscript(
+        chunks: List<String>,
+    ): List<AgentModelClient.ConversationMessage> =
+        json.decodeFromStream<List<AgentModelClient.ConversationMessage>>(
+            ChunkedUtf8InputStream(chunks)
+        )
+
+    private suspend fun loadMessages(
+        dao: ConversationDao,
+        conversationId: String,
+    ): List<ConversationMessageEntity> = buildList {
+        var offset = 0
+        while (true) {
+            val page = dao.messagesPage(
+                conversationId = conversationId,
+                limit = MESSAGE_LOAD_PAGE_SIZE,
+                offset = offset,
+            )
+            addAll(page)
+            if (page.size < MESSAGE_LOAD_PAGE_SIZE) break
+            offset += page.size
+        }
     }
 
     private val ConversationMetadata.reasoningEffortValue: ReasoningEffort
@@ -508,6 +641,50 @@ internal object AgentConversationStore {
     private const val TYPE_TOOL_SUMMARY = "tool_summary"
     private const val MESSAGE_LOAD_PAGE_SIZE = 128
     private const val LEGACY_UNNAMED_TITLE = "新对话"
+    private const val CHECKPOINT_TABLE = "conversation_context_checkpoints"
+}
+
+/**
+ * 把已经按 chunk_index 排好序的分片按 UTF-8 字节流吐出。
+ *
+ * 分片边界由写侧保证不拆 UTF-16 代理对，因此逐片编码后再拼接与整串编码字节一致；
+ * JSON 解码器按需读取，不需要在堆上构造完整的大字符串。
+ */
+private class ChunkedUtf8InputStream(
+    private val chunks: List<String>,
+) : InputStream() {
+    private var chunkIndex = 0
+    private var chunkBytes = ByteArray(0)
+    private var byteOffset = 0
+
+    override fun read(): Int {
+        if (!ensureAvailable()) return -1
+        return chunkBytes[byteOffset++].toInt() and 0xFF
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        require(offset >= 0 && length >= 0 && offset + length <= buffer.size)
+        if (length == 0) return 0
+        var written = 0
+        while (written < length) {
+            if (!ensureAvailable()) break
+            val count = minOf(length - written, chunkBytes.size - byteOffset)
+            System.arraycopy(chunkBytes, byteOffset, buffer, offset + written, count)
+            byteOffset += count
+            written += count
+        }
+        return if (written == 0) -1 else written
+    }
+
+    private fun ensureAvailable(): Boolean {
+        if (byteOffset < chunkBytes.size) return true
+        while (chunkIndex < chunks.size) {
+            chunkBytes = chunks[chunkIndex++].toByteArray(Charsets.UTF_8)
+            byteOffset = 0
+            if (chunkBytes.isNotEmpty()) return true
+        }
+        return false
+    }
 }
 
 /**

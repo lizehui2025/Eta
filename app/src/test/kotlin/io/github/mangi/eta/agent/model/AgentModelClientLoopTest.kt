@@ -145,7 +145,8 @@ class AgentModelClientLoopTest {
             ),
             assistant(content = "已完成", finishReason = "stop"),
         )
-        val executed = mutableListOf<String>()
+        // 只读工具会并行执行，测试记录必须线程安全；结果顺序由 executor 回填保证。
+        val executed = java.util.Collections.synchronizedList(mutableListOf<String>())
 
         val result = AgentModelClient.complete(
             config = modelConfig(),
@@ -191,7 +192,7 @@ class AgentModelClientLoopTest {
             ),
             assistant(content = "已按补充完成", finishReason = "stop"),
         )
-        val executed = mutableListOf<String>()
+        val executed = java.util.Collections.synchronizedList(mutableListOf<String>())
 
         val result = AgentModelClient.complete(
             config = modelConfig(),
@@ -205,7 +206,7 @@ class AgentModelClientLoopTest {
             runController = controller,
         )
 
-        assertEquals(listOf("call-1", "call-2"), executed)
+        assertEquals(setOf("call-1", "call-2"), executed.toSet())
         assertEquals(0, cancelledResources.get())
         assertFalse(controller.hasPendingSteering)
         assertEquals("已按补充完成", result.content)
@@ -296,7 +297,7 @@ class AgentModelClientLoopTest {
             firstResponse,
             assistant(content = "recovered", finishReason = "stop"),
         )
-        val executed = mutableListOf<Pair<String, String>>()
+        val executed = java.util.Collections.synchronizedList(mutableListOf<Pair<String, String>>())
 
         AgentModelClient.complete(
             config = modelConfig(),
@@ -309,11 +310,11 @@ class AgentModelClientLoopTest {
         )
 
         assertEquals(
-            listOf(
+            setOf(
                 "duplicate" to "get_current_context",
                 "duplicate_1" to "get_current_context",
             ),
-            executed,
+            executed.toSet(),
         )
         val secondRequest = provider.requests[1]
         assertEquals(

@@ -23,6 +23,18 @@ internal data class TextChunkAppendResult(
     val charCount: Int,
 )
 
+/** 分块引用的读取结果；与 [restoreText] 使用同一套引用解析与损坏探测。 */
+internal sealed interface TextChunkRead {
+    /** 不是分块引用，调用方应按普通内联文本处理。 */
+    data object Inline : TextChunkRead
+
+    /** 引用有效，按 chunk_index 顺序返回分片正文，不拼接成完整字符串。 */
+    data class Chunks(val contents: List<String>) : TextChunkRead
+
+    /** 引用匹配但分块缺失/乱序/长度不符；已写损坏哨兵，调用方按空正文降级。 */
+    data object Corrupted : TextChunkRead
+}
+
 /** 由业务 DAO 在同一 Room 事务内写入主记录与分块，不暴露存储引用给领域层。 */
 internal interface ChunkedTextDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -199,7 +211,10 @@ internal interface ChunkedTextDao {
             markTextCorrupted(table, owner, field, stored, "引用数字超出 Int 范围")
             return ""
         }
-        val result = StringBuilder()
+        // 按引用声明的长度预分配，避免长正文在 StringBuilder 翻倍扩容时
+        // 产生比正文本身更大的临时数组（实测 12.8M 字符会先申请 64 MB）。
+        // 上限只防损坏引用诱导超大分配；正常长文本仍走同一条恢复路径。
+        val result = StringBuilder(length.coerceAtMost(MAX_RESTORE_PREALLOC_CHARS))
         var offset = 0
         while (offset < count) {
             val page = textChunks(table, owner, field, minOf(32, count - offset), offset)
@@ -226,6 +241,54 @@ internal interface ChunkedTextDao {
         return result.toString()
     }
 
+    /**
+     * 与 [restoreText] 同源的引用校验，但只返回分片列表。
+     * 长 JSON transcript 可据此走流式解码，避免把几十 MB 正文拼成单个 String +
+     * StringBuilder 缓冲时申请超大连续内存。
+     */
+    suspend fun readTextChunks(
+        table: String,
+        owner: String,
+        field: String,
+        stored: String,
+    ): TextChunkRead {
+        val match = REFERENCE_TEXT_PATTERN.matchEntire(stored) ?: return TextChunkRead.Inline
+        val count = match.groupValues[1].toIntOrNull()
+        val length = match.groupValues[2].toIntOrNull()
+        if (count == null || length == null) {
+            warnChunkRestoreFailure(table, owner, field, "引用数字超出 Int 范围")
+            markTextCorrupted(table, owner, field, stored, "引用数字超出 Int 范围")
+            return TextChunkRead.Corrupted
+        }
+        val contents = ArrayList<String>()
+        var offset = 0
+        var actualLength = 0
+        while (offset < count) {
+            val page = textChunks(table, owner, field, minOf(32, count - offset), offset)
+            if (page.isEmpty()) {
+                warnChunkRestoreFailure(table, owner, field, "分块缺失")
+                markTextCorrupted(table, owner, field, stored, "分块缺失")
+                return TextChunkRead.Corrupted
+            }
+            for (chunk in page) {
+                if (chunk.chunkIndex != offset) {
+                    warnChunkRestoreFailure(table, owner, field, "分块顺序异常")
+                    markTextCorrupted(table, owner, field, stored, "分块顺序异常")
+                    return TextChunkRead.Corrupted
+                }
+                offset++
+                contents += chunk.content
+                actualLength += chunk.content.length
+            }
+        }
+        if (actualLength != length) {
+            warnChunkRestoreFailure(table, owner, field, "恢复长度不符")
+            markTextCorrupted(table, owner, field, stored, "恢复长度不符")
+            return TextChunkRead.Corrupted
+        }
+        return TextChunkRead.Chunks(contents)
+    }
+
     /** 清除损坏哨兵行：只删除 chunk_index = -1 的标记行，不触碰任何数据分块；写入非退化值前调用。 */
     @Query("DELETE FROM agent_text_chunks WHERE owner_table = :table AND owner_id = :owner AND field = :field AND chunk_index = -1")
     suspend fun clearTextCorruption(table: String, owner: String, field: String)
@@ -240,6 +303,7 @@ internal interface ChunkedTextDao {
 
     companion object {
         internal const val CHUNK_CHARS = 16_384
+        internal const val MAX_RESTORE_PREALLOC_CHARS = 32 * 1024 * 1024
         const val REFERENCE_PREFIX = "@eta:chunks:v1:"
 
         /**

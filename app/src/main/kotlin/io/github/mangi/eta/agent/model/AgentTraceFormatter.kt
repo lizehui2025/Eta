@@ -382,7 +382,13 @@ internal class AgentTraceFormatter {
         if (name.isNotBlank()) builder.append("文件：").append(name).append('\n')
         builder.append(
             if (lines > 0) {
-                "行：${lineRangeLabel(lines)} · 读取 $bytesRead 字节"
+                // offset_bytes 是字节偏移，不是行偏移。非零偏移时不能把本段行号伪装成
+                // 文件绝对行号；只报告本段行数，并保留字节偏移提示。
+                if (offset == 0) {
+                    "行：${lineRangeLabel(lines)} · 读取 $bytesRead 字节"
+                } else {
+                    "行：本段 ${lineCountLabel(lines)} · 读取 $bytesRead 字节"
+                }
             } else {
                 "读取 $bytesRead 字节"
             },

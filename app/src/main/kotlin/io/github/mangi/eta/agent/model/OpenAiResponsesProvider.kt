@@ -43,6 +43,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             .build()
 
         var usePromptCacheKey = ProviderPromptCache.openAiPromptCacheKeyAllowed(config.baseUrl)
+        var useReasoningSummary = !ProviderPromptCache.isReasoningSummaryRejected(config.baseUrl)
         while (true) {
             val promptCacheKey = if (usePromptCacheKey) {
                 ProviderPromptCache.promptCacheKey(request.sessionId)
@@ -56,6 +57,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                     tools = request.effectiveTools,
                     promptCacheKey = promptCacheKey,
                     projectionCache = request.projectionCache,
+                    includeReasoningSummary = useReasoningSummary,
                 ),
                 JSON_MEDIA_TYPE,
             )
@@ -67,6 +69,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             val call = AgentHttpClient.modelClientFor(request.purpose).newCall(httpRequest)
             val binding = runController.register(call::cancel)
             var retryWithoutCacheKey = false
+            var retryWithoutReasoningSummary = false
 
             try {
                 runController.throwIfCancelled()
@@ -78,6 +81,16 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                         val code = response.code
                         val errorBody = response.peekBody(16_384).string()
                         if (
+                            useReasoningSummary &&
+                            ProviderPromptCache.isUnsupportedFieldRejection(
+                                code,
+                                errorBody,
+                                ProviderPromptCache.REASONING_SUMMARY_FIELD,
+                            )
+                        ) {
+                            ProviderPromptCache.markReasoningSummaryRejected(config.baseUrl)
+                            retryWithoutReasoningSummary = true
+                        } else if (
                             usePromptCacheKey &&
                             ProviderPromptCache.isUnsupportedFieldRejection(
                                 code,
@@ -112,6 +125,10 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                 usePromptCacheKey = false
                 continue
             }
+            if (retryWithoutReasoningSummary) {
+                useReasoningSummary = false
+                continue
+            }
             error("模型接口请求未产生结果")
         }
     }
@@ -122,6 +139,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         tools: JSONArray,
         promptCacheKey: String? = null,
         projectionCache: AgentRequestProjectionCache = AgentRequestProjectionCache(),
+        includeReasoningSummary: Boolean = true,
     ): JSONObject = ResponsesRequestBuilder.build(
         config,
         messages,
@@ -130,6 +148,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         config.requestOptions,
         config.codingMode,
         projectionCache,
+        includeReasoningSummary,
     )
 
     private fun readStreamingResponse(

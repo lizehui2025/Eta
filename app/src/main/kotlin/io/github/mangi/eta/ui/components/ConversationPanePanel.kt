@@ -177,8 +177,8 @@ internal fun ConversationPanePanel(
                         EmptyConversations(isSearching = query.isNotBlank())
                     }
                 } else {
-                    groups.forEach { group ->
-                        item(key = "section-${group.section}") {
+                    groups.forEachIndexed { index, group ->
+                        item(key = "section-$index") {
                             ConversationSectionHeader(group = group)
                         }
                         items(
@@ -568,17 +568,16 @@ private fun ConversationDrawerGroup.localizedLabel(): String = when (val value =
 
 private fun List<ConversationSummaryUi>.groupForDrawer(): List<ConversationDrawerGroup> {
     if (isEmpty()) return emptyList()
-    val groups = mutableListOf<ConversationDrawerGroup>()
+    // 同一 section 可能因排序/运行态变化被非相邻项隔开；先按 section 合并，
+    // 否则 LazyColumn 会收到两个相同的 section key 并直接崩溃。
+    val grouped = linkedMapOf<ConversationDrawerSection, MutableList<ConversationSummaryUi>>()
     for (conversation in this) {
         val section = conversation.drawerSection()
-        val last = groups.lastOrNull()
-        if (last?.section == section) {
-            groups[groups.lastIndex] = last.copy(items = last.items + conversation)
-        } else {
-            groups += ConversationDrawerGroup(section = section, items = listOf(conversation))
-        }
+        grouped.getOrPut(section) { mutableListOf() } += conversation
     }
-    return groups
+    return grouped.map { (section, items) ->
+        ConversationDrawerGroup(section = section, items = items)
+    }
 }
 
 private fun ConversationSummaryUi.drawerSection(): ConversationDrawerSection = when {

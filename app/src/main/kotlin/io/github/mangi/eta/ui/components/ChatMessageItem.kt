@@ -2,28 +2,21 @@ package io.github.mangi.eta.ui.components
 
 import android.graphics.BitmapFactory
 import android.util.Base64
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -48,9 +41,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -68,6 +63,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -426,30 +422,21 @@ internal fun ChatMessageItem(
  * 把连续的思考与工具调用收束为一个可展开的工作过程，避免 Agent 事件退化为聊天气泡噪音。
  */
 @Composable
-internal fun AgentWorkProcess(
+internal fun AgentThinkingBlock(
     id: String,
     messages: List<AgentChatMessageUi>,
     assistantOverlay: Boolean = false,
-    onOpenBrowser: () -> Unit,
-    currentBrowserMessageId: String?,
     retainedStreamingStates: Map<String, StreamingMarkdownState>,
     modifier: Modifier = Modifier,
 ) {
     val running = messages.any { message ->
-        (message is ThinkingMessageUi && message.isStreaming) ||
-            (message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running)
+        message is ThinkingMessageUi && message.isStreaming
     }
-    val toolCount = messages.count { it is ToolActivityMessageUi }
-    val runningTool = messages.lastOrNull { message ->
-        message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running
-    } as? ToolActivityMessageUi
-    val runningToolTitle = runningTool?.argumentsSummary?.takeIf { it.isNotBlank() }
-        ?: runningTool?.let { toolDisplayName(it.toolName) }
-    // 工作过程默认折叠：运行中只更新标题栏（步数与当前工具），展开交给用户主动触发，
-    // 避免流式思考与工具输出在长列表里持续重排造成卡顿。
-    var expanded by rememberSaveable(id) { mutableStateOf(false) }
+    val lastThinking = messages.lastOrNull { it is ThinkingMessageUi } as? ThinkingMessageUi
+    // 运行中的思考块默认展开，让内容随流式输出跟底；历史思考块保持折叠。
+    var expanded by rememberSaveable(id) { mutableStateOf(running) }
     // 浮窗回复区另记"用户手动展开过"：手动选择优先，不再被自动展开/收拢覆盖。
-    var manuallyExpanded by rememberSaveable(id) { mutableStateOf(false) }
+    var manuallyExpanded by rememberSaveable(id) { mutableStateOf(running) }
 
     val pulseAlpha = rememberActivePulse(active = running, label = "work_pulse")
 
@@ -479,26 +466,23 @@ internal fun AgentWorkProcess(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = if (running) stringResource(R.string.voice_reasoning)
-                        else stringResource(R.string.work_completed),
+                        else stringResource(R.string.reasoning_completed),
                     style = MiuixTheme.textStyles.body2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )
             }
-            AnimatedVisibility(visible = expanded && manuallyExpanded) {
-                Column {
-                    messages.forEach { message ->
-                        ChatMessageItem(
-                            message = message,
-                            onSuggestionClick = {},
-                            onRunTraceClick = {},
-                            onOpenBrowser = onOpenBrowser,
-                            showBrowserShortcut = message.id == currentBrowserMessageId,
-                            retainedStreamingState = retainedStreamingStates[message.id],
-                            compact = true,
-                            assistantOverlay = true,
-                        )
-                    }
-                }
+            AnimatedVisibility(
+                visible = expanded && manuallyExpanded,
+                enter = fadeIn(tween(120)),
+                exit = fadeOut(tween(80)),
+            ) {
+                ThinkingMessageList(
+                    id = id,
+                    messages = messages,
+                    running = running,
+                    assistantOverlay = true,
+                    retainedStreamingStates = retainedStreamingStates,
+                )
             }
         }
         return
@@ -526,11 +510,7 @@ internal fun AgentWorkProcess(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                imageVector = when {
-                    runningTool != null -> iconForTool(runningTool.toolName)
-                    running -> Icons.Rounded.Lightbulb
-                    else -> Icons.Rounded.Build
-                },
+                imageVector = Icons.Rounded.Lightbulb,
                 contentDescription = null,
                 modifier = Modifier
                     .size(15.dp)
@@ -543,19 +523,16 @@ internal fun AgentWorkProcess(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = when {
-                    running && toolCount > 0 -> pluralStringResource(
-                        R.plurals.work_processing_step,
-                        toolCount,
-                        toolCount,
-                    ) + (runningToolTitle?.let { " · $it" } ?: "")
-                    running -> stringResource(R.string.work_analyzing)
-                    toolCount > 0 -> pluralStringResource(
-                        R.plurals.work_completed_steps,
-                        toolCount,
-                        toolCount,
-                    )
-                    else -> stringResource(R.string.work_completed)
+                text = if (running) {
+                    stringResource(R.string.reasoning_in_progress)
+                } else {
+                    lastThinking?.elapsedSeconds?.takeIf { it > 0 }?.let { seconds ->
+                        pluralStringResource(
+                            R.plurals.reasoning_completed_seconds,
+                            seconds,
+                            seconds,
+                        )
+                    } ?: stringResource(R.string.reasoning_completed)
                 },
                 style = MiuixTheme.textStyles.body2,
                 color = if (running) {
@@ -571,7 +548,7 @@ internal fun AgentWorkProcess(
                 imageVector = if (expanded) Icons.Rounded.ExpandMore
                     else Icons.Rounded.ChevronRight,
                 contentDescription = stringResource(
-                    if (expanded) R.string.work_collapse else R.string.work_expand,
+                    if (expanded) R.string.reasoning_collapse else R.string.reasoning_expand,
                 ),
                 modifier = Modifier.size(14.dp),
                 tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f),
@@ -580,18 +557,9 @@ internal fun AgentWorkProcess(
 
         AnimatedVisibility(
             visible = expanded,
-            enter = fadeIn() + expandVertically(
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioNoBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                )
-            ),
-            exit = fadeOut() + shrinkVertically(
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioNoBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                )
-            ),
+            // 只做淡入淡出：尺寸动画会在每一帧重新测量上千行内容，是展开卡顿的主因。
+            enter = fadeIn(tween(120)),
+            exit = fadeOut(tween(80)),
         ) {
             Column {
                 Box(
@@ -601,20 +569,115 @@ internal fun AgentWorkProcess(
                         .height(0.5.dp)
                         .background(MiuixTheme.colorScheme.outline.copy(alpha = 0.45f)),
                 )
-                Column(modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)) {
-                    messages.forEach { message ->
-                        ChatMessageItem(
-                            message = message,
-                            onSuggestionClick = {},
-                            onRunTraceClick = {},
-                            onOpenBrowser = onOpenBrowser,
-                            showBrowserShortcut = message.id == currentBrowserMessageId,
-                            retainedStreamingState = retainedStreamingStates[message.id],
-                            compact = true,
-                        )
-                    }
-                }
+                ThinkingMessageList(
+                    id = id,
+                    messages = messages,
+                    running = running,
+                    assistantOverlay = false,
+                    retainedStreamingStates = retainedStreamingStates,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
+                )
             }
+        }
+    }
+}
+
+/**
+ * 思考块展开后的内层列表。
+ *
+ * 长会话一个思考块可能包含多条思考消息；这里用限高 LazyColumn 懒组合，
+ * 只渲染视口附近的条目，并在用户没有上滑时跟随最后一条输出。
+ */
+@Composable
+private fun ThinkingMessageList(
+    id: String,
+    messages: List<AgentChatMessageUi>,
+    running: Boolean,
+    assistantOverlay: Boolean,
+    retainedStreamingStates: Map<String, StreamingMarkdownState>,
+    modifier: Modifier = Modifier,
+) {
+    val listState = rememberLazyListState()
+    val density = LocalDensity.current.density
+    // 思考块折叠后会离开组合，重新展开时用 remember 让跟随状态回到 true。
+    var followOutput by remember(id) { mutableStateOf(true) }
+    val isUserDragging by listState.interactionSource.collectIsDraggedAsState()
+    val atBottom by remember(listState) {
+        derivedStateOf { !listState.canScrollForward }
+    }
+    val currentFollow by rememberUpdatedState(followOutput)
+    val currentDragging by rememberUpdatedState(isUserDragging)
+
+    // 用户上滑离开底部 -> 脱离自动跟随；重新滑到底部并松手 -> 恢复。
+    LaunchedEffect(isUserDragging, atBottom) {
+        when {
+            isUserDragging && !atBottom -> followOutput = false
+            atBottom && !isUserDragging -> followOutput = true
+        }
+    }
+
+    // 连续帧时钟逐步追底，避免每次增量瞬间跳到底部造成抖动。
+    // 历史思考等布局稳定后退出；流式思考持续跟随直到不再运行。
+    LaunchedEffect(listState, followOutput, running, messages.isEmpty()) {
+        if (!followOutput || messages.isEmpty()) return@LaunchedEffect
+        var previousFrameNanos = 0L
+        var stableFrames = 0
+        while (currentFollow) {
+            val frameNanos = withFrameNanos { it }
+            val elapsedSeconds = if (previousFrameNanos == 0L) {
+                1f / 60f
+            } else {
+                ((frameNanos - previousFrameNanos) / 1_000_000_000f).coerceIn(0f, 0.05f)
+            }
+            previousFrameNanos = frameNanos
+            if (currentDragging) continue
+            val layoutInfo = listState.layoutInfo
+            val lastIndex = layoutInfo.totalItemsCount - 1
+            val lastVisibleItem = layoutInfo.visibleItemsInfo.lastOrNull()
+            if (lastIndex < 0 || lastVisibleItem == null) {
+                stableFrames = 0
+                continue
+            }
+            if (lastVisibleItem.index != lastIndex) {
+                // 最后一条还没进入视口：先平滑滚到它，再交给下面的帧循环跟随其内部增长。
+                listState.animateScrollToItem(lastIndex)
+                previousFrameNanos = 0L
+                stableFrames = 0
+                continue
+            }
+            val viewportEnd = layoutInfo.viewportEndOffset - layoutInfo.afterContentPadding
+            val distance = (lastVisibleItem.offset + lastVisibleItem.size - viewportEnd).toFloat()
+            if (distance <= 0f) {
+                // 历史内容等异步 Markdown 排版稳定后再退出。
+                if (!running && ++stableFrames > 60) break
+                continue
+            }
+            stableFrames = 0
+            val step = smoothBottomFollowStep(distance, elapsedSeconds, density)
+            if (step > 0f) listState.scroll { scrollBy(step) }
+        }
+    }
+    LazyColumn(
+        state = listState,
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = if (assistantOverlay) 360.dp else 420.dp),
+    ) {
+        items(
+            items = messages,
+            key = { it.id },
+            contentType = { it::class },
+        ) { message ->
+            ChatMessageItem(
+                message = message,
+                onSuggestionClick = {},
+                onRunTraceClick = {},
+                onOpenBrowser = {},
+                showBrowserShortcut = false,
+                retainedStreamingState = retainedStreamingStates[message.id],
+                compact = true,
+                assistantOverlay = assistantOverlay,
+            )
         }
     }
 }
@@ -1002,7 +1065,17 @@ private fun AgentMessageBlock(
                 )
             }
             message.renderMarkdown -> {
-                SelectionContainer {
+                // 历史中间消息不启用文本选择：SelectionContainer 会为每条消息维护
+                // 一套选择管理器，长列表滚动时开销明显；最终回复仍保留复制/选择能力。
+                if (showCopyAction) {
+                    SelectionContainer {
+                        StableMarkdown(
+                            content = message.content,
+                            parsedState = completedMarkdownState,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                } else {
                     StableMarkdown(
                         content = message.content,
                         parsedState = completedMarkdownState,
@@ -1011,7 +1084,15 @@ private fun AgentMessageBlock(
                 }
             }
             message.content.isNotBlank() -> {
-                SelectionContainer {
+                if (showCopyAction) {
+                    SelectionContainer {
+                        Text(
+                            text = message.content,
+                            style = MiuixTheme.textStyles.body1,
+                            color = MiuixTheme.colorScheme.onSurface,
+                        )
+                    }
+                } else {
                     Text(
                         text = message.content,
                         style = MiuixTheme.textStyles.body1,
@@ -1168,21 +1249,11 @@ private fun StableMarkdown(
         components = components,
         modifier = modifier,
         loading = {
-            // 保留与最终正文接近的高度，避免历史消息异步解析完成后越界绘制。
-            Text(
-                text = content,
-                style = chatMarkdownBodyStyle(tone),
-                color = chatMarkdownTextColor(tone),
-                modifier = it,
-            )
+            // 解析中只测量有界预览：直接排版整段长正文会在展开首帧造成严重卡顿。
+            MarkdownPendingText(content = content, tone = tone, modifier = it)
         },
         error = {
-            Text(
-                text = content,
-                style = chatMarkdownBodyStyle(tone),
-                color = chatMarkdownTextColor(tone),
-                modifier = it,
-            )
+            MarkdownPendingText(content = content, tone = tone, modifier = it)
         },
         success = { state, successComponents, successModifier ->
             ChatMarkdownDocument(
@@ -1193,6 +1264,34 @@ private fun StableMarkdown(
             )
         },
     )
+}
+
+@Composable
+private fun MarkdownPendingText(
+    content: String,
+    tone: ChatMarkdownTone,
+    modifier: Modifier,
+) {
+    val preview = remember(content) {
+        boundedTextPreview(content, MAX_MARKDOWN_PENDING_CHARS, MAX_MARKDOWN_PENDING_LINES)
+    }
+    Column(modifier) {
+        Text(
+            text = preview.text,
+            style = chatMarkdownBodyStyle(tone),
+            color = chatMarkdownTextColor(tone),
+            maxLines = MAX_MARKDOWN_PENDING_LINES,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (preview.truncated) {
+            Text(
+                text = stringResource(R.string.linux_files_truncated_hint),
+                style = MiuixTheme.textStyles.footnote2,
+                color = chatMarkdownTextColor(tone).copy(alpha = 0.7f),
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
 }
 
 @Composable
@@ -2352,10 +2451,23 @@ private fun ThinkingRow(
     modifier: Modifier = Modifier,
     compact: Boolean = false,
 ) {
-    // 思考默认折叠：作为独立元素块由用户点击展开，不再随流式状态自动撑开，
-    // 避免长文本实时排版造成的列表卡顿。
-    var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
-    val keepStreamingMarkdown = remember(message.id) { message.isStreaming }
+    // 思考默认展开；工作过程内层列表负责懒组合与跟底，独立元素块则用限高滚动跟随。
+    var expanded by rememberSaveable(message.id) { mutableStateOf(true) }
+    // 超长思考直接显示末尾纯文本：既避免 Markdown 全量排版，也保证始终看到最新输出。
+    val longThinking = message.content.length > MAX_THINKING_MARKDOWN_CHARS
+    val tailText = remember(message.content) {
+        if (!longThinking) {
+            ""
+        } else {
+            val tailLines = ArrayDeque<String>(MAX_THINKING_TAIL_LINES)
+            for (line in message.content.lineSequence()) {
+                tailLines.addLast(line)
+                if (tailLines.size > MAX_THINKING_TAIL_LINES) tailLines.removeFirst()
+            }
+            tailLines.joinToString("\n").takeLast(MAX_THINKING_TAIL_CHARS)
+        }
+    }
+    val keepStreamingMarkdown = remember(message.id) { message.isStreaming } && !longThinking
     val streamingState = if (keepStreamingMarkdown) {
         retainedStreamingState ?: remember(message.id) { StreamingMarkdownState() }
     } else {
@@ -2367,7 +2479,7 @@ private fun ThinkingRow(
     // 后台解析，而不是等到首次点击展开。否则首帧只能测量 loading fallback 的纯文本高度，
     // 解析完成后正文高度会再次变化；状态挂在行级还能在收起/展开循环中存活，
     // 避免每次展开都重新走一遍异步解析。
-    val stableMarkdownState = if (streamingState == null && completedMarkdownState == null) {
+    val stableMarkdownState = if (!longThinking && streamingState == null && completedMarkdownState == null) {
         rememberMarkdownState(
             content = message.content,
             retainState = true,
@@ -2380,6 +2492,51 @@ private fun ThinkingRow(
         active = message.isStreaming,
         label = "thinking_pulse",
     )
+
+    val thinkingScrollState = rememberScrollState()
+    val density = LocalDensity.current.density
+    var followThinking by rememberSaveable(message.id) { mutableStateOf(true) }
+    val thinkingDragging by thinkingScrollState.interactionSource.collectIsDraggedAsState()
+    val thinkingAtBottom by remember(thinkingScrollState) {
+        derivedStateOf { thinkingScrollState.value >= thinkingScrollState.maxValue - 4 }
+    }
+    val currentFollowThinking by rememberUpdatedState(followThinking)
+    val currentThinkingDragging by rememberUpdatedState(thinkingDragging)
+
+    // 用户上滑离开底部 -> 脱离；重新滑到底部并松手 -> 恢复；重新展开 -> 恢复。
+    LaunchedEffect(thinkingDragging, thinkingAtBottom) {
+        when {
+            thinkingDragging && !thinkingAtBottom -> followThinking = false
+            thinkingAtBottom && !thinkingDragging -> followThinking = true
+        }
+    }
+    LaunchedEffect(expanded) {
+        if (expanded) followThinking = true
+    }
+    // 独立思考块同样用连续帧时钟追底；历史内容布局稳定后退出。
+    LaunchedEffect(compact, followThinking, message.isStreaming) {
+        if (compact || !followThinking) return@LaunchedEffect
+        var previousFrameNanos = 0L
+        var stableFrames = 0
+        while (currentFollowThinking) {
+            val frameNanos = withFrameNanos { it }
+            val elapsedSeconds = if (previousFrameNanos == 0L) {
+                1f / 60f
+            } else {
+                ((frameNanos - previousFrameNanos) / 1_000_000_000f).coerceIn(0f, 0.05f)
+            }
+            previousFrameNanos = frameNanos
+            if (currentThinkingDragging) continue
+            val distance = (thinkingScrollState.maxValue - thinkingScrollState.value).toFloat()
+            if (distance <= 0f) {
+                if (!message.isStreaming && ++stableFrames > 60) break
+                continue
+            }
+            stableFrames = 0
+            val step = smoothBottomFollowStep(distance, elapsedSeconds, density)
+            if (step > 0f) thinkingScrollState.scroll { scrollBy(step) }
+        }
+    }
 
     // compact 模式渲染在工作过程卡片内部，不再携带自己的卡片外壳，避免卡中卡。
     val containerModifier = if (compact) {
@@ -2454,7 +2611,11 @@ private fun ThinkingRow(
             )
         }
 
-        AnimatedVisibility(visible = expanded && message.content.isNotBlank()) {
+        AnimatedVisibility(
+            visible = expanded && message.content.isNotBlank(),
+            enter = fadeIn(tween(120)),
+            exit = fadeOut(tween(80)),
+        ) {
             Column {
                 if (!compact) {
                     Box(
@@ -2465,14 +2626,18 @@ private fun ThinkingRow(
                             .background(MiuixTheme.colorScheme.outline.copy(alpha = 0.45f)),
                     )
                 }
-                // 思考内容限高并允许内部滚动：展开时也保持独立元素块，不占满整屏，
-                // 避免长思考全屏渲染造成的卡顿。
-                Column(
-                    modifier = Modifier
+                val contentContainerModifier = if (compact) {
+                    // 工作过程内部已经是限高 LazyColumn，思考内容直接参与其懒组合，
+                    // 避免再嵌一层 verticalScroll 造成手势竞争与全量测量。
+                    Modifier.fillMaxWidth()
+                } else {
+                    // 独立思考块限高并在内部跟底，不把长文本全部撑进外层列表。
+                    Modifier
                         .fillMaxWidth()
                         .heightIn(max = 280.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
+                        .verticalScroll(thinkingScrollState)
+                }
+                Column(modifier = contentContainerModifier) {
                     val contentModifier = Modifier
                         .fillMaxWidth()
                         .padding(
@@ -2481,7 +2646,28 @@ private fun ThinkingRow(
                             top = if (compact) 2.dp else 8.dp,
                             bottom = if (compact) 8.dp else 12.dp,
                         )
-                    if (streamingState != null && (message.isStreaming || completedMarkdownState == null)) {
+                    if (longThinking) {
+                        Text(
+                            text = tailText,
+                            style = chatMarkdownBodyStyle(ChatMarkdownTone.Thinking),
+                            color = chatMarkdownTextColor(ChatMarkdownTone.Thinking),
+                            maxLines = MAX_THINKING_TAIL_LINES,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = contentModifier,
+                        )
+                        if (message.content.length > tailText.length) {
+                            Text(
+                                text = stringResource(R.string.linux_files_truncated_hint),
+                                style = MiuixTheme.textStyles.footnote2,
+                                color = chatMarkdownTextColor(ChatMarkdownTone.Thinking).copy(alpha = 0.7f),
+                                modifier = Modifier.padding(
+                                    start = if (compact) 27.dp else 13.dp,
+                                    end = 13.dp,
+                                    bottom = if (compact) 8.dp else 12.dp,
+                                ),
+                            )
+                        }
+                    } else if (streamingState != null && (message.isStreaming || completedMarkdownState == null)) {
                         StreamingMarkdown(
                             state = streamingState,
                             content = message.content,
@@ -2562,6 +2748,18 @@ private fun ToolActivityInline(
     } else {
         null
     }
+    // 展开内容先做有界投影：即使工具结果异常大，Text 也只测量前若干行/字符，
+    // 避免单个超长字符串在展开首帧触发全量排版。
+    val detailPreview = remember(message.detail) {
+        message.detail?.takeIf(String::isNotBlank)?.let {
+            boundedTextPreview(it, MAX_TOOL_DETAIL_CHARS, MAX_TOOL_DETAIL_LINES)
+        }
+    }
+    val resultPreview = remember(message.resultSummary) {
+        message.resultSummary?.takeIf(String::isNotBlank)?.let {
+            boundedTextPreview(it, MAX_TOOL_RESULT_CHARS, MAX_TOOL_RESULT_LINES)
+        }
+    }
 
     Column(
         modifier = modifier
@@ -2632,44 +2830,35 @@ private fun ToolActivityInline(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
-                AnimatedContent(
-                    targetState = message.status,
-                    transitionSpec = {
-                        (fadeIn(tween(150)) + scaleIn(tween(170), initialScale = 0.86f))
-                            .togetherWith(
-                                fadeOut(tween(90)) + scaleOut(tween(110), targetScale = 0.86f)
-                            )
-                    },
-                    label = "tool_status",
-                ) { status ->
-                    // 成功是常态，只留低饱和度对勾；运行中与失败才占用视觉注意力
-                    if (status == ToolActivityStatusUi.Success) {
-                        Icon(
-                            imageVector = Icons.Rounded.Check,
-                            contentDescription = stringResource(R.string.tool_status_success),
-                            modifier = Modifier.size(13.dp),
-                            tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f),
+                // 成功是常态，只留低饱和度对勾；运行中与失败才占用视觉注意力。
+                // 不做 AnimatedContent：长列表滚动时每个新进入视口的工具行都会启动一套过渡，
+                // 是滚动 jank 的重要来源。
+                if (message.status == ToolActivityStatusUi.Success) {
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = stringResource(R.string.tool_status_success),
+                        modifier = Modifier.size(13.dp),
+                        tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f),
+                    )
+                } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        modifier = Modifier.graphicsLayer(
+                            alpha = if (message.status == ToolActivityStatusUi.Running) pulseAlpha else 1f
+                        ),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(message.status.statusColor())
                         )
-                    } else {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp),
-                            modifier = Modifier.graphicsLayer(
-                                alpha = if (status == ToolActivityStatusUi.Running) pulseAlpha else 1f
-                            ),
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(status.statusColor())
-                            )
-                            Text(
-                                text = status.statusLabel(),
-                                style = MiuixTheme.textStyles.footnote2,
-                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.8f),
-                            )
-                        }
+                        Text(
+                            text = message.status.statusLabel(),
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.8f),
+                        )
                     }
                 }
                 Icon(
@@ -2689,7 +2878,11 @@ private fun ToolActivityInline(
             }
         }
 
-        AnimatedVisibility(visible = isExpanded) {
+        AnimatedVisibility(
+            visible = isExpanded,
+            enter = fadeIn(tween(120)),
+            exit = fadeOut(tween(80)),
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2715,8 +2908,8 @@ private fun ToolActivityInline(
                         ),
                     )
                 }
-                val detailText = message.detail?.takeIf(String::isNotBlank)
-                if (detailText != null && !isSubagentRow) {
+                val detail = detailPreview
+                if (detail != null && !isSubagentRow) {
                     Text(
                         text = stringResource(R.string.tool_detail_label),
                         style = MiuixTheme.textStyles.footnote1,
@@ -2724,13 +2917,21 @@ private fun ToolActivityInline(
                         modifier = Modifier.padding(bottom = 2.dp)
                     )
                     Text(
-                        text = detailText,
+                        text = detail.text,
                         style = MiuixTheme.textStyles.footnote2.copy(fontFamily = FontFamily.Monospace),
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        maxLines = 80,
+                        maxLines = MAX_TOOL_DETAIL_LINES,
                         overflow = TextOverflow.Ellipsis,
                     )
-                } else if (message.resultSummary != null && message.resultSummary.isNotBlank()) {
+                    if (detail.truncated) {
+                        Text(
+                            text = stringResource(R.string.linux_files_truncated_hint),
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f),
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                } else if (resultPreview != null) {
                     Text(
                         text = stringResource(R.string.ui_result_0a2c91),
                         style = MiuixTheme.textStyles.footnote1,
@@ -2738,12 +2939,20 @@ private fun ToolActivityInline(
                         modifier = Modifier.padding(bottom = 2.dp)
                     )
                     Text(
-                        text = message.resultSummary,
+                        text = resultPreview.text,
                         style = MiuixTheme.textStyles.footnote2,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        maxLines = 10,
+                        maxLines = MAX_TOOL_RESULT_LINES,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (resultPreview.truncated) {
+                        Text(
+                            text = stringResource(R.string.linux_files_truncated_hint),
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f),
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
                 }
                 if (showBrowserShortcut) {
                     browserSnapshot?.takeIf { it.available }?.let { snapshot ->
@@ -2986,6 +3195,38 @@ private fun ToolCommandBlock(
 }
 
 // ── Run trace：轻量入口行 ─────────────────────────────────────────────
+
+private data class BoundedText(
+    val text: String,
+    val truncated: Boolean,
+)
+
+/**
+ * 把可能异常大的工具正文限制在可测量范围内。
+ * 先按字符截断再按行截断，确保单个超长行不会让 Text 在展开首帧全量排版。
+ */
+private fun boundedTextPreview(
+    raw: String,
+    maxChars: Int,
+    maxLines: Int,
+): BoundedText {
+    val charLimited = if (raw.length <= maxChars) raw else raw.take(maxChars)
+    val lineLimited = charLimited.lineSequence().take(maxLines).joinToString("\n")
+    return BoundedText(
+        text = lineLimited,
+        truncated = raw.length > maxChars || charLimited.count { it == '\n' } >= maxLines,
+    )
+}
+
+private const val MAX_TOOL_DETAIL_CHARS = 12_000
+private const val MAX_TOOL_DETAIL_LINES = 80
+private const val MAX_TOOL_RESULT_CHARS = 6_000
+private const val MAX_TOOL_RESULT_LINES = 20
+private const val MAX_MARKDOWN_PENDING_CHARS = 4_000
+private const val MAX_MARKDOWN_PENDING_LINES = 40
+private const val MAX_THINKING_MARKDOWN_CHARS = 4_000
+private const val MAX_THINKING_TAIL_CHARS = 3_000
+private const val MAX_THINKING_TAIL_LINES = 60
 
 @Composable
 private fun RunTraceRow(

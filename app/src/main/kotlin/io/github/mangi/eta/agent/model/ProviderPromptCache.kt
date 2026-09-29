@@ -21,9 +21,11 @@ internal object ProviderPromptCache {
     const val CACHE_CONTROL_FIELD = "cache_control"
     const val PROMPT_CACHE_KEY_FIELD = "prompt_cache_key"
     const val REASONING_CONTENT_FIELD = "reasoning_content"
+    const val REASONING_SUMMARY_FIELD = "summary"
 
     private val anthropicCacheControlRejected = ConcurrentHashMap.newKeySet<String>()
     private val promptCacheKeyRejected = ConcurrentHashMap.newKeySet<String>()
+    private val reasoningSummaryRejected = ConcurrentHashMap.newKeySet<String>()
 
     /** 同一会话跨 run 一致的稳定路由键；不泄露会话内部 id。 */
     fun promptCacheKey(sessionId: String): String =
@@ -51,6 +53,21 @@ internal object ProviderPromptCache {
             // 日志失败不影响降级语义；纯 JVM 单测里 Android 日志可能未被 mock。
             runCatching {
                 AndroidAgentLogger.info("端点拒绝 prompt_cache_key，已对该地址关闭缓存路由键：$host")
+            }
+        }
+    }
+
+    /** 部分 OpenAI-compatible Responses 网关支持 reasoning.effort，但不支持 reasoning.summary。 */
+    fun isReasoningSummaryRejected(baseUrl: String): Boolean =
+        hostKey(baseUrl) in reasoningSummaryRejected
+
+    fun markReasoningSummaryRejected(baseUrl: String) {
+        val host = hostKey(baseUrl)
+        if (reasoningSummaryRejected.add(host)) {
+            runCatching {
+                AndroidAgentLogger.warnThrottled("reasoning_summary_rejected:$host") {
+                    "服务端拒绝 reasoning.summary（$host），后续 Responses 请求将只发送 reasoning.effort"
+                }
             }
         }
     }

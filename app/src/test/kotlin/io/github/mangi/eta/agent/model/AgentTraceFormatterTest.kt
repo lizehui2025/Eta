@@ -508,6 +508,8 @@ class AgentTraceFormatterTest {
         )
         val offsetDetail = formatter.summarizeDetail("read_file", call.argumentsJson, offsetRead)
         assertTrue(offsetDetail.contains("自字节 4096 起"))
+        assertTrue(offsetDetail.contains("本段 2 行"))
+        assertFalse(offsetDetail.contains("第 1–2 行"))
         assertTrue(offsetDetail.contains("已截断"))
     }
 

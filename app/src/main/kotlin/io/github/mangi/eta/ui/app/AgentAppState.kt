@@ -135,12 +135,19 @@ internal class AgentAppState(
     private var conversationsById: Map<String, AgentChatHomeUiState> = emptyMap()
     private var conversationTitles: Map<String, String> = emptyMap()
     private var conversationUpdatedAt: Map<String, Long> = emptyMap()
+    /** history/journal 已加载的会话；未加载会话的正文保存在磁盘，保存时必须跳过 checkpoint。 */
+    private val transcriptLoadedConversationIds = mutableSetOf<String>()
+    private var conversationSwitchJob: Job? = null
 
     var homeState by mutableStateOf(emptyChatState(defaultThinkingEnabled))
         private set
 
     /** 初始会话快照是否仍在异步加载；加载期间 UI 显示占位，写盘与恢复流程等待 [loadCompletion]。 */
     var conversationsLoading by mutableStateOf(true)
+        private set
+
+    /** 非空时表示正在从磁盘加载目标会话的完整 transcript，UI 可据此显示加载态。 */
+    var switchingConversationId by mutableStateOf<String?>(null)
         private set
 
     var modelPickerState by mutableStateOf(AgentModelPickerUiState())
@@ -470,6 +477,8 @@ internal class AgentAppState(
         conversationsById = snapshot.conversationsById
         conversationTitles = snapshot.titles
         conversationUpdatedAt = snapshot.updatedAt
+        transcriptLoadedConversationIds.clear()
+        transcriptLoadedConversationIds += snapshot.transcriptLoadedIds
         fileAttachmentOwnerVersion += 1
         homeState = selectedConversationId
             ?.let(conversationsById::get)
@@ -547,6 +556,23 @@ internal class AgentAppState(
             return
         }
 
+        // 恢复会直接改 history/journal；先把涉及会话的正文从磁盘补回内存，
+        // 否则未打开会话的空占位会被当成真实历史覆盖进库。
+        ensureTranscriptsLoaded(
+            buildSet {
+                plan.completed.forEach {
+                    add(AgentUiHandoffPayload.from(it.result.handoff.payload).conversationId)
+                }
+                plan.interrupted.forEach {
+                    add(AgentUiHandoffPayload.from(it.handoff.payload).conversationId)
+                }
+                plan.reattach?.let {
+                    add(AgentUiHandoffPayload.from(it.handoff.payload).conversationId)
+                }
+                orphanRewrites.forEach { (conversationId, _) -> add(conversationId) }
+            }
+        )
+
         val acknowledgeAfterSave = mutableListOf<String>()
         val removeAfterSave = mutableListOf<String>()
         val changed = withContext(Dispatchers.Main) {
@@ -556,6 +582,7 @@ internal class AgentAppState(
                 val runId = completedRun.result.runId.ifBlank { completedRun.handoff.id }
                 val payload = AgentUiHandoffPayload.from(completedRun.handoff.payload)
                 val conversationId = payload.conversationId
+                if (conversationId !in transcriptLoadedConversationIds) return@forEach
                 val state = conversationsById[conversationId] ?: return@forEach
                 recoveryPlan.checkpoint?.let { checkpoint ->
                     stateChanged = restoreCheckpointTrace(
@@ -581,6 +608,8 @@ internal class AgentAppState(
             }
 
             plan.interrupted.forEach { checkpoint ->
+                val conversationId = AgentUiHandoffPayload.from(checkpoint.handoff.payload).conversationId
+                if (conversationId !in transcriptLoadedConversationIds) return@forEach
                 removeAfterSave += checkpoint.runId
                 stateChanged = restoreCheckpointTrace(
                     checkpoint = checkpoint,
@@ -588,6 +617,7 @@ internal class AgentAppState(
                 ) || stateChanged
             }
             orphanRewrites.forEach { (conversationId, runId) ->
+                if (conversationId !in transcriptLoadedConversationIds) return@forEach
                 conversationsById[conversationId]?.let { state ->
                     updateConversation(conversationId, RoleplayConversationReducer.applyRewrite(state, runId,
                         AgentRuntimeWire.RunResult(runId, false, "", "重新生成已中断，原回复已保留。",
@@ -599,6 +629,7 @@ internal class AgentAppState(
             stateChanged || acknowledgeAfterSave.isNotEmpty() || removeAfterSave.isNotEmpty()
         }
 
+        var persistenceSucceeded = true
         if (changed) {
             val saved = withContext(Dispatchers.Main) { persistConversations() }.await()
             if (saved == null) {
@@ -606,11 +637,60 @@ internal class AgentAppState(
                 removeAfterSave.forEach { runId ->
                     AgentRunCheckpointStore.remove(appContext, runId)
                 }
+            } else {
+                persistenceSucceeded = false
             }
         }
 
         plan.reattach?.let { checkpoint ->
-            withContext(Dispatchers.Main) { startReattachedRun(checkpoint) }
+            val conversationId = AgentUiHandoffPayload.from(checkpoint.handoff.payload).conversationId
+            if (conversationId in transcriptLoadedConversationIds) {
+                withContext(Dispatchers.Main) { startReattachedRun(checkpoint) }
+            }
+        }
+        if (plan.reattach == null && persistenceSucceeded) evictIdleTranscripts()
+    }
+
+    /**
+     * 把一个或多个会话的 checkpoint 正文从磁盘补进内存。
+     * 读取在 IO，状态替换回主线程；失败会话保持未加载，调用方必须按 [transcriptLoadedConversationIds] 兜底。
+     */
+    private suspend fun ensureTranscriptsLoaded(conversationIds: Collection<String>) {
+        val alreadyLoaded = withContext(Dispatchers.Main) { transcriptLoadedConversationIds.toSet() }
+        val missing = conversationIds
+            .filter { it.isNotBlank() && it !in alreadyLoaded }
+            .toSet()
+        if (missing.isEmpty()) return
+        val transcripts = withContext(Dispatchers.IO) {
+            missing.mapNotNull { conversationId ->
+                try {
+                    conversationId to AgentConversationStore.loadConversationTranscript(
+                        appContext,
+                        conversationId,
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (throwable: Throwable) {
+                    AndroidAgentLogger.error(
+                        "Agent conversation transcript preload failed: type=${throwable.safeLogType()}"
+                    )
+                    null
+                }
+            }
+        }
+        if (transcripts.isEmpty()) return
+        withContext(Dispatchers.Main.immediate) {
+            transcripts.forEach { (conversationId, transcript) ->
+                val state = conversationsById[conversationId] ?: return@forEach
+                transcriptLoadedConversationIds += conversationId
+                val loaded = state.copy(
+                    history = transcript.history,
+                    journal = transcript.journal,
+                ).let(RoleplayConversationReducer::decorate)
+                    .withCurrentReasoningCapabilities()
+                conversationsById = conversationsById + (conversationId to loaded)
+                if (selectedConversationId == conversationId) homeState = loaded
+            }
         }
     }
 
@@ -734,16 +814,28 @@ internal class AgentAppState(
         }
         if (archivedRuns.isEmpty()) return
 
+        ensureTranscriptsLoaded(
+            archivedRuns.mapNotNull { archivedRun ->
+                val payload = AgentExternalArchivePayload.from(archivedRun.handoff.payload)
+                    ?: return@mapNotNull null
+                archiveConversationId(
+                    source = archivedRun.handoff.source,
+                    conversationKey = payload.conversationKey,
+                )
+            }
+        )
         withContext(Dispatchers.Main) {
             val importedRunIds = archivedRuns.mapNotNull { archivedRun ->
                 importExternalRun(archivedRun)
             }
             refreshConversationSummaries()
-            persistConversations {
-                importedRunIds.forEach { runId ->
-                    AgentRunArchiveStore.remove(appContext, runId)
+            scheduleIdleTranscriptEviction(
+                persistConversations {
+                    importedRunIds.forEach { runId ->
+                        AgentRunArchiveStore.remove(appContext, runId)
+                    }
                 }
-            }
+            )
         }
     }
 
@@ -776,9 +868,14 @@ internal class AgentAppState(
         val archivedEffort = payload.reasoningEffort
             ?: payload.thinkingEnabled?.let(ReasoningEffort::fromLegacy)
             ?: ReasoningEffort.fromLegacy(defaultThinkingEnabled)
-        val existingState = conversationsById[conversationId] ?: emptyChatState(
+        val existingConversation = conversationsById[conversationId]
+        // 正文未加载时宁可不导入，保留归档等下次 refresh，也不能拿空 history/journal 覆盖。
+        if (existingConversation != null && conversationId !in transcriptLoadedConversationIds) return null
+        val existingState = existingConversation ?: emptyChatState(
             archivedEffort.enablesReasoning
-        ).copy(reasoningEffort = archivedEffort)
+        ).copy(reasoningEffort = archivedEffort).also {
+            transcriptLoadedConversationIds += conversationId
+        }
         val alreadyImported = AgentRuntimeHistoryReducer.wasApplied(existingState, runId) ||
             existingState.messages.any {
                 it is AgentMessageUi &&
@@ -869,6 +966,62 @@ internal class AgentAppState(
     fun selectConversation(conversationId: String) {
         if (homeState.messageEdit != null) cancelMessageEdit()
         val state = conversationsById[conversationId] ?: return
+        if (conversationId in transcriptLoadedConversationIds) {
+            activateConversation(conversationId, state)
+            return
+        }
+        if (switchingConversationId != null) return
+        switchingConversationId = conversationId
+        conversationSwitchJob = scope.launch {
+            // 先落盘当前会话，成功后才驱逐它的 transcript；失败则保持现状，不能拿未保存的正文冒险。
+            if (persistConversations().await() != null) {
+                withContext(Dispatchers.Main.immediate) {
+                    switchingConversationId = null
+                    conversationSwitchJob = null
+                }
+                return@launch
+            }
+            // 切到目标会话的轻量状态并锁住输入，再释放其它会话 transcript；
+            // 这样目标会话几十 MB 的分块恢复不会和上一个大会话同时在堆里。
+            withContext(Dispatchers.Main.immediate) {
+                val current = conversationsById[conversationId] ?: return@withContext
+                fileAttachmentOwnerVersion += 1
+                selectedConversationId = conversationId
+                conversationsById = conversationsById + (conversationId to current)
+                homeState = current
+                conversationPaneState = conversationPaneState.copy(selectedConversationId = conversationId)
+                evictIdleTranscripts()
+            }
+            val transcript = try {
+                withContext(Dispatchers.IO) {
+                    AgentConversationStore.loadConversationTranscript(appContext, conversationId)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (throwable: Throwable) {
+                AndroidAgentLogger.error(
+                    "Agent conversation transcript load failed: type=${throwable.safeLogType()}"
+                )
+                null
+            }
+            withContext(Dispatchers.Main.immediate) {
+                switchingConversationId = null
+                conversationSwitchJob = null
+                val current = conversationsById[conversationId] ?: return@withContext
+                val loadedTranscript = transcript
+                if (loadedTranscript == null) return@withContext
+                transcriptLoadedConversationIds += conversationId
+                val loaded = current.copy(
+                    history = loadedTranscript.history,
+                    journal = loadedTranscript.journal,
+                ).let(RoleplayConversationReducer::decorate)
+                conversationsById = conversationsById + (conversationId to loaded)
+                activateConversation(conversationId, loaded)
+            }
+        }
+    }
+
+    private fun activateConversation(conversationId: String, state: AgentChatHomeUiState) {
         fileAttachmentOwnerVersion += 1
         selectedConversationId = conversationId
         val normalized = currentReasoningCapabilities?.normalize(state.reasoningEffort)
@@ -881,10 +1034,41 @@ internal class AgentAppState(
         conversationsById = conversationsById + (conversationId to resolvedState)
         homeState = resolvedState
         conversationPaneState = conversationPaneState.copy(selectedConversationId = conversationId)
-        persistConversations()
+        scheduleIdleTranscriptEviction(persistConversations())
+    }
+
+    /**
+     * 保存成功后再驱逐空闲会话的 history/journal，避免持久化捕获到空占位。
+     * 只保留当前选中会话与在途 run 的会话，连续打开多个大会话时内存始终有界。
+     */
+    private fun scheduleIdleTranscriptEviction(persistence: Deferred<String?>) {
+        scope.launch {
+            if (persistence.await() == null) evictIdleTranscripts()
+        }
+    }
+
+    private fun evictIdleTranscripts() {
+        if (runConversationIds.isNotEmpty() || currentRunId != null) return
+        val keep = buildSet {
+            selectedConversationId?.let(::add)
+            conversationsById.filterValues { it.isStreaming }.keys.forEach(::add)
+        }
+        val evicted = transcriptLoadedConversationIds.filterNot { it in keep }
+        if (evicted.isEmpty()) return
+        var changed = false
+        evicted.forEach { conversationId ->
+            transcriptLoadedConversationIds -= conversationId
+            val state = conversationsById[conversationId] ?: return@forEach
+            if (state.history.isEmpty() && state.journal.isEmpty()) return@forEach
+            conversationsById = conversationsById +
+                (conversationId to state.copy(history = emptyList(), journal = emptyList()))
+            changed = true
+        }
+        if (changed) refreshConversationSummaries()
     }
 
     fun createConversation() {
+        cancelConversationSwitch()
         if (homeState.messageEdit != null) cancelMessageEdit()
         fileAttachmentOwnerVersion += 1
         selectedConversationId = null
@@ -897,6 +1081,7 @@ internal class AgentAppState(
     }
 
     fun startCharacterConversation(binding: RoleplayBinding, greeting: String) {
+        cancelConversationSwitch()
         createConversation()
         val id = newConversationId()
         val greetingId = "greeting-$id"
@@ -908,6 +1093,7 @@ internal class AgentAppState(
             AgentModelClient.ConversationMessage(role = "assistant", content = text, messageId = greetingId),
         )
         selectedConversationId = id
+        transcriptLoadedConversationIds += id
         homeState = emptyChatState(defaultThinkingEnabled).withCurrentReasoningCapabilities().copy(
             roleplay = binding,
             history = transcript,
@@ -925,6 +1111,7 @@ internal class AgentAppState(
     }
 
     fun selectReplyCandidate(messageId: String, index: Int) {
+        if (switchingConversationId != null) return
         if (homeState.isStreaming || homeState.messageEdit != null) return
         val updated = RoleplayConversationReducer.select(homeState, messageId, index) ?: return
         updateCurrentConversation(updated)
@@ -933,6 +1120,10 @@ internal class AgentAppState(
     }
 
     fun deleteConversation(conversationId: String) {
+        if (switchingConversationId == conversationId) {
+            cancelConversationSwitch()
+        }
+        transcriptLoadedConversationIds -= conversationId
         val wasSelected = selectedConversationId == conversationId
         conversationsById = conversationsById - conversationId
         conversationTitles = conversationTitles - conversationId
@@ -1005,6 +1196,7 @@ internal class AgentAppState(
     )
 
     fun sendCurrentMessage(submittedText: String? = null) {
+        if (switchingConversationId != null) return
         if (homeState.isCompacting) return
         val prompt = (submittedText ?: homeState.input).trim()
         val pendingImages = homeState.pendingImages
@@ -1058,6 +1250,7 @@ internal class AgentAppState(
 
         val conversationId = selectedConversationId ?: newConversationId().also {
             selectedConversationId = it
+            transcriptLoadedConversationIds += it
         }
         val runId = "run-${UUID.randomUUID()}"
         val userMessage = UserMessageUi(
@@ -1115,6 +1308,7 @@ internal class AgentAppState(
     }
 
     fun beginMessageEdit(messageId: String) {
+        if (switchingConversationId != null) return
         if (homeState.isStreaming || homeState.messageEdit != null) return
         if (homeState.roleplay != null) {
             if (messageId !in homeState.roleplayMessages.links) return
@@ -1176,12 +1370,14 @@ internal class AgentAppState(
     }
 
     fun messageRevisionImpact(messageId: String): MessageRevisionImpact? =
-        if (homeState.roleplay != null && messageId.startsWith("greeting-")) MessageRevisionImpact(0)
+        if (switchingConversationId != null) null
+        else if (homeState.roleplay != null && messageId.startsWith("greeting-")) MessageRevisionImpact(0)
         else AgentConversationRevisionReducer.boundary(homeState, messageId)?.let { boundary ->
             MessageRevisionImpact(laterTurnCount = boundary.laterTurnCount)
         }
 
     fun deleteMessageTurn(messageId: String) {
+        if (switchingConversationId != null) return
         if (homeState.isStreaming || homeState.messageEdit != null) return
         val conversationId = selectedConversationId ?: return
         if (homeState.roleplay != null && messageId.startsWith("greeting-")) {
@@ -1224,6 +1420,7 @@ internal class AgentAppState(
     }
 
     fun regenerateMessage(messageId: String) {
+        if (switchingConversationId != null) return
         if (homeState.isStreaming || homeState.messageEdit != null) return
         val conversationId = selectedConversationId ?: return
         if (homeState.roleplay != null) {
@@ -1268,6 +1465,7 @@ internal class AgentAppState(
     }
 
     fun compactCurrentContext() {
+        if (switchingConversationId != null) return
         val conversationId = selectedConversationId ?: return
         if (currentRunId != null || !homeState.canCompactContext || modelPickerState.isChanging) return
         launchConversationRun(
@@ -2322,9 +2520,11 @@ internal class AgentAppState(
             runMessageProjector.clearRun(runId)
             runConversationIds.remove(runId)
             refreshConversationSummaries()
-            persistConversations(onSaved = if (acknowledgeRuntimeResult && result.contextSnapshotRef.isBlank()) {
-                { AgentRuntimeClient(appContext, AndroidAgentLogger).ackResult(runId) }
-            } else null)
+            scheduleIdleTranscriptEviction(
+                persistConversations(onSaved = if (acknowledgeRuntimeResult && result.contextSnapshotRef.isBlank()) {
+                    { AgentRuntimeClient(appContext, AndroidAgentLogger).ackResult(runId) }
+                } else null)
+            )
             return
         }
         updateRunTrace(runId) { messages ->
@@ -2365,14 +2565,16 @@ internal class AgentAppState(
         runMessageProjector.clearRun(runId)
         runConversationIds.remove(runId)
         refreshConversationSummaries()
-        persistConversations(
-            onSaved = if (acknowledgeRuntimeResult && result.contextSnapshotRef.isBlank()) {
-                {
-                    AgentRuntimeClient(appContext, AndroidAgentLogger).ackResult(runId)
+        scheduleIdleTranscriptEviction(
+            persistConversations(
+                onSaved = if (acknowledgeRuntimeResult && result.contextSnapshotRef.isBlank()) {
+                    {
+                        AgentRuntimeClient(appContext, AndroidAgentLogger).ackResult(runId)
+                    }
+                } else {
+                    null
                 }
-            } else {
-                null
-            }
+            )
         )
     }
 
@@ -2585,6 +2787,7 @@ internal class AgentAppState(
     }
 
     private fun moveCurrentDraftToNewConversation() {
+        cancelConversationSwitch()
         val draft = homeState
         selectedConversationId = null
         homeState = emptyChatState(defaultThinkingEnabled).copy(
@@ -2610,6 +2813,12 @@ internal class AgentAppState(
         if (conversationId == selectedConversationId) {
             homeState = state
         }
+    }
+
+    private fun cancelConversationSwitch() {
+        conversationSwitchJob?.cancel()
+        conversationSwitchJob = null
+        switchingConversationId = null
     }
 
     private fun setConversationStreaming(runId: String, isStreaming: Boolean) {
@@ -2722,6 +2931,7 @@ internal class AgentAppState(
                                 conversationsById = conversationsById,
                                 titles = conversationTitles,
                                 updatedAt = conversationUpdatedAt,
+                                transcriptLoadedIds = transcriptLoadedConversationIds.toSet(),
                             )
                         }
                         AgentConversationStore.save(
@@ -2730,6 +2940,7 @@ internal class AgentAppState(
                             conversationsById = captured.conversationsById,
                             titles = captured.titles,
                             updatedAt = captured.updatedAt,
+                            transcriptLoadedConversationIds = captured.transcriptLoadedIds,
                         )
                         onSaved?.invoke()
                         return@async null

@@ -86,7 +86,6 @@ import io.github.mangi.eta.ui.model.PendingFileReferenceUi
 import io.github.mangi.eta.ui.model.PendingImageUi
 import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
-import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
 import io.github.mangi.eta.ui.model.UserQuestionMessageUi
 import io.github.mangi.eta.ui.model.latestContextUsage
@@ -653,14 +652,16 @@ internal fun AgentConversationMessages(
             items(
                 items = timelineEntries,
                 key = { it.key },
+                contentType = { entry ->
+                    when (entry) {
+                        is AgentTimelineEntry.Message -> entry.message::class
+                        is AgentTimelineEntry.ThinkingBlock -> AgentTimelineEntry.ThinkingBlock::class
+                    }
+                },
             ) { entry ->
-                val itemModifier = Modifier.animateItem(
-                    fadeInSpec = tween(durationMillis = 180),
-                    placementSpec = null,
-                    // 历史轮次被编辑、删除或重新生成时必须立即退出；退出动画会让已从
-                    // 状态中裁掉的旧消息继续绘制，并与同位置的新流式消息短暂重叠。
-                    fadeOutSpec = null,
-                )
+                // 历史消息滚动是主要交互路径：不再给每个 item 挂 animateItem，
+                // 避免滚动时额外的 item 动画调度与重组开销。
+                val itemModifier = Modifier
                 when (entry) {
                     is AgentTimelineEntry.Message -> {
                         val message = entry.message
@@ -692,18 +693,16 @@ internal fun AgentConversationMessages(
                         )
                     }
 
-                    is AgentTimelineEntry.WorkProcess -> {
+                    is AgentTimelineEntry.ThinkingBlock -> {
                         entry.messages.forEach { message ->
                             if (message is ThinkingMessageUi && message.isStreaming) {
                                 retainStreamingMarkdownState(message.id)
                             }
                         }
-                        AgentWorkProcess(
+                        AgentThinkingBlock(
                             id = entry.key,
                             messages = entry.messages,
                             assistantOverlay = assistantOverlay,
-                            onOpenBrowser = onOpenBrowser,
-                            currentBrowserMessageId = currentBrowserMessageId,
                             retainedStreamingStates = streamingMarkdownStates,
                             modifier = itemModifier,
                         )
@@ -803,39 +802,36 @@ private sealed interface AgentTimelineEntry {
         override val key: String = message.id
     }
 
-    data class WorkProcess(
+    data class ThinkingBlock(
         override val key: String,
         val messages: List<AgentChatMessageUi>,
     ) : AgentTimelineEntry
 }
 
 private fun List<AgentChatMessageUi>.toTimelineEntries(): List<AgentTimelineEntry> = buildList {
-    val workMessages = mutableListOf<AgentChatMessageUi>()
+    val thinkingMessages = mutableListOf<AgentChatMessageUi>()
 
-    fun flushWorkProcess() {
-        if (workMessages.isEmpty()) return
+    fun flushThinkingBlock() {
+        if (thinkingMessages.isEmpty()) return
         add(
-            AgentTimelineEntry.WorkProcess(
-                key = "work-${workMessages.first().id}",
-                messages = workMessages.toList(),
+            AgentTimelineEntry.ThinkingBlock(
+                key = "thinking-${thinkingMessages.first().id}",
+                messages = thinkingMessages.toList(),
             )
         )
-        workMessages.clear()
+        thinkingMessages.clear()
     }
 
     this@toTimelineEntries.forEach { message ->
-        if (message.isWorkProcessMessage()) {
-            workMessages += message
+        if (message is ThinkingMessageUi) {
+            thinkingMessages += message
         } else {
-            flushWorkProcess()
+            flushThinkingBlock()
             add(AgentTimelineEntry.Message(message))
         }
     }
-    flushWorkProcess()
+    flushThinkingBlock()
 }
-
-private fun AgentChatMessageUi.isWorkProcessMessage(): Boolean =
-    this is ThinkingMessageUi || this is ToolActivityMessageUi || this is ToolSummaryMessageUi
 
 /**
  * 一轮对话（两条用户消息之间）里最后一条 Agent 正文视为最终结果，其余为中间步骤。

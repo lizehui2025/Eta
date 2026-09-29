@@ -652,6 +652,80 @@ class OpenAiResponsesProviderTest {
     }
 
     @Test
+    fun completeRetriesWithoutReasoningSummaryWhenGatewayRejectsIt() {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val executor = Executors.newSingleThreadExecutor()
+        server.executor = executor
+        server.createContext("/responses") { exchange ->
+            val sentBody = exchange.requestBody.use { it.readBytes().toString(Charsets.UTF_8) }
+            requests += sentBody
+            if (requests.size == 1) {
+                val payload = JSONObject()
+                    .put("error", JSONObject().put("message", "json: unknown field \"summary\""))
+                    .toString()
+                    .toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "application/json")
+                exchange.sendResponseHeaders(400, payload.size.toLong())
+                exchange.responseBody.use { it.write(payload) }
+            } else {
+                val payload = buildString {
+                    append(event("response.output_text.delta", JSONObject().put("delta", "降级成功")))
+                    append(
+                        event(
+                            "response.completed",
+                            JSONObject().put("response", JSONObject().put("status", "completed")),
+                        ),
+                    )
+                }.toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "text/event-stream")
+                exchange.sendResponseHeaders(200, payload.size.toLong())
+                exchange.responseBody.use { it.write(payload) }
+            }
+        }
+        server.start()
+        try {
+            val baseUrl = "http://127.0.0.1:${server.address.port}"
+            val request = ProviderRequest(
+                config = config(baseUrl).copy(
+                    reasoningCapabilities = ModelReasoningCapabilities(
+                        supportedEfforts = listOf(ReasoningEffort.HIGH),
+                        canDisable = true,
+                    ),
+                    reasoningEffort = ReasoningEffort.HIGH,
+                ),
+                messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
+                tools = JSONArray(),
+            )
+            val first = OpenAiResponsesProvider.complete(
+                request = request,
+                runController = AgentRunController(),
+            )
+            val second = OpenAiResponsesProvider.complete(
+                request = request.copy(sessionId = "other-session"),
+                runController = AgentRunController(),
+            )
+
+            assertEquals("降级成功", first.assistantMessage.getString("content"))
+            assertEquals("降级成功", second.assistantMessage.getString("content"))
+            assertEquals(3, requests.size)
+            assertEquals(
+                "auto",
+                JSONObject(requests[0]).getJSONObject("reasoning").getString("summary"),
+            )
+            assertEquals(
+                "high",
+                JSONObject(requests[1]).getJSONObject("reasoning").getString("effort"),
+            )
+            assertFalse(JSONObject(requests[1]).getJSONObject("reasoning").has("summary"))
+            assertFalse(JSONObject(requests[2]).getJSONObject("reasoning").has("summary"))
+        } finally {
+            server.stop(0)
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
     fun requestOptionsMapToTypedResponsesFields() {
         val request = OpenAiResponsesProvider.buildRequestJson(
             config = config("https://example.com/v1").copy(

@@ -42,23 +42,22 @@ internal object ProviderReasoning {
     fun applyResponsesRequest(
         request: JSONObject,
         config: AgentModelClient.ModelConfig,
+        includeSummary: Boolean = true,
     ) {
         if (config.reasoningCapabilities == null) return
         val effort = validatedEffort(config)
         if (sourceType(config) == ProviderSourceTypes.OPENAI && effort == ReasoningEffort.MAX) {
             unsupportedEffort("OpenAI", effort)
         }
-        request.put(
-            "reasoning",
-            JSONObject().apply {
-                if (effort == ReasoningEffort.OFF) {
-                    put("effort", "none")
-                } else {
-                    put("summary", "auto")
-                    if (effort != ReasoningEffort.DEFAULT) put("effort", effort.wireValue)
-                }
-            },
-        )
+        val reasoning = JSONObject()
+        if (effort == ReasoningEffort.OFF) {
+            reasoning.put("effort", "none")
+        } else {
+            if (includeSummary) reasoning.put("summary", "auto")
+            if (effort != ReasoningEffort.DEFAULT) reasoning.put("effort", effort.wireValue)
+        }
+        // 兼容网关可能只接受 effort；去掉 summary 后不能留下空的 reasoning 对象。
+        if (reasoning.length() > 0) request.put("reasoning", reasoning) else request.remove("reasoning")
     }
 
     private fun applyProviderDefault(

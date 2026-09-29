@@ -1,6 +1,9 @@
 package io.github.mangi.eta.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -179,7 +182,11 @@ private fun SubagentStepRow(step: ToolStepUi) {
                 )
             }
         }
-        AnimatedVisibility(visible = expanded && hasDetail) {
+        AnimatedVisibility(
+            visible = expanded && hasDetail,
+            enter = fadeIn(tween(120)),
+            exit = fadeOut(tween(80)),
+        ) {
             SelectionContainer {
                 Text(
                     text = step.detail,
