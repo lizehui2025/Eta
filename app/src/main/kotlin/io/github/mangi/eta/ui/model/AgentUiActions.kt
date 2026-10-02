@@ -23,6 +23,7 @@ sealed interface AgentHomeAction {
     data object CancelMessageEdit : AgentHomeAction
     data class DeleteMessage(val id: String) : AgentHomeAction
     data class RegenerateMessage(val id: String) : AgentHomeAction
+    data class RetryFailedRun(val id: String) : AgentHomeAction
     data class SelectReplyCandidate(val id: String, val index: Int) : AgentHomeAction
     data object OpenTools : AgentHomeAction
     data object OpenSkills : AgentHomeAction
@@ -61,6 +62,7 @@ sealed interface AgentChatAction {
     data object CancelMessageEdit : AgentChatAction
     data class DeleteMessage(val id: String) : AgentChatAction
     data class RegenerateMessage(val id: String) : AgentChatAction
+    data class RetryFailedRun(val id: String) : AgentChatAction
     data class SelectReplyCandidate(val id: String, val index: Int) : AgentChatAction
 }
 

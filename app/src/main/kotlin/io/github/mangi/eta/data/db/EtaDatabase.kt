@@ -13,6 +13,8 @@ import androidx.room.migration.Migration
         AgentTextChunkEntity::class,
         ConversationEntity::class,
         ConversationContextCheckpointEntity::class,
+        ConversationContextEpochEntity::class,
+        ConversationContextEventEntity::class,
         ConversationMessageEntity::class,
         ConversationStateEntity::class,
         ProviderEntity::class,
@@ -27,7 +29,7 @@ import androidx.room.migration.Migration
         CharacterEntity::class,
         UserPersonaEntity::class,
     ],
-    version = 24,
+    version = 25,
     // 开启 schema 导出：生成 app/schemas 下的 JSON（配合 build.gradle.kts 的 room.schemaLocation）。
     exportSchema = true,
 )
@@ -69,6 +71,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_21_22,
                         MIGRATION_22_23,
                         MIGRATION_23_24,
+                        MIGRATION_24_25,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db) }
@@ -142,6 +145,35 @@ internal abstract class EtaDatabase : RoomDatabase() {
 
         internal val MIGRATION_23_24 = Migration(23, 24) { database ->
             database.execSQL("ALTER TABLE provider_models ADD COLUMN request_options_json TEXT")
+        }
+
+        internal val MIGRATION_24_25 = Migration(24, 25) { database ->
+            database.execSQL(
+                "CREATE TABLE IF NOT EXISTS conversation_context_epochs (" +
+                    "conversation_id TEXT NOT NULL PRIMARY KEY, " +
+                    "scope_hash TEXT NOT NULL, " +
+                    "baseline TEXT NOT NULL, " +
+                    "snapshot_json TEXT NOT NULL, " +
+                    "baseline_seq INTEGER NOT NULL DEFAULT 0, " +
+                    "replacement_seq INTEGER NOT NULL DEFAULT 0, " +
+                    "next_event_seq INTEGER NOT NULL DEFAULT 1, " +
+                    "FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON UPDATE NO ACTION ON DELETE CASCADE)"
+            )
+            database.execSQL(
+                "CREATE TABLE IF NOT EXISTS conversation_context_events (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "conversation_id TEXT NOT NULL, " +
+                    "seq INTEGER NOT NULL, " +
+                    "source_key TEXT NOT NULL, " +
+                    "message_id TEXT NOT NULL, " +
+                    "text TEXT NOT NULL, " +
+                    "created_at INTEGER NOT NULL, " +
+                    "FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON UPDATE NO ACTION ON DELETE CASCADE)"
+            )
+            database.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS index_conversation_context_events_conversation_id_seq " +
+                    "ON conversation_context_events(conversation_id, seq)"
+            )
         }
 
         private fun createTextChunkCleanup(database: androidx.sqlite.db.SupportSQLiteDatabase) {

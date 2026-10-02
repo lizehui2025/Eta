@@ -3,6 +3,7 @@ package io.github.mangi.eta.ui.screens.chat
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
+import io.github.mangi.eta.ui.components.AgentControlUi
 import io.github.mangi.eta.ui.components.AgentChatBody
 import io.github.mangi.eta.ui.components.chatConversationCompositionKey
 import io.github.mangi.eta.ui.model.AgentChatAction
@@ -19,6 +20,7 @@ internal fun AgentChatScreen(
     modelPickerState: AgentModelPickerUiState,
     conversationKey: String?,
     onAction: (AgentChatAction) -> Unit,
+    agentControl: AgentControlUi = AgentControlUi(),
     modifier: Modifier = Modifier,
 ) {
     key(chatConversationCompositionKey(conversationKey)) {
@@ -53,12 +55,14 @@ internal fun AgentChatScreen(
             onCancelMessageEdit = { onAction(AgentChatAction.CancelMessageEdit) },
             onDeleteMessage = { id -> onAction(AgentChatAction.DeleteMessage(id)) },
             onRegenerateMessage = { id -> onAction(AgentChatAction.RegenerateMessage(id)) },
+            onRetryFailedRun = { id -> onAction(AgentChatAction.RetryFailedRun(id)) },
             onSelectReplyCandidate = { id, index -> onAction(AgentChatAction.SelectReplyCandidate(id, index)) },
             onSuggestionClick = { prompt ->
                 onAction(AgentChatAction.SubmitMessage(prompt))
             },
             onRunTraceClick = { /* 对话页暂不做 Run trace 展开 */ },
             onOpenBrowser = { onAction(AgentChatAction.OpenBrowser) },
+            agentControl = agentControl,
             modifier = modifier,
         )
     }

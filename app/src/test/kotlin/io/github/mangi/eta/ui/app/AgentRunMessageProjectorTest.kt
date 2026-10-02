@@ -17,6 +17,20 @@ import org.junit.Test
 
 class AgentRunMessageProjectorTest {
     @Test
+    fun failedRunKeepsPartialOutputAndReplacesOnlyBlankPlaceholder() {
+        val projector = AgentRunMessageProjector { 1_000L }
+        val runId = "run-failed"
+        val partial = AgentMessageUi(id = "assistant-$runId-1-0", content = "已完成的回答")
+        val blank = AgentMessageUi(id = "assistant-$runId-2-0", content = "")
+        val failed = projector.appendFailureNotice(runId, "网络错误", listOf(partial, blank))
+
+        assertEquals(listOf(partial), failed.filterIsInstance<AgentMessageUi>())
+        assertEquals("assistant-$runId-failure", failed.last().id)
+        assertEquals(SystemNoticeCode.RuntimeFailed, (failed.last() as SystemNoticeMessageUi).code)
+        assertEquals(failed, projector.appendFailureNotice(runId, "网络错误", failed))
+    }
+
+    @Test
     fun retryKeepsFailedAttemptSeparateAndReplayClearsItsNotice() {
         val projector = AgentRunMessageProjector { 1_000L }
         val partial = projector.appendTextDelta("retry-run", 2, 0, "半截", emptyList())
@@ -621,6 +635,19 @@ class AgentRunMessageProjectorTest {
         assertEquals("上下文压缩已中断", interruptedNotice.detail)
         assertFalse(interruptedNotice.running)
         assertEquals(base + completed, projector.finishContextCompaction(runId, base + completed, "上下文压缩已中断"))
+    }
+
+    @Test
+    fun delayedReasoningCannotReopenCompletedBlockOrCloseCurrentAnswer() {
+        val projector = AgentRunMessageProjector { 1_000L }
+        var messages = projector.appendReasoningDelta("run", 1, 0, "Evidence", emptyList())
+        messages = projector.appendTextDelta("run", 1, 1, "Answer", messages)
+        val afterDelayed = projector.appendReasoningDelta("run", 1, 0, "Late delta", messages)
+        assertEquals(messages, afterDelayed)
+        assertFalse(afterDelayed.filterIsInstance<ThinkingMessageUi>().single().isStreaming)
+        assertTrue(afterDelayed.filterIsInstance<AgentMessageUi>().single().isStreaming)
+        val nextSegment = projector.appendReasoningDelta("run", 2, 0, "New evidence", afterDelayed)
+        assertTrue(nextSegment.filterIsInstance<ThinkingMessageUi>().last().isStreaming)
     }
 
     @Test

@@ -43,6 +43,23 @@ internal object AgentTextDiff {
         return builder.toString().bounded(maxChars)
     }
 
+    /**
+     * 展开工具详情使用的完整替换内容。
+     *
+     * 与面向摘要的 [summarizeReplacement] 不同，这里不按行、字符或片段做预算；
+     * 调用方会在 UI 中放入可滚动容器，避免用省略号隐藏已经返回的工具信息。
+     */
+    fun summarizeReplacementFull(oldText: String, newText: String): String? {
+        if (!isTextual(oldText) || !isTextual(newText)) return null
+        if (oldText == newText) return "内容无变化"
+        return buildString {
+            append("旧内容：")
+            oldText.split('\n').forEach { append('\n').append("- ").append(it) }
+            append("\n新内容：")
+            newText.split('\n').forEach { append('\n').append("+ ").append(it) }
+        }
+    }
+
     private fun commonPrefixLines(a: List<String>, b: List<String>): Int {
         val max = minOf(a.size, b.size)
         var index = 0

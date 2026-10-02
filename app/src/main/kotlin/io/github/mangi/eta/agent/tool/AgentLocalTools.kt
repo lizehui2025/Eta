@@ -118,6 +118,12 @@ internal class AgentLocalTools(
     private val rootAvailable: () -> Boolean = { RootAccess.isGranted },
 ) : AgentModelClient.ToolExecutor, AutoCloseable {
 
+    private val webSearch = AgentWebSearch(
+        context = context,
+        runId = browserRunId,
+        browserEnabled = browserToolsEnabled,
+    )
+
     private val closed = AtomicBoolean(false)
     private val deviceController = RootShellDeviceController(logger, screenshotExcludedPackages, rootAvailable)
     private val rootCommandExecutor = BoundedRootCommandExecutor(logger, rootAvailable = rootAvailable)
@@ -172,17 +178,19 @@ internal class AgentLocalTools(
         inspectedGitHubSnapshots.clear()
     }
 
-    override fun execute(toolCall: AgentModelClient.ToolCall): AgentModelClient.ToolResult =
-        runCatching {
+    override fun execute(toolCall: AgentModelClient.ToolCall): AgentModelClient.ToolResult {
+        val dispatchCall = canonicalDispatch(toolCall)
+        return runCatching {
             val args = toolCall.parsedArgs().getOrThrow()
-            if (AgentToolRequirements.find(toolCall.name) != null &&
-                AgentToolRequirements.rootDenied(toolCall.name, args, rootAvailable())
+            val dispatchArgs = dispatchCall.parsedArgs().getOrThrow()
+            if (AgentToolRequirements.find(dispatchCall.name) != null &&
+                AgentToolRequirements.rootDenied(dispatchCall.name, dispatchArgs, rootAvailable())
             ) {
                 return@runCatching textResult(errorResult("ROOT_REQUIRED", "此操作需要 Root 授权，本次未执行"))
             }
-            deviceToolPermissionError(toolCall.name)?.let { return@runCatching it }
-            memoryToolPermissionError(toolCall.name)?.let { return@runCatching it }
-            when (val decision = beforeToolExecution(toolCall.name)) {
+            deviceToolPermissionError(dispatchCall.name)?.let { return@runCatching it }
+            memoryToolPermissionError(dispatchCall.name)?.let { return@runCatching it }
+            when (val decision = beforeToolExecution(dispatchCall.name)) {
                 ToolExecutionDecision.Allow -> Unit
                 is ToolExecutionDecision.Reject -> {
                     if (decision.code.startsWith("ACCESSIBILITY_")) publishedObservation.set(PublishedObservation())
@@ -194,57 +202,58 @@ internal class AgentLocalTools(
                     )
                 }
             }
-            when (toolCall.name) {
+            when (dispatchCall.name) {
+                "web_search" -> textResult(webSearch.execute(dispatchArgs))
                 "get_current_context" -> textResult(
                     DeviceContextTool.current(context, includeLocation = deviceContextLocationEnabled()),
                 )
-                "search_apps" -> textResult(searchApps(args))
-                "launch_app" -> textResult(launchApp(args))
-                "open_uri" -> textResult(openUri(args))
-                "browser_use" -> browserUse(args, toolCall.id)
-                "observe_screen" -> observeScreen(args)
-                "tap" -> textResult(tap(args))
-                "tap_area" -> textResult(tapArea(args))
-                "tap_element" -> textResult(tapElement(args))
-                "long_press" -> textResult(longPress(args))
-                "long_press_element" -> textResult(longPressElement(args))
-                "swipe" -> textResult(swipe(args))
-                "scroll" -> textResult(deviceController.scroll(args.optString("direction")))
-                "scroll_element" -> textResult(scrollElement(args))
-                "input_text" -> textResult(inputText(args))
-                "replace_text" -> textResult(replaceText(args))
-                "clear_text" -> textResult(clearText(args))
-                "set_clipboard" -> textResult(setClipboard(args))
+                "search_apps" -> textResult(searchApps(dispatchArgs))
+                "launch_app" -> textResult(launchApp(dispatchArgs))
+                "open_uri" -> textResult(openUri(dispatchArgs))
+                "browser_use" -> browserUse(dispatchArgs, toolCall.id)
+                "observe_screen" -> observeScreen(dispatchArgs)
+                "tap" -> textResult(tap(dispatchArgs))
+                "tap_area" -> textResult(tapArea(dispatchArgs))
+                "tap_element" -> textResult(tapElement(dispatchArgs))
+                "long_press" -> textResult(longPress(dispatchArgs))
+                "long_press_element" -> textResult(longPressElement(dispatchArgs))
+                "swipe" -> textResult(swipe(dispatchArgs))
+                "scroll" -> textResult(deviceController.scroll(dispatchArgs.optString("direction")))
+                "scroll_element" -> textResult(scrollElement(dispatchArgs))
+                "input_text" -> textResult(inputText(dispatchArgs))
+                "replace_text" -> textResult(replaceText(dispatchArgs))
+                "clear_text" -> textResult(clearText(dispatchArgs))
+                "set_clipboard" -> textResult(setClipboard(dispatchArgs))
                 "get_clipboard" -> textResult(getClipboard())
-                "paste_text" -> textResult(pasteText(args))
-                "press_key" -> textResult(deviceController.pressKey(args.optString("button")))
-                "wait" -> textResult(deviceController.waitMs(args.optInt("duration_ms", 1_000)))
-                "wait_for_text" -> textResult(waitForText(args))
-                "wait_for_package" -> textResult(waitForPackage(args))
-                "open_system_panel" -> textResult(deviceController.openSystemPanel(args.optString("panel")))
+                "paste_text" -> textResult(pasteText(dispatchArgs))
+                "press_key" -> textResult(deviceController.pressKey(dispatchArgs.optString("button")))
+                "wait" -> textResult(deviceController.waitMs(dispatchArgs.optInt("duration_ms", 1_000)))
+                "wait_for_text" -> textResult(waitForText(dispatchArgs))
+                "wait_for_package" -> textResult(waitForPackage(dispatchArgs))
+                "open_system_panel" -> textResult(deviceController.openSystemPanel(dispatchArgs.optString("panel")))
                 in DEVICE_TOOL_NAMES ->
-                    structuredDeviceTools.execute(toolCall.name, args)
+                    structuredDeviceTools.execute(dispatchCall.name, dispatchArgs)
                         ?: textResult(errorResult("UNKNOWN_TOOL", "未知设备工具"))
-                "read_image" -> fileVisionTool { imageTools.readImage(args) }
-                "terminal" -> textResult(terminalTool { terminal(args) })
-                "run_command" -> textResult(terminalTool { runCommand(args) })
-                "read_file" -> textResult(terminalTool { readFile(args) })
-                "write_file" -> textResult(terminalTool { writeFile(args) })
-                "edit_file" -> textResult(terminalTool { editFile(args) })
-                "search_code" -> textResult(terminalTool { searchCode(args) })
-                "list_directory" -> textResult(terminalTool { listDirectory(args) })
-                "memory_get" -> textResult(memoryGet(args))
-                "memory_write" -> textResult(memoryWrite(args))
-                "skills_list" -> textResult(skillsList(args))
-                "skills_read" -> textResult(skillsRead(args))
-                "skills_read_resource" -> textResult(skillsReadResource(args))
+                "read_image" -> fileVisionTool { imageTools.readImage(dispatchArgs) }
+                "terminal" -> textResult(terminalTool { terminal(dispatchArgs) })
+                "run_command" -> textResult(terminalTool { runCommand(dispatchArgs) })
+                "read_file" -> textResult(terminalTool { readFile(dispatchArgs) })
+                "write_file" -> textResult(terminalTool { writeFile(dispatchArgs) })
+                "edit_file" -> textResult(terminalTool { editFile(dispatchArgs) })
+                "search_code" -> textResult(terminalTool { searchCode(dispatchArgs) })
+                "list_directory" -> textResult(terminalTool { listDirectory(dispatchArgs) })
+                "memory_get" -> textResult(memoryGet(dispatchArgs))
+                "memory_write" -> textResult(memoryWrite(dispatchArgs))
+                "skills_list" -> textResult(skillsList(dispatchArgs))
+                "skills_read" -> textResult(skillsRead(dispatchArgs))
+                "skills_read_resource" -> textResult(skillsReadResource(dispatchArgs))
                 "skills_list_curated" -> textResult(skillsListCurated())
-                "skills_inspect_github" -> textResult(skillsInspectGitHub(args))
-                "skills_install_from_github" -> textResult(skillsInstallFromGitHub(args))
+                "skills_inspect_github" -> textResult(skillsInspectGitHub(dispatchArgs))
+                "skills_install_from_github" -> textResult(skillsInstallFromGitHub(dispatchArgs))
                 else -> textResult(
                     errorResult(
                         code = "UNKNOWN_TOOL",
-                        message = "未知工具：${toolCall.name}"
+                        message = "未知工具：${dispatchCall.name}"
                     )
                 )
             }
@@ -260,12 +269,154 @@ internal class AgentLocalTools(
                 )
             )
         }.let { result ->
-            if (result.sensitive || !AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
-                result
-            } else {
-                result.copy(sensitive = true)
-            }
+            result.copy(
+                sensitive = result.sensitive ||
+                    AgentSensitiveToolPolicy.isSensitive(toolCall.name) ||
+                    AgentSensitiveToolPolicy.isSensitive(dispatchCall.name),
+            )
         }
+    }
+
+    /** Translate the compact model-facing contract to the existing, well-tested primitives. */
+    private fun canonicalDispatch(call: AgentModelClient.ToolCall): AgentModelClient.ToolCall {
+        val input = call.parsedArgs().getOrNull() ?: return call
+        fun legacy(name: String, args: JSONObject): AgentModelClient.ToolCall =
+            AgentModelClient.ToolCall(call.id, name, args.toString())
+        return when (call.name) {
+            "ui_action" -> {
+                val action = input.optString("action").lowercase(Locale.ROOT)
+                val args = JSONObject(input.toString()).apply { remove("action") }
+                when (action) {
+                    "tap" -> legacy(if (input.has("index")) "tap_element" else "tap", args)
+                    "long_press" -> legacy(if (input.has("index")) "long_press_element" else "long_press", args)
+                    "swipe" -> legacy("swipe", args)
+                    "scroll" -> legacy(if (input.has("index")) "scroll_element" else "scroll", args)
+                    "input" -> legacy("input_text", args)
+                    "clear" -> legacy("clear_text", args)
+                    "key" -> legacy("press_key", args)
+                    "wait" -> legacy(
+                        when (input.optString("condition", "duration")) {
+                            "text" -> "wait_for_text"
+                            "package" -> "wait_for_package"
+                            else -> "wait"
+                        },
+                        args,
+                    )
+                    "open_system_panel" -> legacy("open_system_panel", args)
+                    else -> call
+                }
+            }
+            "app_action" -> {
+                val args = JSONObject(input.toString()).apply { remove("action") }
+                legacy(
+                    when (input.optString("action")) {
+                        "search" -> "search_apps"
+                        "launch" -> "launch_app"
+                        "open_uri" -> "open_uri"
+                        else -> return call
+                    },
+                    args,
+                )
+            }
+            "device_info" -> {
+                val args = JSONObject(input.toString()).apply { remove("operation") }
+                legacy(
+                    when (input.optString("operation")) {
+                        "context" -> "get_current_context"
+                        "status" -> "device_status"
+                        "network" -> "network_info"
+                        "environment" -> "get_device_environment"
+                        "top_memory" -> "top_memory_apps"
+                        "top_storage" -> "top_storage_apps"
+                        else -> return call
+                    },
+                    args,
+                )
+            }
+            "device_control" -> {
+                val operation = input.optString("operation")
+                val args = JSONObject(input.toString()).apply {
+                    remove("operation")
+                    if (has("media_action")) put("action", optString("media_action"))
+                    remove("media_action")
+                }
+                legacy(
+                    when (operation) {
+                        "alarm" -> "set_alarm"
+                        "timer" -> "set_timer"
+                        "media" -> "media_control"
+                        "volume" -> "set_volume"
+                        else -> return call
+                    },
+                    args,
+                )
+            }
+            "clipboard" -> {
+                val args = JSONObject(input.toString()).apply { remove("operation") }
+                legacy(
+                    when (input.optString("operation")) {
+                        "get" -> "get_clipboard"
+                        "set" -> "set_clipboard"
+                        "paste" -> "paste_text"
+                        else -> return call
+                    },
+                    args,
+                )
+            }
+            "terminal" -> call
+            "file_ops" -> {
+                val args = JSONObject(input.toString()).apply {
+                    remove("operation")
+                    if (!has("pattern") && has("query")) put("pattern", opt("query"))
+                }
+                legacy(
+                    when (input.optString("operation")) {
+                        "read" -> "read_file"
+                        "write" -> "write_file"
+                        "edit" -> "edit_file"
+                        "search" -> "search_code"
+                        "list" -> "list_directory"
+                        else -> return call
+                    },
+                    args,
+                )
+            }
+            "skill" -> {
+                val args = JSONObject(input.toString()).apply {
+                    remove("operation")
+                    if (has("skill_id")) put("skillId", opt("skill_id"))
+                    if (has("relative_path")) put("relativePath", opt("relative_path"))
+                    if (has("max_chars")) put("maxChars", opt("max_chars"))
+                }
+                legacy(
+                    when (input.optString("operation")) {
+                        "list" -> "skills_list"
+                        "read" -> "skills_read"
+                        "resource" -> "skills_read_resource"
+                        "curated" -> "skills_list_curated"
+                        else -> return call
+                    },
+                    args,
+                )
+            }
+            "skill_github" -> {
+                val args = JSONObject(input.toString()).apply {
+                    remove("operation")
+                    if (has("replace_existing")) put("replaceExisting", opt("replace_existing"))
+                    if (has("expected_replacement_id")) put("expectedReplacementId", opt("expected_replacement_id"))
+                }
+                legacy(
+                    if (input.optString("operation") == "inspect") "skills_inspect_github" else "skills_install_from_github",
+                    args,
+                )
+            }
+            "memory" -> {
+                val args = JSONObject(input.toString()).apply { remove("operation") }
+                legacy(if (input.optString("operation") == "write") "memory_write" else "memory_get", args)
+            }
+            else -> call
+        }
+    }
 
     private fun deviceToolPermissionError(
         toolName: String,

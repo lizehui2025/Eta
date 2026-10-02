@@ -56,6 +56,52 @@ internal data class ConversationContextCheckpointEntity(
 )
 
 @Serializable
+@Entity(
+    tableName = "conversation_context_epochs",
+    foreignKeys = [
+        ForeignKey(
+            entity = ConversationEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["conversation_id"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+internal data class ConversationContextEpochEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "conversation_id") val conversationId: String,
+    @ColumnInfo(name = "scope_hash") val scopeHash: String,
+    @ColumnInfo(name = "baseline") val baseline: String,
+    @ColumnInfo(name = "snapshot_json") val snapshotJson: String,
+    @ColumnInfo(name = "baseline_seq") val baselineSeq: Long = 0,
+    @ColumnInfo(name = "replacement_seq") val replacementSeq: Long = 0,
+    @ColumnInfo(name = "next_event_seq") val nextEventSeq: Long = 1,
+)
+
+@Serializable
+@Entity(
+    tableName = "conversation_context_events",
+    foreignKeys = [
+        ForeignKey(
+            entity = ConversationEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["conversation_id"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index(value = ["conversation_id", "seq"], unique = true)],
+)
+internal data class ConversationContextEventEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "conversation_id") val conversationId: String,
+    val seq: Long,
+    @ColumnInfo(name = "source_key") val sourceKey: String,
+    @ColumnInfo(name = "message_id") val messageId: String,
+    val text: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+)
+
+@Serializable
 @Entity(tableName = "conversation_state")
 internal data class ConversationStateEntity(
     @PrimaryKey val id: String = SINGLETON_ID,

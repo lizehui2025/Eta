@@ -104,7 +104,30 @@ class AgentToolCallValidatorTest {
         assertNotNull(validator.validate(call("""{"blocked":1}""")))
     }
 
+    @Test
+    fun canonicalOperationRequiresRelatedFields() {
+        val validator = validatorFor(
+            name = "ui_action",
+            parameters = JSONObject()
+                .put("type", "object")
+                .put("properties", JSONObject()
+                    .put("action", JSONObject().put("type", "string"))
+                    .put("x", JSONObject().put("type", "integer"))
+                    .put("y", JSONObject().put("type", "integer"))
+                    .put("index", JSONObject().put("type", "integer"))
+                    .put("observation_id", JSONObject().put("type", "string"))
+                )
+                .put("additionalProperties", false)
+                .put("required", JSONArray().put("action")),
+        )
+        assertNotNull(validator.validate(AgentModelClient.ToolCall("1", "ui_action", "{\"action\":\"tap\",\"index\":1}")))
+        assertNull(validator.validate(AgentModelClient.ToolCall("2", "ui_action", "{\"action\":\"tap\",\"x\":1,\"y\":2}")))
+    }
+
     private fun validator(parameters: JSONObject): AgentToolCallValidator =
+        validatorFor(TOOL_NAME, parameters)
+
+    private fun validatorFor(name: String, parameters: JSONObject): AgentToolCallValidator =
         AgentToolCallValidator(
             JSONArray().put(
                 JSONObject()
@@ -112,7 +135,7 @@ class AgentToolCallValidatorTest {
                     .put(
                         "function",
                         JSONObject()
-                            .put("name", TOOL_NAME)
+                            .put("name", name)
                             .put("parameters", parameters),
                     )
             )

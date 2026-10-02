@@ -29,6 +29,8 @@ import io.github.mangi.eta.agent.model.AgentFileReferencePolicy
 import io.github.mangi.eta.agent.model.AgentFileReferencePromptCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentMode
+import io.github.mangi.eta.agent.model.AgentKind
+import io.github.mangi.eta.agent.model.InstructionReview
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
 import io.github.mangi.eta.agent.roleplay.CharacterMacros
 import io.github.mangi.eta.agent.roleplay.CharacterCardCodec
@@ -176,6 +178,12 @@ internal class AgentAppState(
 
     /** 顶栏的聊天/编码模式；编码模式不主动保存记忆。 */
     var agentMode by mutableStateOf(AgentMode.current())
+        private set
+
+    var agentKind by mutableStateOf(AgentKind.current(agentMode))
+        private set
+
+    var instructionReview by mutableStateOf(InstructionReview.current())
         private set
 
     init {
@@ -427,6 +435,19 @@ internal class AgentAppState(
         if (agentMode == mode) return
         agentMode = mode
         Prefs.setAgentMode(mode.wireValue)
+        agentKind = AgentKind.current(mode)
+    }
+
+    fun updateAgentKind(kind: AgentKind) {
+        if (kind.isCodeAgent != (agentMode == AgentMode.CODING) || agentKind == kind) return
+        agentKind = kind
+        Prefs.setAgentKind(agentMode.wireValue, kind.wireValue)
+    }
+
+    fun updateInstructionReview(review: InstructionReview) {
+        if (instructionReview == review) return
+        instructionReview = review
+        Prefs.setInstructionReview(review.wireValue)
     }
 
     suspend fun exportBackup(output: OutputStream): EtaBackupSummary =
@@ -1464,6 +1485,27 @@ internal class AgentAppState(
         )
     }
 
+    fun retryFailedRun(noticeId: String) {
+        if (switchingConversationId != null || currentRunId != null ||
+            homeState.isStreaming || homeState.messageEdit != null
+        ) return
+        val conversationId = selectedConversationId ?: return
+        val notice = homeState.messages.lastOrNull() as? SystemNoticeMessageUi ?: return
+        if (notice.id != noticeId || notice.code != SystemNoticeCode.RuntimeFailed) return
+        val continuation = RetryFailedRun.continuationPrompt(homeState.messages)
+        launchConversationRun(
+            conversationId = conversationId,
+            runId = "run-${UUID.randomUUID()}",
+            prompt = continuation,
+            images = emptyList(),
+            history = homeState.history,
+            userHistoryMessage = null,
+            messages = homeState.messages,
+            state = homeState,
+            reasoningEffort = homeState.reasoningEffort,
+        )
+    }
+
     fun compactCurrentContext() {
         if (switchingConversationId != null) return
         val conversationId = selectedConversationId ?: return
@@ -2430,15 +2472,15 @@ internal class AgentAppState(
             }
 
             is AgentEvent.AssistantReceived -> {
-                if (event.reasoningContent.isNotBlank()) {
-                    updateRunTrace(runId) { messages ->
+                updateRunTrace(runId) { messages ->
+                    if (event.reasoningContent.isNotBlank()) {
                         runMessageProjector.ensureCompletedThinking(
                             runId = runId,
                             round = event.round,
                             content = event.reasoningContent,
                             messages = messages,
                         )
-                    }
+                    } else runMessageProjector.finalizeThinkingRound(runId, event.round, messages)
                 }
             }
 
@@ -2552,9 +2594,8 @@ internal class AgentAppState(
             result.ok -> replaceLatestAssistantWithNotice(runId, SystemNoticeCode.EmptyResult)
             result.error == LEGACY_STOPPED_ERROR || result.error == SYNTHETIC_STATUS_STOPPED ->
                 replaceLatestAssistantWithNotice(runId, SystemNoticeCode.Stopped)
-            else -> replaceLatestAssistantWithNotice(
+            else -> appendFailureNoticePreservingOutput(
                 runId,
-                SystemNoticeCode.RuntimeFailed,
                 result.error,
             )
         }
@@ -2731,6 +2772,12 @@ internal class AgentAppState(
                     }
                 }
             }
+        }
+    }
+
+    private fun appendFailureNoticePreservingOutput(runId: String, detail: String?) {
+        updateMessages(runId) { messages ->
+            runMessageProjector.appendFailureNotice(runId, detail, messages)
         }
     }
 
@@ -3168,7 +3215,66 @@ internal fun buildToolsState(context: Context): AgentToolsUiState =
                 ),
             ),
         )
-    )
+    ).copy(groups = compactToolGroups())
+
+private fun compactToolGroups(): List<ToolGroupUi> = listOf(
+    ToolGroupUi("screen", "屏幕操作", listOf(
+        ToolItemUi("observe_screen", "观察屏幕", "读取节点和可选截图"),
+        ToolItemUi("ui_action", "界面操作", "点击、滑动、输入、等待和系统面板"),
+        ToolItemUi("clipboard", "剪贴板", "读取、写入或粘贴文本"),
+    )),
+    ToolGroupUi("apps", "应用与设备", listOf(
+        ToolItemUi("app_action", "应用操作", "搜索、启动应用或打开 URI"),
+        ToolItemUi("device_info", "设备信息", "状态、网络、环境和资源排行"),
+        ToolItemUi("device_control", "设备控制", "闹钟、计时器、媒体和音量"),
+    )),
+    ToolGroupUi("web", "浏览器", listOf(ToolItemUi("browser_use", "网页浏览", "读取、交互和截图统一入口"))),
+    ToolGroupUi("files", "文件与终端", listOf(
+        ToolItemUi("terminal", "终端", "会话、命令、异步任务和后台服务"),
+        ToolItemUi("file_ops", "文件操作", "读取、写入、编辑、搜索和列目录"),
+        ToolItemUi("read_image", "图片分析", "把授权图片交给视觉模型"),
+    )),
+    ToolGroupUi("skills", "技能与记忆", listOf(
+        ToolItemUi("skill", "本地技能", "列表、读取、资源和精选目录"),
+        ToolItemUi("skill_github", "GitHub 技能", "检查或安装公共仓库技能"),
+        ToolItemUi("memory", "长期记忆", "读取或更新跨会话记忆"),
+    )),
+    ToolGroupUi("personal_data", "个人数据", listOf(
+        ToolItemUi("get_setting", "系统设置读取", "独立权限控制的 Settings 查询"),
+        ToolItemUi("wifi_credentials", "Wi-Fi 凭据", "读取已保存的网络凭据，独立权限控制"),
+        ToolItemUi("recent_notifications", "当前通知", "读取通知栏内容，独立通知权限"),
+        ToolItemUi("search_notification_history", "通知历史", "搜索应用通知历史"),
+        ToolItemUi("recent_app_activity", "最近应用", "读取最近使用的应用"),
+        ToolItemUi("app_usage_summary", "应用使用统计", "按时长汇总应用使用情况"),
+        ToolItemUi("get_current_location", "当前位置", "读取系统已有的最近位置"),
+        ToolItemUi("read_sms_code", "短信验证码", "仅提取近期验证码"),
+        ToolItemUi("get_logcat", "系统日志", "读取并过滤最近日志"),
+        ToolItemUi("search_clipboard_history", "剪贴板历史", "搜索输入法保存的历史内容"),
+        ToolItemUi("search_media", "媒体", "搜索图片媒体库"),
+        ToolItemUi("search_audio", "音频", "搜索音乐和音频文件"),
+        ToolItemUi("search_recordings", "录音", "搜索录音文件"),
+        ToolItemUi("search_files", "共享文件", "搜索共享存储文件"),
+        ToolItemUi("search_messages", "短信", "独立权限和敏感审核"),
+        ToolItemUi("search_contacts", "联系人", "独立权限和敏感审核"),
+        ToolItemUi("search_calendar_events", "日历", "独立权限和敏感审核"),
+        ToolItemUi("search_call_history", "通话记录", "独立权限和敏感审核"),
+        ToolItemUi("search_downloads", "下载记录", "独立权限和敏感审核"),
+        ToolItemUi("search_coloros_notes", "ColorOS 便签", "读取系统便签和待办"),
+        ToolItemUi("search_coloros_recordings", "ColorOS 录音", "读取系统录音索引"),
+        ToolItemUi("search_recording_summaries", "录音摘要", "读取录音转写摘要"),
+        ToolItemUi("search_coloros_memories", "ColorOS 记忆", "读取系统记忆索引"),
+        ToolItemUi("search_saved_places", "保存地点", "读取系统记忆中的地点"),
+        ToolItemUi("search_personal_orders", "个人订单", "读取通知或系统记忆中的订单"),
+        ToolItemUi("search_qq_chat_images", "QQ 聊天图片", "读取 QQ 缓存索引"),
+        ToolItemUi("search_wechat_chat_images", "微信聊天图片", "读取微信缓存索引"),
+        ToolItemUi("set_setting", "修改系统设置", "独立权限控制的 Settings 修改"),
+        ToolItemUi("set_device_state", "设备状态控制", "控制 Wi-Fi 或蓝牙"),
+        ToolItemUi("app_state_control", "应用状态控制", "停止、冻结或解冻应用"),
+        ToolItemUi("list_alarms", "闹钟列表", "读取系统闹钟"),
+        ToolItemUi("list_active_timers", "活动计时器", "读取正在运行的计时器"),
+        ToolItemUi("get_health_summary", "健康摘要", "读取健康数据汇总"),
+    )),
+)
 
 private fun buildPermissionHealthState(context: Context): PermissionHealthUiState {
     val backgroundRunningEnabled = isIgnoringBatteryOptimizations(context)

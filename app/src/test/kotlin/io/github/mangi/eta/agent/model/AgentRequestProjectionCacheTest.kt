@@ -26,7 +26,7 @@ class AgentRequestProjectionCacheTest {
     }
 
     @Test
-    fun stripReasoningVariantBypassesTheNormalProjectionCache() {
+    fun stripReasoningVariantHasAnIndependentReusableCache() {
         val source = JSONObject().put("role", "assistant").put("reasoning_content", "reason").put("content", "答")
         val cache = AgentRequestProjectionCache()
         val normal = cache.chatMessage(source, stripReasoning = false, project = { it })
@@ -36,6 +36,9 @@ class AgentRequestProjectionCacheTest {
 
         assertEquals("reason", normal.optString("reasoning_content"))
         assertEquals("", stripped.optString("reasoning_content"))
+        assertSame(stripped, cache.chatMessage(source, stripReasoning = true) {
+            error("stripped projection must be cached")
+        })
     }
 
     @Test

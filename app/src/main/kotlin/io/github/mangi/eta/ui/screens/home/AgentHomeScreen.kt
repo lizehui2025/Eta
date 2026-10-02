@@ -3,6 +3,7 @@ package io.github.mangi.eta.ui.screens.home
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
+import io.github.mangi.eta.ui.components.AgentControlUi
 import io.github.mangi.eta.ui.components.AgentChatBody
 import io.github.mangi.eta.ui.components.chatConversationCompositionKey
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
@@ -21,6 +22,7 @@ internal fun AgentHomeScreen(
     modelPickerState: AgentModelPickerUiState,
     conversationKey: String?,
     onAction: (AgentHomeAction) -> Unit,
+    agentControl: AgentControlUi = AgentControlUi(),
     isDrawerOpen: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
@@ -56,12 +58,14 @@ internal fun AgentHomeScreen(
             onCancelMessageEdit = { onAction(AgentHomeAction.CancelMessageEdit) },
             onDeleteMessage = { id -> onAction(AgentHomeAction.DeleteMessage(id)) },
             onRegenerateMessage = { id -> onAction(AgentHomeAction.RegenerateMessage(id)) },
+            onRetryFailedRun = { id -> onAction(AgentHomeAction.RetryFailedRun(id)) },
             onSelectReplyCandidate = { id, index -> onAction(AgentHomeAction.SelectReplyCandidate(id, index)) },
             onSuggestionClick = { prompt ->
                 onAction(AgentHomeAction.SubmitMessage(prompt))
             },
             onRunTraceClick = { onAction(AgentHomeAction.ExpandRunTrace) },
             onOpenBrowser = { onAction(AgentHomeAction.OpenBrowser) },
+            agentControl = agentControl,
             isDrawerOpen = isDrawerOpen,
             modifier = modifier,
         )

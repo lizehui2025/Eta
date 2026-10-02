@@ -64,11 +64,11 @@ class AgentPromptBuilderTest {
             rootAvailable = true,
         )
         assertTrue(terminal.systemContents().any { it.contains("结构化工具") })
-        assertTrue(terminal.systemContents().any { it.contains("不要用 terminal/run_command 执行 cat") })
+        assertTrue(terminal.systemContents().any { it.contains("不要用 terminal 执行 cat") })
     }
 
     @Test
-    fun taskAllocationPrefersPureSubagentsForPollutingReads() {
+    fun taskAllocationAllowsBoundedDirectReadsAndOptionalDelegation() {
         val config = modelConfig("", terminalTools = false, browserTools = false)
         val withPlan = AgentPromptBuilder.buildSystemMessages(
             config = config,
@@ -77,10 +77,27 @@ class AgentPromptBuilderTest {
             rootAvailable = false,
         )
         val contents = withPlan.systemContents()
-        assertTrue(contents.any { it.contains("主上下文只保留决策与摘要") })
-        assertTrue(contents.any { it.contains("批量搜集一律走纯净子代理") })
-        assertTrue(contents.any { it.contains("只做单次最小探针") })
-        assertTrue(contents.any { it.contains("蒸馏后的事实摘要") })
+        assertTrue(contents.any { it.contains("少量文件读取、目录定位和简单检索直接使用领域工具") })
+        assertTrue(contents.any { it.contains("批量调研可使用纯净子代理") })
+        assertFalse(contents.any { it.contains("必须扇出") || it.contains("只做单次最小探针") })
+        assertTrue(contents.any { it.contains("事实摘要与证据位置") })
+    }
+
+    @Test
+    fun autoChoosesPlanningAndReadOnlyAgentsDoNotReceiveExecutionPlanning() {
+        for (kind in listOf(AgentKind.AUTO, AgentKind.ASK, AgentKind.PLAN)) {
+            val contents = AgentPromptBuilder.buildSystemMessages(
+                config = modelConfig("", terminalTools = false, browserTools = false),
+                skillContext = SkillContext.EMPTY,
+                memoryContext = AgentMemoryContext.DISABLED,
+                rootAvailable = false,
+                agentKind = kind,
+            ).systemContents()
+            assertFalse(contents.any { it.contains("先调用 todo_write 建立任务清单") })
+            if (kind == AgentKind.AUTO) {
+                assertTrue(contents.any { it.contains("自主判断是否需要 todo_write") })
+            }
+        }
     }
 
     @Test
@@ -108,7 +125,7 @@ class AgentPromptBuilderTest {
         )
 
         assertEquals(
-            listOf("system", "system", "system", "user", "assistant", "user"),
+            listOf("system", "system", "system", "system", "system", "user", "assistant", "user"),
             messages.roles(),
         )
         assertEquals("自定义系统约束", messages.getJSONObject(0).getString("content"))
@@ -139,14 +156,14 @@ class AgentPromptBuilderTest {
         assertTrue(messages.systemContents().any { it.contains("合法且克制的 GitHub Flavored Markdown") })
         assertTrue(messages.systemContents().any { it.contains("不用整句粗体冒充标题") })
         assertTrue(messages.systemContents().any { it.contains("表格前后留空行") })
-        assertTrue(messages.getJSONObject(2).getString("content").contains("open_and_exec"))
-        assertTrue(messages.getJSONObject(2).getString("content").contains("同一轮模型回复最多调用一次 read_image"))
-        assertTrue(messages.getJSONObject(2).getString("content").contains("再在下一轮调用下一张"))
+        assertTrue(messages.systemContents().any { it.contains("open_and_exec") })
+        assertTrue(messages.systemContents().any { it.contains("同一轮模型回复最多调用一次 read_image") })
+        assertTrue(messages.systemContents().any { it.contains("再在下一轮调用下一张") })
         assertFalse(messages.systemContents().any { it.contains("网页浏览、读取") })
-        assertEquals("旧问题", messages.getJSONObject(3).getString("content"))
-        assertEquals("旧回答", messages.getJSONObject(4).getString("content"))
+        assertEquals("旧问题", messages.getJSONObject(5).getString("content"))
+        assertEquals("旧回答", messages.getJSONObject(6).getString("content"))
 
-        val currentContent = messages.getJSONObject(5).getJSONArray("content")
+        val currentContent = messages.getJSONObject(7).getJSONArray("content")
         assertEquals("当前问题", currentContent.getJSONObject(0).getString("text"))
         assertEquals(
             image.reference,
@@ -179,7 +196,7 @@ class AgentPromptBuilderTest {
             skillContext = SkillContext(installedSkills = listOf(skill)),
         )
 
-        assertEquals(listOf("system", "system", "system", "user"), messages.roles())
+        assertEquals(listOf("system", "system", "system", "system", "system", "user"), messages.roles())
         val systemContents = messages.systemContents()
         assertTrue(systemContents.any { it.contains("browser_use") })
         assertFalse(systemContents.any { it.contains("open_and_exec") })
@@ -187,8 +204,8 @@ class AgentPromptBuilderTest {
         assertTrue(skillMessage.contains("path=/skills/screen-audit/SKILL.md"))
         assertTrue(skillMessage.contains("capabilities=scripts, assets"))
         assertTrue(skillMessage.contains("description=检查屏幕 并输出 结论"))
-        assertTrue(skillMessage.contains("先调用 skills_read"))
-        assertEquals("读取网页", messages.getJSONObject(3).getString("content"))
+        assertTrue(skillMessage.contains("先调用 skill（operation=read）"))
+        assertEquals("读取网页", messages.getJSONObject(5).getString("content"))
     }
 
     @Test
@@ -260,7 +277,7 @@ class AgentPromptBuilderTest {
         val codingMemory = coding.systemContents().single { it.contains("持久记忆已启用") }
         assertTrue(codingMemory.contains("编码模式"))
         assertTrue(codingMemory.contains("不主动保存"))
-        assertFalse(codingMemory.contains("需要更新时调用 memory_write"))
+        assertFalse(codingMemory.contains("需要更新时调用 memory（operation=write）"))
         // 只读模式下核心记忆仍然注入，读取与检索保持可用。
         assertTrue(codingMemory.contains("用户偏好中文"))
 
@@ -274,7 +291,7 @@ class AgentPromptBuilderTest {
             memoryWritable = true,
         )
         val chatMemory = chat.systemContents().single { it.contains("持久记忆已启用") }
-        assertTrue(chatMemory.contains("需要更新时调用 memory_write"))
+        assertTrue(chatMemory.contains("需要更新时调用 memory（operation=write）"))
         assertFalse(chatMemory.contains("编码模式"))
     }
 

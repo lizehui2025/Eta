@@ -26,30 +26,25 @@ internal object AgentToolCatalog {
         capabilities: AgentToolCapabilities = AgentToolCapabilities.full(),
     ): JSONArray =
         capabilities.project(JSONArray().also { tools ->
-            AgentContextAppToolCatalog.appendTo(tools)
-            AgentGestureToolCatalog.appendTo(tools)
-            AgentTextSystemToolCatalog.appendTo(tools)
-            AgentDeviceToolCatalog.appendTo(
-                tools,
-                directTools = deviceDirectTools,
-                sensitiveReadTools = deviceSensitiveReadTools,
-                sensitiveActionTools = deviceSensitiveActionTools,
-            )
-            if (browserTools) AgentBrowserToolCatalog.appendTo(tools)
-            AgentSkillToolCatalog.appendTo(
-                tools,
+            AgentCanonicalToolCatalog.appendTo(
+                tools = tools,
+                browserTools = browserTools,
+                terminalTools = terminalTools,
+                deviceDirectTools = deviceDirectTools,
                 githubDiscovery = skillGitHubDiscovery,
                 githubInstall = skillGitHubInstall,
+                memoryTools = memoryTools,
+                memoryWritable = memoryWritable,
+                subagentTools = subagentTools,
+                planTools = planTools,
             )
-            if (memoryTools) AgentMemoryToolCatalog.appendTo(tools, writable = memoryWritable)
-            if (terminalTools) {
-                AgentFileVisionToolCatalog.appendTo(tools)
-                AgentTerminalToolCatalog.appendTo(tools)
+            // Personal data and high-risk device controls remain independent so each capability
+            // switch and sensitive-data boundary stays narrow in the first compaction pass.
+            if (deviceSensitiveReadTools) {
+                AgentDeviceToolCatalog.appendIndependentSensitiveReadTools(tools)
             }
-            if (planTools) AgentPlanToolCatalog.appendTo(tools)
-            if (subagentTools) AgentSubagentToolCatalog.appendTo(tools)
-            // Interactive asking is always available: it touches no device capability, and whether to
-            // wait for an answer is the run layer's call.
-            AgentInteractionToolCatalog.appendTo(tools)
+            if (deviceSensitiveActionTools) {
+                AgentDeviceToolCatalog.appendIndependentSensitiveActionTools(tools)
+            }
         })
 }

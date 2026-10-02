@@ -37,6 +37,7 @@ internal class AgentSubagentExecutor(
     private val baseToolExecutor: AgentModelClient.ToolExecutor,
     private val traceFormatter: AgentTraceFormatter,
     private val onEvent: (AgentEvent) -> Unit,
+    private val toolApprovalHandler: ((Int, AgentModelClient.ToolCall) -> Boolean)? = null,
     private val depth: Int = 0,
     private val parentMessagesProvider: () -> JSONArray = { JSONArray() },
     private val parentSystemCount: Int = 0,
@@ -549,6 +550,7 @@ internal class AgentSubagentExecutor(
                 transcript = JSONArray(),
                 systemCount = subSystemCount,
                 operationId = "$parentOperationId-sub-$index",
+                toolApprovalHandler = toolApprovalHandler,
             )
             val r = loop.run()
             // 完整结果直接回填，不截断。

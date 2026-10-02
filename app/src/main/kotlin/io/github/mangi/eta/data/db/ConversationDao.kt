@@ -84,6 +84,46 @@ internal interface ConversationDao : ChunkedTextDao {
     @Query("SELECT * FROM conversation_context_checkpoints WHERE conversation_id = :conversationId")
     suspend fun contextCheckpointRow(conversationId: String): ConversationContextCheckpointEntity?
 
+    @Query("SELECT * FROM conversation_context_epochs WHERE conversation_id = :conversationId")
+    suspend fun contextEpochRow(conversationId: String): ConversationContextEpochEntity?
+
+    @Query(
+        "SELECT * FROM conversation_context_events " +
+            "WHERE conversation_id = :conversationId AND seq > :afterSeq ORDER BY seq ASC"
+    )
+    suspend fun contextEventsAfter(conversationId: String, afterSeq: Long): List<ConversationContextEventEntity>
+
+    @Upsert
+    suspend fun upsertContextEpoch(epoch: ConversationContextEpochEntity)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertContextEvent(event: ConversationContextEventEntity): Long
+
+    @Query("SELECT COALESCE(MAX(seq), 0) FROM conversation_context_events WHERE conversation_id = :conversationId")
+    suspend fun latestContextEventSeq(conversationId: String): Long
+
+    @Query(
+        "UPDATE conversation_context_epochs SET replacement_seq = :replacementSeq " +
+            "WHERE conversation_id = :conversationId"
+    )
+    suspend fun updateContextReplacementSeq(conversationId: String, replacementSeq: Long)
+
+    @Query("DELETE FROM conversation_context_epochs WHERE conversation_id = :conversationId")
+    suspend fun deleteContextEpoch(conversationId: String)
+
+    @Query("DELETE FROM conversation_context_events WHERE conversation_id = :conversationId AND seq <= :throughSeq")
+    suspend fun deleteContextEventsThrough(conversationId: String, throughSeq: Long)
+
+    /** Epoch row and its event are committed together; an ignored duplicate is idempotent. */
+    @Transaction
+    suspend fun commitContextEpoch(
+        epoch: ConversationContextEpochEntity,
+        event: ConversationContextEventEntity?,
+    ) {
+        event?.let { insertContextEvent(it) }
+        upsertContextEpoch(epoch)
+    }
+
     @Transaction
     suspend fun contextCheckpoint(conversationId: String): ConversationContextCheckpointEntity? =
         contextCheckpointRow(conversationId)?.let { restoreCheckpoint(it) }

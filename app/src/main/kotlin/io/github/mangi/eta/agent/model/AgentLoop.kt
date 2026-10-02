@@ -31,6 +31,7 @@ internal class AgentLoop(
     private val systemCount: Int = 0,
     private val operationId: String = sessionId,
     private val onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
+    private val onCompactionCompleted: () -> Unit = {},
     private val onTranscript: (AgentTranscriptPublisher.PublishResult) -> Unit = {},
     private val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
     private val roleplayContext: RoleplayRunContext? = null,
@@ -38,9 +39,15 @@ internal class AgentLoop(
     private val subagentHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
     private val todoHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
     private val askUserHandler: ((Int, AgentModelClient.ToolCall) -> AgentModelClient.ToolResult?)? = null,
+    private val toolApprovalHandler: ((Int, AgentModelClient.ToolCall) -> Boolean)? = null,
     private val toolBatchExecutor: AgentToolBatchExecutor = AgentToolBatchExecutor(),
     private val projectionCache: AgentRequestProjectionCache = AgentRequestProjectionCache(),
+    persistentRecovery: Boolean = false,
 ) {
+    private val noProgressGuard = AgentNoProgressGuard()
+    private val effectiveModelRetry = if (persistentRecovery) {
+        AgentModelRetry(maxRetries = Int.MAX_VALUE, delayTransform = ::defaultRetryJitter)
+    } else modelRetry
     data class Result(
         val content: String,
         val reasoningContent: String,
@@ -71,9 +78,13 @@ internal class AgentLoop(
     }
     private val context = AgentContextSession(
         config, messages, systemCount, operationId, provider, runController,
-        { sensitiveToolCallIds }, onEvent, onContextSnapshot, { transcript.length() },
+        sensitiveIds = { sensitiveToolCallIds },
+        onEvent = onEvent,
+        onContextSnapshot = onContextSnapshot,
+        transcriptSize = { transcript.length() },
         roleplay = roleplayContext != null,
         sessionId = sessionId,
+        onCompactionCompleted = onCompactionCompleted,
     )
     private var supplementIndex = initialSupplementIndex
 
@@ -133,7 +144,7 @@ internal class AgentLoop(
             val completedRound = try {
                 while (true) {
                     try {
-                        val response = modelRetry.complete(
+                        val response = effectiveModelRetry.complete(
                             initialRound = round,
                             request = ProviderRequest(
                                 config = config,
@@ -229,7 +240,12 @@ internal class AgentLoop(
                 val outcomes = if (providerResponse.stopReason == AssistantStopReason.TOOL_USE) {
                     toolBatchExecutor.execute(
                         items = toolCalls,
-                        parallelSafe = { call -> AgentToolRequirements.isParallelReadOnly(call.name) },
+                        parallelSafe = { call ->
+                            AgentToolRequirements.isParallelReadOnly(
+                                call.name,
+                                call.parsedArgsOrNull() ?: JSONObject(),
+                            )
+                        },
                         execute = { call -> executeTool(round, call) },
                     )
                 } else {
@@ -312,6 +328,14 @@ internal class AgentLoop(
         toolCall: AgentModelClient.ToolCall,
     ): ToolOutcome {
         runController.throwIfCancelled()
+        noProgressGuard.before(toolCall).takeIf { it.reject }?.let { decision ->
+            return rejectedToolOutcome(
+                round = round,
+                toolCall = toolCall,
+                code = "NO_PROGRESS_LOOP",
+                message = decision.message,
+            )
+        }
         // Unified schema validation must precede every execution dispatch. spawn_agents and
         // todo_write have their own business checks (write-range conflicts, list entry validity,
         // ...), but the JSON Schema actually sent this round is the single source of truth for the
@@ -323,6 +347,15 @@ internal class AgentLoop(
                 toolCall = toolCall,
                 code = "INVALID_TOOL_ARGUMENTS",
                 message = validationError,
+                metadata = invalidToolArgumentMetadata(toolCall),
+            )
+        }
+        if (toolApprovalHandler?.invoke(round, toolCall) == false) {
+            return rejectedToolOutcome(
+                round = round,
+                toolCall = toolCall,
+                code = "TOOL_REVIEW_REJECTED",
+                message = "用户或自动审核拒绝了本次工具调用；不要通过改名、拆分或换工具绕过该决定。",
             )
         }
         if (toolCall.name == AgentSubagentPolicy.TOOL_NAME && subagentHandler != null) {
@@ -442,6 +475,7 @@ internal class AgentLoop(
         toolCall: AgentModelClient.ToolCall,
         code: String,
         message: String,
+        metadata: JSONObject = JSONObject(),
     ): ToolOutcome {
         publishEvent(
             AgentEvent.ToolStarted(
@@ -457,12 +491,43 @@ internal class AgentLoop(
                 .put("ok", false)
                 .put("code", code)
                 .put("message", message)
+                .put("tool", toolCall.name)
+                .put("retryable", code == "INVALID_TOOL_ARGUMENTS")
+                .also { payload ->
+                    metadata.keys().forEach { key -> payload.put(key, metadata.opt(key)) }
+                }
                 .toString(),
             sensitive = AgentSensitiveToolPolicy.isSensitive(toolCall.name),
         )
         if (result.sensitive) sensitiveToolCallIds += toolCall.id
         emitToolFinished(round, toolCall, result)
         return ToolOutcome(toolCall, result)
+    }
+
+    private fun invalidToolArgumentMetadata(toolCall: AgentModelClient.ToolCall): JSONObject {
+        val args = toolCall.parsedArgsOrNull() ?: JSONObject()
+        val operation = args.optString("action").ifBlank { args.optString("operation") }
+        val metadata = JSONObject().put("operation", operation)
+        val missing = Regex("缺少必填字段 ([^;]+)").find(toolCallValidator.validate(toolCall).orEmpty())
+            ?.groupValues?.getOrNull(1)
+            ?.split(',')
+            ?.map(String::trim)
+            ?.filter(String::isNotBlank)
+        if (!missing.isNullOrEmpty()) metadata.put("missing", org.json.JSONArray(missing))
+        metadata.put("example", minimalToolExample(toolCall.name, operation))
+        return metadata
+    }
+
+    private fun minimalToolExample(name: String, operation: String): JSONObject = when (name) {
+        "ui_action" -> JSONObject().put("action", operation.ifBlank { "tap" }).also { example ->
+            if (operation == "swipe") example.put("x1", 100).put("y1", 500).put("x2", 100).put("y2", 200)
+            else if (operation == "key") example.put("button", "BACK")
+            else example.put("x", 100).put("y", 100)
+        }
+        "app_action" -> JSONObject().put("action", operation.ifBlank { "search" }).put("query", "应用名")
+        "file_ops" -> JSONObject().put("operation", operation.ifBlank { "read" }).put("path", "/workspace/file")
+        "read_image" -> JSONObject().put("path", "/workspace/image.png")
+        else -> JSONObject().put(if (operation.isBlank()) "operation" else "operation", operation.ifBlank { "get" })
     }
 
     private fun emitToolFinished(

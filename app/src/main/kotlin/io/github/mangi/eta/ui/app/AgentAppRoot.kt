@@ -48,6 +48,7 @@ import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.AppearanceSettingsScreen
 import io.github.mangi.eta.ui.SettingsScreen
 import io.github.mangi.eta.ui.components.MiuixDialogActions
+import io.github.mangi.eta.ui.components.AgentControlUi
 import io.github.mangi.eta.ui.model.AgentChatAction
 import io.github.mangi.eta.ui.model.AgentHomeAction
 import io.github.mangi.eta.ui.model.AgentMemoryAction
@@ -288,6 +289,19 @@ fun AgentAppRoot(
     val swipeDismiss = swipeBackDirection.takeIf {
         LocalAppearanceSettings.current.swipeDismissEnabled
     }
+    val agentControl = remember(
+        agentState.agentMode,
+        agentState.agentKind,
+        agentState.instructionReview,
+    ) {
+        AgentControlUi(
+            mode = agentState.agentMode,
+            agent = agentState.agentKind,
+            review = agentState.instructionReview,
+            onAgentChange = agentState::updateAgentKind,
+            onReviewChange = agentState::updateInstructionReview,
+        )
+    }
     if (agentState.conversationsLoading) {
         // 初始会话快照在后台加载完成前显示占位，避免用户在空列表上误操作。
         AgentConversationsLoadingPlaceholder()
@@ -305,6 +319,7 @@ fun AgentAppRoot(
                         state = agentState.homeState,
                         modelPickerState = agentState.modelPickerState,
                         conversationKey = agentState.conversationPaneState.selectedConversationId,
+                        agentControl = agentControl,
                         onAction = { action ->
                             when (action) {
                                 is AgentHomeAction.ReasoningEffortChanged ->
@@ -340,6 +355,7 @@ fun AgentAppRoot(
                                         messageRegenerateTarget = MessageMutationTarget(action.id, impact.laterTurnCount)
                                     }
                                 }
+                                is AgentHomeAction.RetryFailedRun -> agentState.retryFailedRun(action.id)
                                 is AgentHomeAction.SelectReplyCandidate -> agentState.selectReplyCandidate(action.id, action.index)
                                 AgentHomeAction.OpenTools -> pushRoute(AppRoute.Tools)
                                 AgentHomeAction.OpenSkills -> pushRoute(AppRoute.Skills)
@@ -360,6 +376,7 @@ fun AgentAppRoot(
                         state = agentState.homeState,
                         modelPickerState = agentState.modelPickerState,
                         conversationKey = agentState.conversationPaneState.selectedConversationId,
+                        agentControl = agentControl,
                         onAction = { action ->
                             when (action) {
                                 AgentChatAction.NavigateBack -> popRoute()
@@ -397,6 +414,7 @@ fun AgentAppRoot(
                                         messageRegenerateTarget = MessageMutationTarget(action.id, impact.laterTurnCount)
                                     }
                                 }
+                                is AgentChatAction.RetryFailedRun -> agentState.retryFailedRun(action.id)
                                 is AgentChatAction.SelectReplyCandidate -> agentState.selectReplyCandidate(action.id, action.index)
                             }
                         },

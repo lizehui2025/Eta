@@ -82,6 +82,7 @@ internal object AgentSubagentPolicy {
      * 最小证据拆成新的纯净搜集子任务，而不是在主循环里放大原始输出。
      */
     val pureOffloadableTools: Set<String> = setOf(
+        "device_info", "file_ops", "skill", "memory", "read_image",
         "read_file", "search_code", "list_directory",
         "search_files", "search_downloads",
         "search_media", "search_audio", "search_recordings",
@@ -99,6 +100,7 @@ internal object AgentSubagentPolicy {
     )
 
     private val mainOnlyBoundedTools: Set<String> = setOf(
+        "ui_action", "app_action", "device_control", "clipboard", "skill_github",
         "browser_use", "terminal", "run_command",
         "observe_screen",
         "conversation_history",
@@ -116,7 +118,7 @@ internal object AgentSubagentPolicy {
     }
 
     /** 写工具集合：仅在 code 模式下按任务声明的 write_paths 放行。 */
-    val writeTools: Set<String> = setOf("write_file", "edit_file")
+    val writeTools: Set<String> = setOf("write_file", "edit_file", "file_ops", "memory")
 
     /** 前台独占 / 敏感写操作 / 安装类工具一律禁止进入子代理（两种模式相同）。 */
     private val alwaysBlockedTools: Set<String> = setOf(
@@ -141,11 +143,21 @@ internal object AgentSubagentPolicy {
 
     fun isAllowed(toolName: String, mode: SubagentMode = SubagentMode.RESEARCH): Boolean {
         if (toolName in alwaysBlockedTools) return false
-        if (mode == SubagentMode.RESEARCH && toolName in writeTools) return false
+        // Aggregated file_ops/memory stay visible so research agents can use their read
+        // operations; guardedExecutor rejects write/edit operations after inspecting args.
+        if (mode == SubagentMode.RESEARCH && toolName in writeTools &&
+            toolName !in setOf("file_ops", "memory")
+        ) return false
         // v1 暂不把 MCP 透给子代理，避免 token 与外网副作用失控。
         if (toolName.startsWith("mcp_")) return false
         if (toolName == AgentConversationToolCatalog.READ_HISTORY) return false
         return true
+    }
+
+    private fun isWriteCall(call: AgentModelClient.ToolCall): Boolean {
+        if (call.name == "file_ops") return call.parsedArgsOrNull()?.optString("operation") in setOf("write", "edit")
+        if (call.name == "memory") return call.parsedArgsOrNull()?.optString("operation") == "write"
+        return call.name in setOf("write_file", "edit_file", "memory_write")
     }
 
     fun guardedExecutor(
@@ -155,8 +167,8 @@ internal object AgentSubagentPolicy {
         AgentModelClient.ToolExecutor { call ->
             if (call.name == TOOL_NAME) {
                 rejectTool("NESTED_SPAWN_NOT_ALLOWED", "子代理不可再派生子代理，本次调用已拒绝；请由主代理直接派发新的子任务")
-            } else if (!isAllowed(call.name, mode)) {
-                val message = if (call.name in writeTools && mode == SubagentMode.RESEARCH) {
+            } else if ((mode == SubagentMode.RESEARCH && isWriteCall(call)) || !isAllowed(call.name, mode)) {
+                val message = if (isWriteCall(call) && mode == SubagentMode.RESEARCH) {
                     "research 模式不允许写操作：${call.name}；如需编辑文件请使用 mode=code 并声明 write_paths"
                 } else if (call.name == "terminal" || call.name == "run_command") {
                     "子代理禁用 shell：${call.name}；文件读写请用 read_file/search_code/list_directory（code 模式写文件用 write_file/edit_file），构建与验证请交回主代理"

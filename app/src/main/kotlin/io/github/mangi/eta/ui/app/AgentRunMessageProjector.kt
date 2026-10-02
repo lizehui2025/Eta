@@ -54,6 +54,23 @@ internal class AgentRunMessageProjector(
         } else message
     }
 
+    fun appendFailureNotice(
+        runId: String,
+        detail: String?,
+        messages: List<AgentChatMessageUi>,
+    ): List<AgentChatMessageUi> {
+        val notice = SystemNoticeMessageUi(
+            id = "assistant-$runId-failure",
+            code = SystemNoticeCode.RuntimeFailed,
+            detail = detail,
+        )
+        val targetIndex = resultTargetIndex(runId, messages)
+        return messages.filterIndexed { index, message ->
+            message.id != notice.id &&
+                (index != targetIndex || message !is AgentMessageUi || message.content.isNotBlank())
+        } + notice
+    }
+
     fun scheduleModelRetry(
         runId: String,
         event: AgentEvent.ModelRetryScheduled,
@@ -130,6 +147,11 @@ internal class AgentRunMessageProjector(
         messages: List<AgentChatMessageUi>,
     ): List<AgentChatMessageUi> {
         if (delta.isEmpty()) return messages
+        val thinkingId = thinkingMessageId(runId, round, index)
+        // Delayed events must not reopen a block already closed by text/tool output.
+        if (messages.any { it is ThinkingMessageUi && it.id == thinkingId && !it.isStreaming }) {
+            return messages
+        }
 
         val transitioned = transitionVisibleBlock(
             runId = runId,
@@ -138,7 +160,6 @@ internal class AgentRunMessageProjector(
             index = index,
             messages = messages,
         )
-        val thinkingId = thinkingMessageId(runId, round, index)
         val elapsedSeconds = elapsedSeconds(thinkingId)
         var updated = false
         val next = transitioned.map { message ->
@@ -486,7 +507,7 @@ internal class AgentRunMessageProjector(
     ): List<AgentChatMessageUi> {
         val id = subagentMessageId(runId, event.round, event.toolCallId, event.subIndex);
         val mark = if (event.success == false) "✗ " else "✓ ";
-        val firstLine = event.resultSummary.lineSequence().firstOrNull().orEmpty().take(120);
+        val firstLine = event.resultSummary.lineSequence().firstOrNull().orEmpty();
         val line = mark + event.innerToolName + firstLine.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty();
         val stepStatus = if (event.success == false) {
             ToolActivityStatusUi.Failed
@@ -516,7 +537,7 @@ internal class AgentRunMessageProjector(
     ): List<AgentChatMessageUi> {
         val id = subagentMessageId(runId, event.round, event.toolCallId, event.subIndex);
         val status = if (event.ok) ToolActivityStatusUi.Success else ToolActivityStatusUi.Failed;
-        val tail = event.content.lineSequence().firstOrNull().orEmpty().take(300);
+        val tail = event.content.lineSequence().firstOrNull().orEmpty();
         val duration = if (event.durationMs >= 0) "（" + event.durationMs + "ms）" else "";
         val changedNote = if (event.changedFiles.isNotEmpty()) "已改 " + event.changedFiles.size + " 个文件" else "";
         val baseLine = if (tail.isNotBlank()) tail + duration else (if (event.ok) "完成" else "失败") + duration;
@@ -571,7 +592,7 @@ internal class AgentRunMessageProjector(
         // 去掉占位文案，步骤开始累积。
         val base = if (prev == "已派生，等待执行" || prev == "执行中") "" else prev;
         val appended = if (base.isBlank()) line else base + "\n" + line;
-        return appended.takeLast(MAX_SUBAGENT_TRACE_CHARS);
+        return appended;
     }
 
     private fun replaceLastRunningLine(previous: String?, line: String): String {
@@ -580,7 +601,7 @@ internal class AgentRunMessageProjector(
         val lines = prev.lines().toMutableList();
         val idx = lines.indexOfLast { it.startsWith("… ") };
         if (idx >= 0) lines[idx] = line; else lines += line;
-        return lines.joinToString("\n").takeLast(MAX_SUBAGENT_TRACE_CHARS);
+        return lines.joinToString("\n");
     }
 
     /** 子代理步骤按 innerToolCallId 幂等更新：完成态不覆盖，其余替换；不存在则追加。 */
@@ -598,7 +619,6 @@ internal class AgentRunMessageProjector(
         status: ToolActivityStatusUi,
         detail: String,
     ): List<ToolStepUi> {
-        val boundedDetail = detail.take(MAX_TOOL_DETAIL_CHARS)
         val index = indexOfLast { it.id == id }
         if (index < 0) {
             return this + ToolStepUi(
@@ -606,7 +626,7 @@ internal class AgentRunMessageProjector(
                 toolName = toolName,
                 status = status,
                 summary = "",
-                detail = boundedDetail,
+                detail = detail,
             )
         }
         val existing = this[index]
@@ -615,7 +635,7 @@ internal class AgentRunMessageProjector(
                 index,
                 existing.copy(
                     status = status,
-                    detail = boundedDetail.takeIf { it.isNotBlank() } ?: existing.detail,
+                    detail = detail.takeIf { it.isNotBlank() } ?: existing.detail,
                 ),
             )
         }
@@ -637,7 +657,7 @@ internal class AgentRunMessageProjector(
             if (event.changedFiles.isNotEmpty()) {
                 add(
                     "已修改 ${event.changedFiles.size} 个文件：\n" +
-                        event.changedFiles.take(MAX_SUBAGENT_DETAIL_FILES).joinToString("\n"),
+                        event.changedFiles.joinToString("\n"),
                 )
             }
         }
@@ -645,7 +665,7 @@ internal class AgentRunMessageProjector(
             if (builder.isNotEmpty()) builder.append("\n\n")
             builder.append(notes.joinToString("\n"))
         }
-        return builder.toString().take(MAX_SUBAGENT_RESULT_DETAIL_CHARS)
+        return builder.toString()
     }
 
     fun failRunningTools(
@@ -656,7 +676,7 @@ internal class AgentRunMessageProjector(
             if (message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running) {
                 message.copy(
                     status = ToolActivityStatusUi.Failed,
-                    resultSummary = reason.take(MAX_TOOL_RESULT_PREVIEW_CHARS),
+                    resultSummary = reason,
                     steps = message.steps.settleRunningSteps(ToolActivityStatusUi.Failed),
                 )
             } else {
@@ -674,7 +694,7 @@ internal class AgentRunMessageProjector(
                 message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running ->
                     message.copy(
                         status = ToolActivityStatusUi.Unknown,
-                        resultSummary = reason.take(MAX_TOOL_RESULT_PREVIEW_CHARS),
+                        resultSummary = reason,
                         steps = message.steps.settleRunningSteps(),
                     )
                 else -> message
@@ -853,14 +873,5 @@ internal class AgentRunMessageProjector(
 
 }
 
-private const val MAX_TOOL_RESULT_PREVIEW_CHARS = 48
-/** 子代理独立行的步骤累积上限：保留尾部（最终结果），头部超长截断。 */
-private const val MAX_SUBAGENT_TRACE_CHARS = 1500
 /** 子代理独立行的 toolName：复用工具卡片渲染，标题取子代理 label。 */
 internal const val SUBAGENT_TOOL_NAME = "subagent"
-/** 单个工具详情（文件/终端）的字符预算。 */
-private const val MAX_TOOL_DETAIL_CHARS = 1600
-/** 子代理最终结果的字符预算。 */
-private const val MAX_SUBAGENT_RESULT_DETAIL_CHARS = 2000
-/** 子代理最终结果里最多列出的改动文件数。 */
-private const val MAX_SUBAGENT_DETAIL_FILES = 8

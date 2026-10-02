@@ -532,7 +532,7 @@ class AgentModelClientLoopTest {
             val provider = ScriptedProvider(
                 assistant(
                     finishReason = finishReason,
-                    toolCalls = listOf(toolCall("call-1", "get_current_context", "{}")),
+                    toolCalls = listOf(toolCall("call-1", "device_info", "{\"operation\":\"context\"}")),
                 ),
                 assistant(content = "完成", finishReason = "stop"),
             )

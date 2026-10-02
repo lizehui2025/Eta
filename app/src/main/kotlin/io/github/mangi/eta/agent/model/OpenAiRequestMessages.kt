@@ -6,8 +6,9 @@ import org.json.JSONObject
 /** 将 Eta 会话消息投影为 OpenAI-compatible 请求所需的系统指令结构。 */
 internal object OpenAiRequestMessages {
     /**
-     * [stripReasoning] 默认 false，投影结果与历史实现逐字节一致；只有 provider 在服务端明确
-     * 拒绝回传历史 `reasoning_content`（跨模型切换后最常见）时才置 true 重试一次。
+     * Completed user turns keep their answers and tool results, but not internal reasoning.
+     * Current-turn reasoning is retained for providers that require it across tool calls.
+     * [stripReasoning] also removes current-turn reasoning after a provider rejects the field.
      */
     fun forChatCompletions(
         source: JSONArray,
@@ -15,6 +16,10 @@ internal object OpenAiRequestMessages {
         cache: AgentRequestProjectionCache? = null,
     ): JSONArray {
         val system = collectInstructions(source, SYSTEM_ROLES)
+        val latestUserIndex = (source.length() - 1 downTo 0).firstOrNull { index ->
+            val message = source.optJSONObject(index)
+            message?.optString("role") == "user" && !message.optBoolean("_eta_observation", false)
+        } ?: -1
         return JSONArray().also { messages ->
             if (system.isNotBlank()) {
                 messages.put(JSONObject().put("role", "system").put("content", system))
@@ -22,9 +27,10 @@ internal object OpenAiRequestMessages {
             for (index in 0 until source.length()) {
                 val message = source.optJSONObject(index) ?: continue
                 if (message.optString("role") !in SYSTEM_ROLES) {
-                    val projected = cache?.chatMessage(message, stripReasoning) {
-                        projectChatMessage(it, stripReasoning)
-                    } ?: projectChatMessage(message, stripReasoning)
+                    val removeReasoning = stripReasoning || index < latestUserIndex
+                    val projected = cache?.chatMessage(message, removeReasoning) {
+                        projectChatMessage(it, removeReasoning)
+                    } ?: projectChatMessage(message, removeReasoning)
                     messages.put(projected)
                 }
             }
@@ -40,9 +46,7 @@ internal object OpenAiRequestMessages {
             remove("_eta_message_id")
             remove("_eta_character_profile")
             remove(ResponsesEphemeralState.OUTPUT_ITEMS_KEY)
-            // 跨模型兼容：思考文本由上一模型写入并被 codec 持久化进历史，部分服务端
-            // （如 DeepSeek 官方）不接受回传 reasoning_content，会直接 400。默认保留，
-            // 与服务端是否支持无关，只在收到该类拒绝后由 provider 显式开启剥离。
+            // Transcript content stays intact; this only changes the outgoing request.
             if (stripReasoning) remove(HISTORY_REASONING_CONTENT_KEY)
         }
 

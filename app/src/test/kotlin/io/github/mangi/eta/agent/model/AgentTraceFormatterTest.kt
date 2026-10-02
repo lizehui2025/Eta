@@ -112,7 +112,8 @@ class AgentTraceFormatterTest {
                 AgentModelClient.ToolCall("observe", "observe_screen", "{}")
             )
         )
-        assertNull(
+        assertEquals(
+            "x".repeat(4_001),
             formatter.displayCommand(
                 AgentModelClient.ToolCall(
                     "oversized",
@@ -540,7 +541,7 @@ class AgentTraceFormatterTest {
             content = """{"ok":true,"tool":"write_file","mode":"overwrite","bytes_written":20}""",
         )
         val previewDetail = formatter.summarizeDetail("write_file", call.argumentsJson, newFile)
-        assertTrue(previewDetail.contains("新内容预览"))
+        assertTrue(previewDetail.contains("新内容"))
         assertTrue(previewDetail.contains("val a = 1"))
         assertTrue(previewDetail.contains("覆盖写入"))
     }
@@ -569,7 +570,7 @@ class AgentTraceFormatterTest {
     }
 
     @Test
-    fun terminalDetailShowsLongerBoundedOutput() {
+    fun terminalDetailShowsCompleteReturnedOutput() {
         val longStdout = (1..30).joinToString("\n") { "line-$it" }
         val result = AgentModelClient.ToolResult(
             content = JSONObject()
@@ -587,8 +588,8 @@ class AgentTraceFormatterTest {
         assertTrue(detail.contains("退出码 0"))
         assertTrue(detail.contains("输出（stdout）"))
         assertTrue(detail.contains("line-14"))
-        assertFalse(detail.contains("line-15"))
-        assertTrue(detail.contains("输出已截断"))
+        assertTrue(detail.contains("line-15"))
+        assertTrue(detail.contains("工具返回不完整"))
         assertTrue(detail.contains("错误输出（stderr）"))
         assertTrue(detail.contains("warn: careful"))
     }
@@ -728,6 +729,97 @@ class AgentTraceFormatterTest {
         assertTrue(detail.contains("命中 3 条"))
         assertTrue(detail.contains("glob"))
         assertTrue(detail.contains("/repo/a.kt:1:class Foo"))
+    }
+
+    @Test
+    fun canonicalFileOpsDetailKeepsCompleteReturnedContent() {
+        val content = (1..40).joinToString("\n") { "line-$it" }
+        val result = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("path", "/repo/large.txt")
+                .put("content", content)
+                .put("bytes_read", content.length)
+                .toString(),
+        )
+
+        val detail = formatter.summarizeDetail(
+            "file_ops",
+            """{"operation":"read","path":"/repo/large.txt"}""",
+            result,
+        )
+
+        assertTrue(detail.contains("line-1"))
+        assertTrue(detail.contains("line-40"))
+    }
+
+    @Test
+    fun nonSensitiveResultUsesReadableFieldsWithoutRawJson() {
+        val result = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("message", "result-" + "x".repeat(5_000))
+                .put("count", 2)
+                .toString(),
+        )
+
+        val detail = formatter.summarizeDetail("device_control", "{}", result)
+
+        assertTrue(detail.contains("说明：result-"))
+        assertTrue(detail.contains("x".repeat(5_000)))
+        assertTrue(detail.contains("数量：2"))
+        assertFalse(detail.contains("\"ok\""))
+        assertFalse(detail.contains("{"))
+    }
+
+    @Test
+    fun webSearchDetailUsesResultCardsInsteadOfRawJson() {
+        val result = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("query", "Eta Android")
+                .put("provider", "public-search")
+                .put("results", org.json.JSONArray().put(
+                    JSONObject()
+                        .put("title", "Eta")
+                        .put("url", "https://example.com/eta")
+                        .put("snippet", "Agent app"),
+                ))
+                .toString(),
+        )
+
+        val detail = formatter.summarizeDetail("web_search", "{}", result)
+
+        assertTrue(detail.contains("搜索：Eta Android"))
+        assertTrue(detail.contains("1. Eta"))
+        assertTrue(detail.contains("https://example.com/eta"))
+        assertTrue(detail.contains("Agent app"))
+        assertFalse(detail.contains("\"results\""))
+        assertFalse(detail.contains("{"))
+    }
+
+    @Test
+    fun browserDetailUsesReadablePageSectionsInsteadOfRawJson() {
+        val result = AgentModelClient.ToolResult(
+            content = JSONObject()
+                .put("ok", true)
+                .put("action", "get_readable")
+                .put("url", "https://example.com/docs")
+                .put("title", "Documentation")
+                .put("text", "完整正文")
+                .put("element_count", 4)
+                .toString(),
+        )
+
+        val detail = formatter.summarizeDetail("browser_use", "{}", result)
+
+        assertTrue(detail.contains("操作：提取正文"))
+        assertTrue(detail.contains("标题：Documentation"))
+        assertTrue(detail.contains("地址：https://example.com/docs"))
+        assertTrue(detail.contains("正文："))
+        assertTrue(detail.contains("完整正文"))
+        assertFalse(detail.contains("\"element_count\""))
+        assertFalse(detail.contains("{"))
     }
 
     private data class RedactionCase(

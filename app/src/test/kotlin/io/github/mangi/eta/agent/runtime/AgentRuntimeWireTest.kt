@@ -216,7 +216,7 @@ class AgentRuntimeWireTest {
     }
 
     @Test
-    fun oversizedToolDetailIsClampedForIpcWhileEmptyDetailStaysEmpty() {
+    fun oversizedToolDetailRoundTripsForIpcWhileEmptyDetailStaysEmpty() {
         val longDetail = "长".repeat(9_000)
         val finished = AgentEvent.ToolFinished(
             round = 1,
@@ -229,9 +229,7 @@ class AgentRuntimeWireTest {
             detail = longDetail,
         )
         val decoded = AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(finished)) as AgentEvent.ToolFinished
-        assertTrue(decoded.detail.length <= 4_000)
-        assertTrue(decoded.detail.endsWith("…"))
-        assertTrue(longDetail.startsWith(decoded.detail.dropLast(1)))
+        assertEquals(longDetail, decoded.detail)
 
         val subFinished = AgentEvent.SubagentToolFinished(
             round = 2,
@@ -245,8 +243,7 @@ class AgentRuntimeWireTest {
             detail = longDetail,
         )
         val decodedSub = AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(subFinished)) as AgentEvent.SubagentToolFinished
-        assertTrue(decodedSub.detail.length <= 4_000)
-        assertTrue(decodedSub.detail.endsWith("…"))
+        assertEquals(longDetail, decodedSub.detail)
 
         val emptyDetail = finished.copy(detail = "")
         assertEquals(emptyDetail, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(emptyDetail)))

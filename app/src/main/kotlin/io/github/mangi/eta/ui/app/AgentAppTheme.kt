@@ -35,10 +35,11 @@ fun AgentAppTheme(
         AppearanceThemeMode.LIGHT -> false
         AppearanceThemeMode.DARK -> true
     }
+    val useGeneratedPalette = appearance.monetEnabled || appearance.accentColor != AppearanceAccentColor.SYSTEM
     val colorSchemeMode = when {
-        !appearance.monetEnabled && appearance.themeMode == AppearanceThemeMode.LIGHT -> ColorSchemeMode.Light
-        !appearance.monetEnabled && appearance.themeMode == AppearanceThemeMode.DARK -> ColorSchemeMode.Dark
-        !appearance.monetEnabled -> ColorSchemeMode.System
+        !useGeneratedPalette && appearance.themeMode == AppearanceThemeMode.LIGHT -> ColorSchemeMode.Light
+        !useGeneratedPalette && appearance.themeMode == AppearanceThemeMode.DARK -> ColorSchemeMode.Dark
+        !useGeneratedPalette -> ColorSchemeMode.System
         appearance.themeMode == AppearanceThemeMode.LIGHT -> ColorSchemeMode.MonetLight
         appearance.themeMode == AppearanceThemeMode.DARK -> ColorSchemeMode.MonetDark
         else -> ColorSchemeMode.MonetSystem
@@ -51,7 +52,6 @@ fun AgentAppTheme(
         null
     }
     val keyColor = when {
-        !appearance.monetEnabled -> null
         appearance.accentColor == AppearanceAccentColor.SYSTEM -> systemSeedColor
         else -> appearance.accentColor.seedColor()
     }
@@ -65,8 +65,8 @@ fun AgentAppTheme(
         )
     }
     val colors = controller.currentColors()
-    val themedColors = remember(colors, isDark, appearance.monetEnabled, appearance.pureBlackEnabled) {
-        if (appearance.monetEnabled && appearance.pureBlackEnabled && isDark) {
+    val themedColors = remember(colors, isDark, useGeneratedPalette, appearance.pureBlackEnabled) {
+        if (useGeneratedPalette && appearance.pureBlackEnabled && isDark) {
             colors.copy(
                 background = Color.Black,
                 surface = Color.Black,
@@ -165,13 +165,13 @@ private fun AppearancePaletteStyle.toMiuixPaletteStyle(): ThemePaletteStyle = wh
     AppearancePaletteStyle.CONTENT -> ThemePaletteStyle.Content
 }
 
-private fun AppearanceAccentColor.seedColor(): Color = when (this) {
+internal fun AppearanceAccentColor.seedColor(): Color = when (this) {
     AppearanceAccentColor.SYSTEM, AppearanceAccentColor.BLUE -> Color(0xFF3482FF)
-    AppearanceAccentColor.PURPLE -> Color(0xFF6750A4)
-    AppearanceAccentColor.PINK -> Color(0xFFB0006D)
-    AppearanceAccentColor.RED -> Color(0xFFBA1A1A)
-    AppearanceAccentColor.ORANGE -> Color(0xFFB65D00)
-    AppearanceAccentColor.YELLOW -> Color(0xFF7D5700)
-    AppearanceAccentColor.GREEN -> Color(0xFF006D3B)
-    AppearanceAccentColor.TEAL -> Color(0xFF006A6A)
+    AppearanceAccentColor.PURPLE -> Color(0xFF8262CE)
+    AppearanceAccentColor.PINK -> Color(0xFFD35091)
+    AppearanceAccentColor.RED -> Color(0xFFD65363)
+    AppearanceAccentColor.ORANGE -> Color(0xFFE1864D)
+    AppearanceAccentColor.YELLOW -> Color(0xFFD9A738)
+    AppearanceAccentColor.GREEN -> Color(0xFF3A9B72)
+    AppearanceAccentColor.TEAL -> Color(0xFF2E9DA5)
 }

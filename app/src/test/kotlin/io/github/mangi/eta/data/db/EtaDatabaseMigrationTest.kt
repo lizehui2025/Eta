@@ -57,6 +57,7 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_21_22,
                 EtaDatabase.MIGRATION_22_23,
                 EtaDatabase.MIGRATION_23_24,
+                EtaDatabase.MIGRATION_24_25,
             )
             .build()
         try {
@@ -151,6 +152,7 @@ class EtaDatabaseMigrationTest {
             .addMigrations(
                 EtaDatabase.MIGRATION_22_23,
                 EtaDatabase.MIGRATION_23_24,
+                EtaDatabase.MIGRATION_24_25,
             )
             .build()
         try {
@@ -187,6 +189,7 @@ class EtaDatabaseMigrationTest {
         val database = Room.databaseBuilder(context, EtaDatabase::class.java, databaseName)
             .addMigrations(
                 EtaDatabase.MIGRATION_23_24,
+                EtaDatabase.MIGRATION_24_25,
             )
             .build()
         try {

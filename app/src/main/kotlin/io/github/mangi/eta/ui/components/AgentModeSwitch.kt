@@ -1,10 +1,13 @@
 package io.github.mangi.eta.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -61,10 +64,20 @@ private fun AgentModeSegment(
     active: Boolean,
     onClick: () -> Unit,
 ) {
+    val background by animateColorAsState(
+        targetValue = if (active) MiuixTheme.colorScheme.primary else Color.Transparent,
+        animationSpec = tween(180),
+        label = "mode_background",
+    )
+    val foreground by animateColorAsState(
+        targetValue = if (active) MiuixTheme.colorScheme.onPrimary else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        animationSpec = tween(180),
+        label = "mode_foreground",
+    )
     Box(
         modifier = Modifier
             .squircleSurface(
-                color = if (active) MiuixTheme.colorScheme.primary else Color.Transparent,
+                color = background,
                 cornerRadius = 13.dp,
             )
             .clickable(enabled = !active, onClick = onClick)
@@ -75,11 +88,7 @@ private fun AgentModeSegment(
         Text(
             text = label,
             style = MiuixTheme.textStyles.footnote1,
-            color = if (active) {
-                MiuixTheme.colorScheme.onPrimary
-            } else {
-                MiuixTheme.colorScheme.onSurfaceVariantSummary
-            },
+            color = foreground,
             maxLines = 1,
         )
     }

@@ -14,7 +14,7 @@ class AgentDeviceToolCatalogTest {
         val actions = names(false, false, true)
 
         assertFalse("set_alarm" in none)
-        assertTrue("set_alarm" in direct)
+        assertTrue("device_control" in direct)
         assertFalse("read_sms_code" in direct)
         assertTrue("read_sms_code" in reads)
         assertTrue("search_coloros_notes" in reads)

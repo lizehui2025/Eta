@@ -20,6 +20,7 @@ internal class AgentContextSession(
     private val roleplay: Boolean = false,
     /** 会话路由键：压缩请求与主对话共享服务端缓存路由。 */
     private val sessionId: String = java.util.UUID.randomUUID().toString(),
+    private val onCompactionCompleted: () -> Unit = {},
 ) {
     val budget = AgentContextBudget(config.contextWindow)
     private var compacted = false
@@ -114,6 +115,7 @@ internal class AgentContextSession(
             compacted = true
             try {
                 publishSnapshot(candidate)
+                onCompactionCompleted()
             } catch (failure: Exception) {
                 compacted = wasCompacted
                 throw failure
@@ -166,7 +168,9 @@ internal class AgentContextSession(
     private fun durableHistory(source: JSONArray): List<AgentModelClient.ConversationMessage> {        val durable = JSONArray()
         for (index in systemCount until source.length()) {
             val message = source.getJSONObject(index)
-            if (!message.optBoolean("_eta_observation")) durable.put(message)
+            if (!message.optBoolean("_eta_observation") && !message.optBoolean("_eta_context_epoch")) {
+                durable.put(message)
+            }
         }
         return AgentConversationCodec.transcript(durable, 0, sensitiveIds())
     }

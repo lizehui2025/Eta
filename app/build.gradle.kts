@@ -196,4 +196,6 @@ dependencies {
     testImplementation(libs.json)
     testImplementation(libs.room.testing)
     testImplementation(libs.robolectric)
+    testImplementation(libs.compose.ui.test)
+    debugImplementation(libs.compose.ui.test.manifest)
 }

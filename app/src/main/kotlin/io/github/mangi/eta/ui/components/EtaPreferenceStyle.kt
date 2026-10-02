@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import io.github.mangi.eta.data.model.AppearanceAccentColor
 import io.github.mangi.eta.ui.app.LocalAppearanceSettings
 import top.yukonga.miuix.kmp.basic.CardColors
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -45,7 +46,7 @@ internal object EtaPreferenceDefaults {
 internal fun EtaPreferenceTheme(content: @Composable () -> Unit) {
     val colors = MiuixTheme.colorScheme
     val appearance = LocalAppearanceSettings.current
-    val pageColors = if (!appearance.monetEnabled && colors.background.luminance() > 0.5f) {
+    val pageColors = if (!appearance.monetEnabled && appearance.accentColor == AppearanceAccentColor.SYSTEM && colors.background.luminance() > 0.5f) {
         colors.copy(background = EtaColors.PreferenceBackgroundFallback, primary = EtaPreferenceColors.Blue)
     } else {
         colors

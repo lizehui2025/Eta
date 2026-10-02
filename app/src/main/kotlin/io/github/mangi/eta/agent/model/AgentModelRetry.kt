@@ -7,7 +7,7 @@ import java.util.concurrent.ThreadLocalRandom
 
 /** 重试只包围模型请求；完整响应返回前不提交历史或执行本地工具。 */
 internal class AgentModelRetry(
-    /** 压缩等"用户正等着"的串行调用只重试一次；普通对话轮次保持 3 次。 */
+    /** 临时网络错误默认有限重试；普通聊天可显式启用持续恢复。 */
     private val maxRetries: Int = MAX_RETRIES,
     /** 退避抖动；测试可注入固定值，生产默认按 ±20% 抖动，避免多客户端重试风暴。 */
     private val delayTransform: (Long) -> Long = { it },
@@ -52,7 +52,7 @@ internal class AgentModelRetry(
                     classified.code, false, classified.message.orEmpty(), classified, recoveryAllowed = false,
                 )
                 if (!classified.retryable) throw classified
-                if (retries == maxRetries) {
+                if (retries >= maxRetries) {
                     val retryDescription = if (maxRetries == 0) {
                         "请求未完成"
                     } else {
@@ -65,7 +65,8 @@ internal class AgentModelRetry(
                     )
                 }
                 retries += 1
-                val delayMs = delayTransform(BASE_DELAY_MS shl (retries - 1)).coerceAtLeast(0L)
+                val exponent = (retries - 1).coerceAtMost(5)
+                val delayMs = delayTransform((BASE_DELAY_MS shl exponent).coerceAtMost(MAX_DELAY_MS)).coerceAtLeast(0L)
                 onEvent(AgentEvent.ModelRetryScheduled(round, retries, maxRetries, delayMs.toInt(), classified.code))
                 logRetryScheduled(round, retries, delayMs, classified)
                 waitBeforeRetry(controller, delayMs)
@@ -92,8 +93,9 @@ internal class AgentModelRetry(
     }
 
     companion object {
-        private const val MAX_RETRIES = 3
         private const val BASE_DELAY_MS = 2_000L
+        private const val MAX_DELAY_MS = 60_000L
+        private const val MAX_RETRIES = 3
     }
 }
 

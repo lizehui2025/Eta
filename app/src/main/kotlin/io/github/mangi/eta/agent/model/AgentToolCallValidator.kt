@@ -22,16 +22,129 @@ internal class AgentToolCallValidator(tools: JSONArray) {
 
     fun validate(call: AgentModelClient.ToolCall): String? {
         val toolSchema = schemasByName[call.name]
-            ?: return "工具未在本次运行的能力目录中声明"
+            ?: if (call.name in LEGACY_TRANSCRIPT_TOOLS) return validateLegacy(call)
+            else return "工具未在本次运行的能力目录中声明"
         val arguments = call.parsedArgs().getOrNull()
             ?: return "参数不是有效的 JSON object"
-        return validateValue(
+        validateValue(
             value = arguments,
             schema = toolSchema.parameters,
             root = toolSchema.root,
             path = "arguments",
             depth = 0,
-        )
+        )?.let { return it }
+        return validateCanonicalOperation(call.name, arguments)
+    }
+
+    private fun validateLegacy(call: AgentModelClient.ToolCall): String? {
+        val args = call.parsedArgs().getOrNull() ?: return "参数不是有效的 JSON object"
+        fun missing(vararg fields: String): String? = fields.filter { !args.has(it) || args.isNull(it) || (args.opt(it) is String && args.optString(it).isBlank()) }
+            .takeIf { it.isNotEmpty() }?.let { "${call.name} 缺少必填字段 ${it.joinToString(", ")}" }
+        return when (call.name) {
+            "tap", "long_press" -> if (args.has("index")) missing("index", "observation_id") else missing("x", "y")
+            "tap_element", "long_press_element" -> missing("index", "observation_id")
+            "input_text", "replace_text", "paste_text" -> missing("text")
+            "press_key" -> missing("button")
+            "read_file", "write_file", "edit_file", "list_directory", "search_code" -> missing("path")
+            else -> null
+        }
+    }
+
+    /**
+     * JSON Schema validates the shape, while these operation contracts validate the relationship
+     * between an operation and the fields it makes meaningful. Keeping this check here means old
+     * transcript adapters cannot accidentally dispatch a canonical call with a legacy default.
+     */
+    private fun validateCanonicalOperation(name: String, args: JSONObject): String? {
+        fun missing(vararg fields: String): String? {
+            val absent = fields.filter { field ->
+                !args.has(field) || args.isNull(field) ||
+                    (args.opt(field) is String && args.optString(field).isBlank())
+            }
+            return absent.takeIf { it.isNotEmpty() }?.let {
+                "${name} operation=${args.optString("action", args.optString("operation"))} 缺少必填字段 ${it.joinToString(", ")}; 请先提供完整参数"
+            }
+        }
+        fun anyOf(vararg fields: String): String? =
+            if (fields.any { field ->
+                    args.has(field) && !args.isNull(field) &&
+                        !(args.opt(field) is String && args.optString(field).isBlank())
+                }
+            ) null else missing(*fields)
+        fun observationIfIndexed(): String? =
+            if (args.has("index")) missing("index", "observation_id") else null
+
+        return when (name) {
+            "web_search" -> when (args.optString("operation")) {
+                "search" -> missing("query")
+                "read" -> missing("url")
+                else -> "web_search 的 operation 无效"
+            }
+            "ui_action" -> when (val action = args.optString("action")) {
+                "tap", "long_press" -> observationIfIndexed() ?: if (args.has("index")) null else missing("x", "y")
+                "swipe" -> missing("x1", "y1", "x2", "y2")
+                "scroll" -> observationIfIndexed() ?: if (args.has("index")) missing("direction") else missing("direction")
+                "input" -> missing("text") ?: observationIfIndexed()
+                "clear" -> observationIfIndexed()
+                "key" -> missing("button")
+                "wait" -> when (args.optString("condition", "duration")) {
+                    "duration" -> missing("timeout_ms")
+                    "text" -> missing("text", "timeout_ms")
+                    "package" -> missing("package_name", "timeout_ms")
+                    else -> "ui_action operation=wait 的 condition 不受支持"
+                }
+                "open_system_panel" -> missing("panel")
+                else -> "ui_action 的 action 无效：$action"
+            }
+            "app_action" -> when (args.optString("action")) {
+                "search" -> missing("query")
+                "launch" -> anyOf("package_name", "app_name")
+                "open_uri" -> missing("uri")
+                else -> "app_action 的 action 无效"
+            }
+            "device_control" -> when (args.optString("operation")) {
+                "alarm" -> missing("hour", "minute")
+                "timer" -> missing("duration_seconds")
+                "media" -> missing("media_action")
+                "volume" -> missing("stream", "percent")
+                else -> "device_control 的 operation 无效"
+            }
+            "clipboard" -> when (args.optString("operation")) {
+                "get" -> null
+                "set", "paste" -> missing("text")
+                else -> "clipboard 的 operation 无效"
+            }
+            "file_ops" -> when (args.optString("operation")) {
+                "read", "list" -> missing("path")
+                "write" -> missing("path", "content")
+                "edit" -> missing("path", "old_string", "new_string")
+                "search" -> missing("path") ?: anyOf("query", "pattern")
+                else -> "file_ops 的 operation 无效"
+            }
+            "read_image" -> missing("path")
+            "skill" -> when (args.optString("operation")) {
+                "list", "curated" -> null
+                "read" -> missing("skill_id")
+                "resource" -> missing("skill_id", "relative_path")
+                else -> "skill 的 operation 无效"
+            }
+            "skill_github" -> when (args.optString("operation")) {
+                "inspect" -> missing("repository")
+                "install" -> missing("repository") ?: anyOf("path", "paths")
+                else -> "skill_github 的 operation 无效"
+            }
+            "memory" -> when (args.optString("operation")) {
+                "get" -> null
+                "write" -> when (args.optString("mode")) {
+                    "replace_range" -> missing("revision", "start_line", "end_line", "content")
+                    "append" -> missing("revision", "content")
+                    "clear" -> missing("revision")
+                    else -> "memory operation=write 缺少有效 mode"
+                }
+                else -> "memory 的 operation 无效"
+            }
+            else -> null
+        }
     }
 
     private fun validateValue(
@@ -344,5 +457,15 @@ internal class AgentToolCallValidator(tools: JSONArray) {
 
     private companion object {
         const val MAX_SCHEMA_DEPTH = 256
+        /** Accepted only for restored transcripts/checkpoints; never published in new schemas. */
+        val LEGACY_TRANSCRIPT_TOOLS = setOf(
+            "get_current_context", "search_apps", "launch_app", "open_uri", "tap", "tap_element",
+            "long_press", "long_press_element", "swipe", "scroll", "scroll_element", "input_text",
+            "replace_text", "clear_text", "set_clipboard", "get_clipboard", "paste_text", "press_key",
+            "wait", "wait_for_text", "wait_for_package", "open_system_panel", "read_file", "write_file",
+            "edit_file", "search_code", "list_directory", "memory_get", "memory_write", "skills_list",
+            "skills_read", "skills_read_resource", "skills_list_curated", "skills_inspect_github",
+            "skills_install_from_github", "run_command", "get_setting", "network_info", "device_status",
+        )
     }
 }

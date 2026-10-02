@@ -171,6 +171,22 @@ internal object Prefs {
         runCatching { localAgent?.edit()?.putString(Keys.AGENT_MODE, normalized)?.apply() }
     }
 
+    fun agentKind(mode: String): String = runCatching {
+        localAgent?.getString("agent_kind_$mode", null)
+    }.getOrNull().orEmpty()
+
+    fun setAgentKind(mode: String, kind: String) {
+        runCatching { localAgent?.edit()?.putString("agent_kind_$mode", kind)?.apply() }
+    }
+
+    fun instructionReview(): String = runCatching {
+        localAgent?.getString("instruction_review", "manual")
+    }.getOrNull() ?: "manual"
+
+    fun setInstructionReview(review: String) {
+        runCatching { localAgent?.edit()?.putString("instruction_review", review)?.apply() }
+    }
+
     /**
      * 首次升级优先把已有 RemotePreferences 值迁入本地；之后本地值是事实源，并在框架
      * 可用时回写远端，让仍在目标进程中组装请求的 Hook 入口拿到一致的初始配置。

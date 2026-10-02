@@ -1,11 +1,36 @@
 package io.github.mangi.eta.ui.components
 
+import io.github.mangi.eta.ui.model.AgentMessageUi
+import io.github.mangi.eta.ui.model.ThinkingMessageUi
+import io.github.mangi.eta.ui.model.ToolActivityMessageUi
+import io.github.mangi.eta.ui.model.ToolActivityStatusUi
+import io.github.mangi.eta.ui.model.UserMessageUi
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentChatScrollPolicyTest {
+    @Test
+    fun overflowUsesContinuousFollowingWithoutAnotherBottomJump() {
+        assertFalse(shouldRequestInitialBottom(
+            isStreaming = true,
+            keepBottomAnchored = true,
+            isUserDragging = false,
+            userTurnPhase = UserTurnScrollPhase.FollowingOverflow,
+        ))
+    }
+    @Test
+    fun latestUserTurnOutputStartsOnAssistantThinkingOrToolActivity() {
+        val user = UserMessageUi("u", "hello")
+        assertFalse(latestUserTurnHasOutput(listOf(user)))
+        assertTrue(latestUserTurnHasOutput(listOf(user, ThinkingMessageUi("t", "", true))))
+        assertTrue(latestUserTurnHasOutput(listOf(user, AgentMessageUi("a", "answer"))))
+        assertTrue(latestUserTurnHasOutput(listOf(user, ToolActivityMessageUi(
+            id = "tool", toolName = "terminal", status = ToolActivityStatusUi.Running,
+            argumentsSummary = "终端",
+        ))))
+    }
     @Test
     fun networkCompletionKeepsFollowingUntilRenderedTailSettles() {
         assertTrue(

@@ -17,6 +17,7 @@ internal object AgentToolSchema {
         name: String,
         description: String,
         parameters: JSONObject,
+        required: Array<String> = emptyArray(),
     ): JSONObject =
         JSONObject()
             .put("type", "function")
@@ -25,6 +26,11 @@ internal object AgentToolSchema {
                 JSONObject()
                     .put("name", name)
                     .put("description", description)
-                    .put("parameters", parameters),
+                    .put(
+                        "parameters",
+                        parameters.also {
+                            if (required.isNotEmpty()) it.put("required", JSONArray(required.toList()))
+                        },
+                    ),
             )
 }

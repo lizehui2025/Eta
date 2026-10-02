@@ -84,11 +84,27 @@ class OpenAiChatCompletionsProviderTest {
             val events = mutableListOf<ProviderEvent>()
             val response = OpenAiChatCompletionsProvider.complete(providerRequest(baseUrl), AgentRunController(), events::add)
 
-            assertEquals("第一段第二段第三段摘要", response.assistantMessage.getString("reasoning_content"))
-            assertEquals(listOf("第一段", "第二段", "第三段摘要"), events.filterIsInstance<ProviderEvent.BlockDelta>()
+            assertEquals("第一段第二段第三段", response.assistantMessage.getString("reasoning_content"))
+            assertEquals(listOf("第一段", "第二段", "第三段"), events.filterIsInstance<ProviderEvent.BlockDelta>()
                 .filter { it.kind == AssistantBlockKind.THINKING }.map { it.delta })
-            assertEquals("第一段第二段第三段摘要", events.filterIsInstance<ProviderEvent.BlockEnd>()
+            assertEquals("第一段第二段第三段", events.filterIsInstance<ProviderEvent.BlockEnd>()
                 .single { it.kind == AssistantBlockKind.THINKING }.content)
+        }
+    }
+
+    @Test
+    fun summaryOnlyReasoningStillClosesBeforeAnswer() {
+        val body = sseChunk(JSONObject().put("reasoning_details", JSONArray().put(
+            JSONObject().put("type", "reasoning.summary").put("summary", "核对证据"),
+        ))) + sseChunk(JSONObject().put("content", "答案"), finishReason = "stop") +
+            "data: [DONE]\n\n"
+        withSseServer(body) { baseUrl ->
+            val events = mutableListOf<ProviderEvent>()
+            val response = OpenAiChatCompletionsProvider.complete(providerRequest(baseUrl), AgentRunController(), events::add)
+            assertEquals("核对证据", response.assistantMessage.getString("reasoning_content"))
+            val thinkingEnd = events.indexOfFirst { it is ProviderEvent.BlockEnd && it.kind == AssistantBlockKind.THINKING }
+            val textStart = events.indexOfFirst { it is ProviderEvent.BlockStart && it.kind == AssistantBlockKind.TEXT }
+            assertTrue(thinkingEnd >= 0 && thinkingEnd < textStart)
         }
     }
 

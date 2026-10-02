@@ -28,8 +28,10 @@ internal object AgentToolRequirements {
         }
         register(
             RootRequirement.NONE,
-            "get_current_context", "search_apps", "launch_app", "open_uri", "browser_use",
-            "observe_screen", "tap", "tap_area", "tap_element", "long_press",
+            "observe_screen", "ui_action", "app_action", "device_info", "device_control",
+            "clipboard", "skill", "skill_github", "memory", "web_search", "browser_use", "ask_user",
+            "get_current_context", "search_apps", "launch_app", "open_uri",
+            "tap", "tap_area", "tap_element", "long_press",
             "long_press_element", "swipe", "scroll", "scroll_element", "input_text",
             "replace_text", "clear_text", "set_clipboard", "get_clipboard", "paste_text",
             "wait", "wait_for_text", "wait_for_package", "open_system_panel",
@@ -40,10 +42,10 @@ internal object AgentToolRequirements {
             "skills_list", "skills_read", "skills_read_resource", "skills_list_curated",
             "skills_inspect_github", "skills_install_from_github", "spawn_agents", "todo_write",
             // Only talks to the user and touches no device capability, so it needs no permission.
-            "ask_user",
         )
         register(
             RootRequirement.PARTIAL,
+            "file_ops",
             "press_key", "network_info", "get_setting", "recent_notifications",
             "search_personal_orders", "terminal", "run_command", "read_file",
             "write_file", "edit_file", "search_code", "list_directory", "read_image",
@@ -60,7 +62,8 @@ internal object AgentToolRequirements {
             "search_qq_chat_images", "search_wechat_chat_images",
         )
         listOf(
-            "observe_screen", "tap", "tap_area", "tap_element", "long_press",
+            "observe_screen", "ui_action",
+            "tap", "tap_area", "tap_element", "long_press",
             "long_press_element", "swipe", "scroll", "scroll_element", "input_text",
             "replace_text", "clear_text", "paste_text", "press_key", "open_system_panel",
             "wait_for_text", "wait_for_package",
@@ -84,6 +87,7 @@ internal object AgentToolRequirements {
         // 只放行明确无副作用、且实现层没有共享 GUI/终端会话状态的只读工具。
         // 未登记工具默认串行，避免新增工具在不知情的情况下被并行调度。
         listOf(
+            "device_info", "file_ops", "skill", "memory", "web_search",
             "read_file", "list_directory", "search_code",
             "get_current_context", "device_status", "network_info",
             "memory_get", "skills_list", "skills_read", "skills_read_resource",
@@ -95,24 +99,101 @@ internal object AgentToolRequirements {
         ).forEach { name ->
             put(name, getValue(name).copy(concurrency = ToolConcurrency.PARALLEL_READ_ONLY))
         }
+        put("ui_action", getValue("ui_action").copy(accessibility = true))
+        put("observe_screen", getValue("observe_screen").copy(accessibility = true))
     }
 
     val toolNames: Set<String> get() = definitions.keys
 
     fun find(name: String): LocalToolRequirement? = definitions[name]
 
-    fun rootRequirement(name: String): RootRequirement =
-        requireNotNull(find(name)) { "Missing tool requirements: $name" }.rootRequirement
+    fun rootRequirement(name: String, arguments: JSONObject = JSONObject()): RootRequirement =
+        requireNotNull(find(effectiveName(name, arguments))) { "Missing tool requirements: $name" }.rootRequirement
 
-    fun requiresAccessibility(name: String): Boolean = find(name)?.accessibility == true
+    fun requiresAccessibility(name: String, arguments: JSONObject = JSONObject()): Boolean =
+        find(effectiveName(name, arguments))?.accessibility == true
 
-    fun isParallelReadOnly(name: String): Boolean =
-        find(name)?.concurrency == ToolConcurrency.PARALLEL_READ_ONLY
+    fun isParallelReadOnly(name: String, arguments: JSONObject = JSONObject()): Boolean =
+        find(effectiveName(name, arguments))?.concurrency == ToolConcurrency.PARALLEL_READ_ONLY
+
+    /** Resolves a compact operation to the legacy primitive used by the executor and policy gates. */
+    fun effectiveName(name: String, arguments: JSONObject = JSONObject()): String = when (name) {
+        "ui_action" -> when (arguments.optString("action").lowercase()) {
+            "tap" -> if (arguments.has("index")) "tap_element" else "tap"
+            "long_press" -> if (arguments.has("index")) "long_press_element" else "long_press"
+            "swipe" -> "swipe"
+            "scroll" -> if (arguments.has("index")) "scroll_element" else "scroll"
+            "input" -> "input_text"
+            "clear" -> "clear_text"
+            "key" -> "press_key"
+            "wait" -> when (arguments.optString("condition", "duration")) {
+                "text" -> "wait_for_text"
+                "package" -> "wait_for_package"
+                else -> "wait"
+            }
+            "open_system_panel" -> "open_system_panel"
+            else -> name
+        }
+        "app_action" -> when (arguments.optString("action")) {
+            "search" -> "search_apps"
+            "launch" -> "launch_app"
+            "open_uri" -> "open_uri"
+            else -> name
+        }
+        "device_info" -> when (arguments.optString("operation")) {
+            "context" -> "get_current_context"
+            "status" -> "device_status"
+            "network" -> "network_info"
+            "environment" -> "get_device_environment"
+            "top_memory" -> "top_memory_apps"
+            "top_storage" -> "top_storage_apps"
+            else -> name
+        }
+        "device_control" -> when (arguments.optString("operation")) {
+            "alarm" -> "set_alarm"
+            "timer" -> "set_timer"
+            "media" -> "media_control"
+            "volume" -> "set_volume"
+            else -> name
+        }
+        "clipboard" -> when (arguments.optString("operation")) {
+            "get" -> "get_clipboard"
+            "set" -> "set_clipboard"
+            "paste" -> "paste_text"
+            else -> name
+        }
+        "file_ops" -> when (arguments.optString("operation")) {
+            "read" -> "read_file"
+            "write" -> "write_file"
+            "edit" -> "edit_file"
+            "search" -> "search_code"
+            "list" -> "list_directory"
+            else -> name
+        }
+        "skill" -> when (arguments.optString("operation")) {
+            "list" -> "skills_list"
+            "read" -> "skills_read"
+            "resource" -> "skills_read_resource"
+            "curated" -> "skills_list_curated"
+            else -> name
+        }
+        "skill_github" -> if (arguments.optString("operation") == "inspect") {
+            "skills_inspect_github"
+        } else if (arguments.optString("operation") == "install") {
+            "skills_install_from_github"
+        } else name
+        "memory" -> when (arguments.optString("operation")) {
+            "get" -> "memory_get"
+            "write" -> "memory_write"
+            else -> name
+        }
+        else -> name
+    }
 
     fun rootDenied(name: String, arguments: JSONObject, rootAvailable: Boolean): Boolean {
         if (rootAvailable) return false
-        if (rootRequirement(name) == RootRequirement.REQUIRED) return true
-        return when (name) {
+        if (rootRequirement(name, arguments) == RootRequirement.REQUIRED) return true
+        return when (effectiveName(name, arguments)) {
             "terminal" -> arguments.optString("identity").equals("root", ignoreCase = true)
             "press_key" -> arguments.optString("button").equals("PASTE", ignoreCase = true)
             else -> false
@@ -135,6 +216,12 @@ internal object AgentToolRequirements {
     private fun projectUnprivileged(function: JSONObject) {
         val properties = function.getJSONObject("parameters").optJSONObject("properties")
         when (function.getString("name")) {
+            "device_info" -> properties?.optJSONObject("operation")?.put(
+                "enum", JSONArray().put("context").put("status").put("network").put("environment"),
+            )
+            "ui_action" -> properties?.optJSONObject("button")?.put(
+                "description", "系统按键名称；需要粘贴时使用 clipboard operation=paste。",
+            )
             "terminal" -> {
                 function.put("description", "在当前设备管理普通 Android Shell 或用户选择的 Linux 环境。" +
                     "以 App UID 执行，支持会话、异步任务和后台服务；Linux 内的模拟身份不提供 Android 系统特权。" +

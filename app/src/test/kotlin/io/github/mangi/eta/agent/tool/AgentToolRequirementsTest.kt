@@ -14,7 +14,8 @@ class AgentToolRequirementsTest {
     @Test
     fun everyRegisteredToolHasExactlyOneRequirement() {
         val tools = catalog(root = true).also { CharacterMemoryTools.appendSchemas(it) }
-        assertEquals(AgentToolRequirements.toolNames, tools.names())
+        assertTrue(tools.names().all { AgentToolRequirements.find(it) != null })
+        assertTrue(AgentToolRequirements.toolNames.containsAll(tools.names()))
         assertEquals(tools.length(), tools.names().size)
         assertFalse(tools.toString().contains("rootRequirement"))
     }
@@ -36,14 +37,16 @@ class AgentToolRequirementsTest {
         }
         assertTrue(required.isNotEmpty())
         assertTrue(required.none { it in projected.names() })
-        assertTrue(setOf("terminal", "read_file", "read_image", "observe_screen", "browser_use").all {
+        assertTrue(setOf("terminal", "file_ops", "read_image", "observe_screen", "browser_use").all {
             it in projected.names()
         })
         assertEquals("[\"user\"]", projected.properties("terminal").getJSONObject("identity").getJSONArray("enum").toString())
         assertEquals(2, original.properties("terminal").getJSONObject("identity").getJSONArray("enum").length())
-        assertFalse(projected.properties("press_key").getJSONObject("button").getJSONArray("enum").toString().contains("PASTE"))
+        assertTrue(projected.properties("ui_action").getJSONObject("button").getString("description").contains("clipboard"))
         assertFalse(projected.toString().contains("/data/local/tmp/eta"))
         assertFalse(projected.properties("read_image").getJSONObject("path").toString().contains("Root"))
+        assertEquals(listOf("context", "status", "network", "environment"),
+            projected.properties("device_info").getJSONObject("operation").getJSONArray("enum").stringValues())
     }
 
     @Test
@@ -53,8 +56,8 @@ class AgentToolRequirementsTest {
             notificationsAllowed = false, usageAllowed = false, locationAllowed = false, colorOs = false,
         )
         val names = restricted.project(catalog(root = true)).names()
-        assertTrue(setOf("launch_app", "open_uri", "terminal", "browser_use").all { it in names })
-        assertTrue(setOf("observe_screen", "wait_for_text", "wait_for_package", "recent_notifications", "app_usage_summary", "get_current_location").none { it in names })
+        assertTrue(setOf("app_action", "terminal", "browser_use").all { it in names })
+        assertTrue(setOf("observe_screen", "ui_action", "recent_notifications", "app_usage_summary", "get_current_location").none { it in names })
         assertEquals("ROOT_REQUIRED", restricted.unavailableCode("search_coloros_notes"))
         assertEquals("DEVICE_UNSUPPORTED", restricted.copy(rootAvailable = true).unavailableCode("search_coloros_notes"))
         assertEquals(null, restricted.copy(notificationsAllowed = true).unavailableCode("recent_notifications"))
@@ -107,4 +110,6 @@ class AgentToolRequirementsTest {
     private fun JSONArray.properties(name: String): JSONObject = (0 until length())
         .map { getJSONObject(it).getJSONObject("function") }
         .single { it.getString("name") == name }.getJSONObject("parameters").getJSONObject("properties")
+
+    private fun JSONArray.stringValues(): List<String> = (0 until length()).map(::getString)
 }

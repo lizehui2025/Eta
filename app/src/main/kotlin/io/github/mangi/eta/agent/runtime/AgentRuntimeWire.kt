@@ -644,27 +644,11 @@ internal object AgentRuntimeWire {
     private fun String.boundedText(maxChars: Int): String =
         if (length <= maxChars) this else take((maxChars - TRUNCATED_SUFFIX.length).coerceAtLeast(0)) + TRUNCATED_SUFFIX
 
-    /** detail 防御性截断上限（含省略号）：detail 可能承载工具原始输出，避免单个事件撑爆 Binder 事务预算。 */
-    private const val MAX_WIRE_DETAIL_CHARS = 4_000
-
     /** Free-form answer cap: longer input is truncated so one answer cannot blow the Binder transaction budget. */
     private const val MAX_WIRE_ANSWER_CHARS = 2_000
 
     /** Maximum length of a single option label. */
     private const val MAX_WIRE_OPTION_CHARS = 200
-    private const val WIRE_DETAIL_ELLIPSIS = "…"
-
-    /**
-     * 写 Bundle 前把 detail clamp 到 [MAX_WIRE_DETAIL_CHARS] 以内（超出时以省略号收尾，总长不超过上限）。
-     * 解码端不感知截断；旧数据缺省 detail 仍还原为空串，既有往返语义不变。
-     */
-    private fun String.clampedWireDetail(): String =
-        if (length <= MAX_WIRE_DETAIL_CHARS) {
-            this
-        } else {
-            take((MAX_WIRE_DETAIL_CHARS - WIRE_DETAIL_ELLIPSIS.length).coerceAtLeast(0)) + WIRE_DETAIL_ELLIPSIS
-        }
-
     private fun requireStartRequestWithinBinderBudget(bundle: Bundle) {
         val parcel = Parcel.obtain()
         val sizeBytes = try {
@@ -810,7 +794,7 @@ internal object AgentRuntimeWire {
                 putInt("image_count", event.imageCount)
                 putInt("image_bytes", event.imageBytes)
                 event.success?.let { putBoolean("success", it) }
-                if (event.detail.isNotEmpty()) putString("detail", event.detail.clampedWireDetail())
+                if (event.detail.isNotEmpty()) putString("detail", event.detail)
             }
 
             is AgentEvent.HostedToolStarted -> {
@@ -881,7 +865,7 @@ internal object AgentRuntimeWire {
                 putString("inner_tool_call_id", event.innerToolCallId)
                 putString("result_summary", event.resultSummary)
                 event.success?.let { putBoolean("success", it) }
-                if (event.detail.isNotEmpty()) putString("detail", event.detail.clampedWireDetail())
+                if (event.detail.isNotEmpty()) putString("detail", event.detail)
             }
 
             is AgentEvent.SubagentFinished -> {

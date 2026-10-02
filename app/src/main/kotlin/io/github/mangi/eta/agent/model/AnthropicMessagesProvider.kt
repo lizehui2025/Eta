@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
+import io.github.mangi.eta.core.AndroidAgentLogger
 import java.io.InputStream
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -104,9 +105,6 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
         }
     }
 
-    /** 每次调用新建一个延迟缓存断点对象，避免在请求之间复用同一可变实例。 */
-    private fun ephemeralCacheControl(): JSONObject = JSONObject().put("type", "ephemeral")
-
     private fun buildRequestJson(
         config: AgentModelClient.ModelConfig,
         messages: JSONArray,
@@ -161,33 +159,38 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
             .put("messages", anthropicMessages)
             .also { request ->
                 val system = systemParts.joinToString("\n\n").trim()
+                val breakpoints = PromptCacheBreakpoints.of(CACHE_BREAKPOINT_CAP)
+                val convertedTools = convertTools(tools)
+                // Provider cache invalidation order: tools -> system -> latest message.
+                if (cacheControl) {
+                    convertedTools?.optJSONObject(convertedTools.length() - 1)
+                        ?.let { block -> breakpoints.take()?.let { block.put("cache_control", it) } }
+                }
+                if (cacheControl && breakpoints.dropped > 0) {
+                    AndroidAgentLogger.warnThrottled("anthropic_cache_breakpoints_dropped") {
+                        "Anthropic prompt cache breakpoint budget exhausted; dropped=${breakpoints.dropped}"
+                    }
+                }
                 if (system.isNotBlank()) {
                     if (cacheControl) {
+                        val systemBlock = JSONObject()
+                            .put("type", "text")
+                            .put("text", system)
+                        breakpoints.take()?.let { systemBlock.put("cache_control", it) }
                         request.put(
                             "system",
-                            JSONArray().put(
-                                JSONObject()
-                                    .put("type", "text")
-                                    .put("text", system)
-                                    .put("cache_control", ephemeralCacheControl())
-                            )
+                            JSONArray().put(systemBlock)
                         )
                     } else {
                         request.put("system", system)
                     }
                 }
-                convertTools(tools)?.let { converted ->
-                    if (cacheControl) {
-                        converted.optJSONObject(converted.length() - 1)
-                            ?.put("cache_control", ephemeralCacheControl())
-                    }
-                    request.put("tools", converted)
-                }
+                convertedTools?.let { request.put("tools", it) }
                 if (cacheControl) {
                     val lastContent = anthropicMessages.optJSONObject(anthropicMessages.length() - 1)
                         ?.optJSONArray("content")
                     lastContent?.optJSONObject(lastContent.length() - 1)
-                        ?.put("cache_control", ephemeralCacheControl())
+                        ?.let { block -> breakpoints.take()?.let { block.put("cache_control", it) } }
                 }
                 // typed 请求参数先写入（覆盖默认 max_tokens）；customBody 与推理运行时随后依次接管。
                 RequestOptionsApplicator.applyAnthropic(request, config.requestOptions, config.codingMode)
@@ -195,6 +198,8 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                 ProviderReasoning.applyAnthropicRequest(request, config)
             }
     }
+
+    private const val CACHE_BREAKPOINT_CAP = 4
 
     private fun convertUserContent(content: Any?): JSONArray =
         when (content) {

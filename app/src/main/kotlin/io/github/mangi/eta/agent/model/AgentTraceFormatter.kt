@@ -11,6 +11,16 @@ internal class AgentTraceFormatter {
         // 参数只解析一次：ToolCall 内缓存复用，避免每个分支重复 JSONObject 解析。
         val args = toolCall.parsedArgsOrNull()
         return when (toolCall.name) {
+            "web_search" -> summarizeCanonicalAction("联网搜索", args)
+            "ui_action" -> summarizeCanonicalAction("界面操作", args)
+            "app_action" -> summarizeCanonicalAction("应用操作", args)
+            "device_info" -> summarizeCanonicalAction("设备信息", args)
+            "device_control" -> summarizeCanonicalAction("设备控制", args)
+            "clipboard" -> summarizeCanonicalAction("剪贴板", args)
+            "file_ops" -> summarizeCanonicalAction("文件操作", args)
+            "skill" -> summarizeCanonicalAction("技能", args)
+            "skill_github" -> summarizeCanonicalAction("GitHub 技能", args)
+            "memory" -> summarizeCanonicalAction("记忆", args)
             BROWSER_TOOL_NAME -> summarizeBrowserArguments(args)
             "open_uri" -> summarizeOpenUriArguments(args)
             "terminal" -> summarizeTerminalArguments(args)
@@ -68,6 +78,13 @@ internal class AgentTraceFormatter {
         }
     }
 
+    private fun summarizeCanonicalAction(label: String, arguments: JSONObject?): String {
+        val operation = arguments?.optString("action")?.ifBlank { null }
+            ?: arguments?.optString("operation")?.ifBlank { null }
+            ?: return label
+        return "$label · $operation"
+    }
+
     /** 命令以脱敏后的用户可见投影进入运行轨迹；日志仍只记录长度。 */
     fun displayCommand(toolCall: AgentModelClient.ToolCall): String? =
         if (toolCall.name == "terminal" || toolCall.name == "run_command") {
@@ -75,7 +92,7 @@ internal class AgentTraceFormatter {
                 toolCall.parsedArgsOrNull()
                     ?.optString("command")
                     ?.trim()
-                    ?.takeIf { it.isNotBlank() && it.length <= MAX_DISPLAY_COMMAND_CHARS }
+                    ?.takeIf { it.isNotBlank() }
                     ?.redactDisplaySecrets()
             }.getOrNull()
         } else {
@@ -355,9 +372,179 @@ internal class AgentTraceFormatter {
             "search_code" -> codeSearchDetail(result)
             "spawn_agents" -> subagentsDetail(result)
             "terminal", "run_command" -> terminalResultDetail(result)
+            "file_ops" -> canonicalFileOpsDetail(argumentsJson, result)
+            "web_search" -> webSearchDetail(result)
+            BROWSER_TOOL_NAME -> browserDetail(result)
+            else -> genericResultDetail(toolName, result)
+        }
+        // 展开详情不能再做展示层截断。工具自身返回的分页/容量限制仍由结果中的
+        // truncated、stdout_truncated 等字段明确标记，这里只负责完整呈现已返回内容。
+        return detail
+    }
+
+    private fun genericResultDetail(
+        toolName: String,
+        result: AgentModelClient.ToolResult,
+    ): String {
+        if (result.sensitive || AgentSensitiveToolPolicy.isSensitive(toolName)) return ""
+        val json = parseResultJson(result) ?: return result.content.trim().redactDisplaySecrets()
+        return readableJsonDetail(json)
+    }
+
+    /** 将搜索结果投影成 RikkaHub 风格的结果列表，而不是把供应商 JSON 原样放入卡片。 */
+    private fun webSearchDetail(result: AgentModelClient.ToolResult): String {
+        if (result.sensitive) return ""
+        val json = parseResultJson(result) ?: return result.content.trim().redactDisplaySecrets()
+        val builder = StringBuilder()
+        if (!json.optBoolean("ok", true)) return readableJsonDetail(json)
+        json.optString("query").takeIf(String::isNotBlank)?.let {
+            builder.append("搜索：").append(it.redactDisplaySecrets()).append('\n')
+        }
+        json.optString("provider").takeIf(String::isNotBlank)?.let {
+            builder.append("来源：").append(it.redactDisplaySecrets()).append('\n')
+        }
+        val results = json.optJSONArray("results")
+        if (results != null) {
+            builder.append("\n结果 · ").append(results.length()).append(" 条")
+            for (index in 0 until results.length()) {
+                val item = results.optJSONObject(index) ?: continue
+                val title = item.optString("title").ifBlank { "未命名结果" }
+                builder.append("\n\n").append(index + 1).append(". ")
+                    .append(title.redactDisplaySecrets())
+                item.optString("url").takeIf(String::isNotBlank)?.let {
+                    builder.append('\n').append(it.redactDisplaySecrets())
+                }
+                item.optString("snippet").takeIf(String::isNotBlank)?.let {
+                    builder.append('\n').append(it.redactDisplaySecrets())
+                }
+                item.optString("retrieved_at").takeIf(String::isNotBlank)?.let {
+                    builder.append("\n检索时间：").append(it)
+                }
+            }
+        }
+        json.optString("text").takeIf(String::isNotBlank)?.let {
+            builder.append("\n\n正文\n").append(it.redactDisplaySecrets())
+            json.optInt("offset", 0).takeIf { offset -> offset > 0 }?.let { offset ->
+                builder.append("\n起始偏移：").append(offset)
+            }
+            if (json.optBoolean("has_more", false)) builder.append("\n后续内容可继续读取")
+        }
+        return builder.toString().trim().ifBlank { readableJsonDetail(json) }
+    }
+
+    /** 浏览器结果保留页面标题、地址、正文和元素信息，但隐藏协议字段和 JSON 结构。 */
+    private fun browserDetail(result: AgentModelClient.ToolResult): String {
+        if (result.sensitive) return ""
+        val json = parseResultJson(result) ?: return result.content.trim().redactDisplaySecrets()
+        val builder = StringBuilder()
+        json.optString("action").takeIf(String::isNotBlank)?.let {
+            builder.append("操作：").append(it.browserActionLabel())
+        }
+        val page = json.optJSONObject("page")
+            ?: json.optJSONObject("page_info")
+            ?: json.optJSONObject("pageInfo")
+        val sources = listOfNotNull(json, page)
+        fun firstString(vararg keys: String): String? = sources.asSequence()
+            .mapNotNull { source -> keys.asSequence().map(source::optString).firstOrNull(String::isNotBlank) }
+            .firstOrNull()
+        firstString("title")?.let { builder.appendLine("标题：${it.redactDisplaySecrets()}") }
+        firstString("url", "current_url", "currentUrl", "final_url", "finalUrl")?.let {
+            builder.appendLine("地址：${it.redactDisplaySecrets()}")
+        }
+        firstString("text", "readable", "content")?.let {
+            builder.appendLine("\n正文：")
+            builder.append(it.redactDisplaySecrets())
+        }
+        json.firstNonNegativeInt("element_count", "elementCount", "elements_count")?.let {
+            builder.appendLine("\n元素：$it 个")
+        }
+        return builder.toString().trim().ifBlank { readableJsonDetail(json) }
+    }
+
+    /** 通用工具结果投影：完整保留字段和值，但不显示 JSON 括号、键名引号或转义结构。 */
+    private fun readableJsonDetail(json: JSONObject): String = buildString {
+        appendReadableObject(this, json, 0)
+    }.trim()
+
+    private fun appendReadableObject(builder: StringBuilder, json: JSONObject, depth: Int) {
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            if (key == "ok" || key == "tool") continue
+            val value = json.opt(key)
+            appendReadableEntry(builder, key, value, depth)
+        }
+        if (json.optBoolean("ok", true) && builder.isEmpty()) builder.append("已完成")
+    }
+
+    private fun appendReadableEntry(builder: StringBuilder, key: String, value: Any?, depth: Int) {
+        val indent = "  ".repeat(depth)
+        val label = displayFieldLabel(key)
+        when (value) {
+            is JSONObject -> {
+                builder.append(indent).append(label).append('\n')
+                appendReadableObject(builder, value, depth + 1)
+            }
+            is JSONArray -> {
+                builder.append(indent).append(label).append(" · ").append(value.length()).append(" 项")
+                for (index in 0 until value.length()) {
+                    builder.append('\n').append(indent).append("  ").append(index + 1).append(". ")
+                    appendReadableInline(builder, value.opt(index), depth + 1)
+                }
+                builder.append('\n')
+            }
+            JSONObject.NULL -> Unit
+            else -> builder.append(indent).append(label).append("：")
+                .append(displayFieldValue(value.toString())).append('\n')
+        }
+    }
+
+    private fun appendReadableInline(builder: StringBuilder, value: Any?, depth: Int) {
+        when (value) {
+            is JSONObject -> {
+                builder.append('\n')
+                appendReadableObject(builder, value, depth + 1)
+            }
+            is JSONArray -> builder.append("包含 ").append(value.length()).append(" 项")
+            JSONObject.NULL -> Unit
+            else -> builder.append(displayFieldValue(value.toString()))
+        }
+    }
+
+    private fun displayFieldLabel(key: String): String = when (key) {
+        "message" -> "说明"
+        "code" -> "状态码"
+        "url", "current_url", "currentUrl", "final_url", "finalUrl" -> "地址"
+        "title" -> "标题"
+        "text", "content", "bodyMarkdown", "readable" -> "正文"
+        "path", "relativePath", "skillFilePath" -> "路径"
+        "count", "total" -> "数量"
+        "has_more", "hasMore" -> "还有后续"
+        "truncated" -> "返回不完整"
+        "retrieved_at" -> "检索时间"
+        else -> key.replace('_', ' ')
+    }
+
+    private fun displayFieldValue(value: String): String = value
+        .redactDisplaySecrets()
+        .replace("\\n", "\n")
+
+    private fun canonicalFileOpsDetail(
+        argumentsJson: String,
+        result: AgentModelClient.ToolResult,
+    ): String {
+        val operation = runCatching { JSONObject(argumentsJson) }
+            .getOrNull()
+            ?.optString("operation")
+            ?.lowercase()
+        return when (operation) {
+            "read" -> readFileDetail(argumentsJson, result)
+            "write" -> writeFileDetail(argumentsJson, result)
+            "edit" -> editFileDetail(argumentsJson, result)
+            "list" -> listDirectoryDetail(argumentsJson, result)
+            "search" -> codeSearchDetail(result)
             else -> ""
         }
-        return if (detail.length <= MAX_DETAIL_CHARS) detail else detail.take(MAX_DETAIL_CHARS) + "…"
     }
 
     /** 复用缓存解析的详情入口：调用方已有 ToolCall 时避免重复解析参数。 */
@@ -394,6 +581,9 @@ internal class AgentTraceFormatter {
             },
         )
         if (offset > 0) builder.append("（自字节 $offset 起）")
+        if (content.isNotBlank()) {
+            builder.append("\n\n内容：\n").append(content.redactDisplaySecrets())
+        }
         if (json.optBoolean("truncated", false)) {
             builder.append("\n已截断，可继续用 offset_bytes 读取后续内容")
         }
@@ -415,12 +605,12 @@ internal class AgentTraceFormatter {
             .append(" · ").append(lineCountLabel(lines)).append(" · ").append(bytes).append(" 字节")
         val diff = json.optString("diff").takeIf { it.isNotBlank() }
         if (diff != null) {
-            builder.append("\n\n旧内容对比：\n").append(diff)
+            builder.append("\n\n旧内容对比：\n").append(diff.redactDisplaySecrets())
         } else {
-            contentPreview(content, MAX_DETAIL_PREVIEW_LINES, MAX_DETAIL_PREVIEW_CHARS)?.let { preview ->
+            content.takeIf(String::isNotBlank)?.let { fullContent ->
                 builder.append("\n\n")
-                    .append(if (append) "追加内容预览：" else "新内容预览：")
-                    .append('\n').append(preview)
+                    .append(if (append) "追加内容：" else "新内容：")
+                    .append('\n').append(fullContent.redactDisplaySecrets())
             }
         }
         return builder.toString()
@@ -440,9 +630,9 @@ internal class AgentTraceFormatter {
             if (builder.isNotEmpty()) builder.append('\n')
             builder.append("替换 ").append(replacements).append(" 处")
         }
-        val change = AgentTextDiff.summarizeReplacement(oldText, newText, MAX_DETAIL_DIFF_CHARS)
+        val change = AgentTextDiff.summarizeReplacementFull(oldText, newText)
             ?: "非文本内容，无法展示差异"
-        builder.append("\n\n").append(change)
+        builder.append("\n\n").append(change.redactDisplaySecrets())
         return builder.toString()
     }
 
@@ -464,8 +654,6 @@ internal class AgentTraceFormatter {
             builder,
             title = "目录条目",
             text = json.optString("entries_text"),
-            maxLines = MAX_DETAIL_TERMINAL_LINES,
-            maxChars = MAX_DETAIL_TERMINAL_CHARS,
             truncatedFlag = false,
         )
         return builder.toString()
@@ -489,8 +677,6 @@ internal class AgentTraceFormatter {
                 builder,
                 title = "命中列表",
                 text = hits.joinToString("\n"),
-                maxLines = MAX_DETAIL_PREVIEW_LINES,
-                maxChars = MAX_DETAIL_PREVIEW_CHARS,
                 truncatedFlag = false,
             )
         }
@@ -519,14 +705,11 @@ internal class AgentTraceFormatter {
                 .mapNotNull { array.optString(it).takeIf { s -> s.isNotBlank() } }
                 .map(::sanitizeSummaryValue)
             if (names.isNotEmpty()) {
-                val shown = names.take(MAX_SUBAGENT_FILTERED_TOOLS_SHOWN)
-                builder.append("\n被模式过滤的工具：").append(shown.joinToString("、"))
-                if (names.size > shown.size) builder.append("等 ${names.size} 个")
+                builder.append("\n被模式过滤的工具：").append(names.joinToString("、"))
             }
         }
         val results = json.optJSONArray("results") ?: return builder.toString()
-        val shown = results.length().coerceAtMost(MAX_SUBAGENT_DETAIL_ITEMS)
-        for (i in 0 until shown) {
+        for (i in 0 until results.length()) {
             val item = results.optJSONObject(i) ?: continue
             val label = sanitizeSummaryValue(item.optString("label")).takeIf { it.isNotBlank() } ?: "子代理${i + 1}"
             val duration = item.optLong("duration_ms", -1)
@@ -548,7 +731,6 @@ internal class AgentTraceFormatter {
             }.joinToString(" · ")
             builder.append("\n").append(line)
         }
-        if (results.length() > shown) builder.append("\n…共 $total 项")
         return builder.toString()
     }
 
@@ -563,16 +745,12 @@ internal class AgentTraceFormatter {
             builder,
             title = "输出（stdout）",
             text = json.optString("stdout"),
-            maxLines = MAX_DETAIL_TERMINAL_LINES,
-            maxChars = MAX_DETAIL_TERMINAL_CHARS,
             truncatedFlag = json.optBoolean("stdout_truncated", false),
         )
         appendDetailBlock(
             builder,
             title = "错误输出（stderr）",
             text = json.optString("stderr"),
-            maxLines = MAX_DETAIL_STDERR_LINES,
-            maxChars = MAX_DETAIL_STDERR_CHARS,
             truncatedFlag = json.optBoolean("stderr_truncated", false),
         )
         return builder.toString()
@@ -582,21 +760,12 @@ internal class AgentTraceFormatter {
         builder: StringBuilder,
         title: String,
         text: String,
-        maxLines: Int,
-        maxChars: Int,
         truncatedFlag: Boolean,
     ) {
         val normalized = text.trim()
         if (normalized.isEmpty()) return
-        val allLines = normalized.lines()
-        var body = allLines.take(maxLines).joinToString("\n")
-        var capped = allLines.size > maxLines || truncatedFlag
-        if (body.length > maxChars) {
-            body = body.take(maxChars)
-            capped = true
-        }
-        builder.append("\n\n").append(title).append('\n').append(body)
-        if (capped) builder.append("\n…（输出已截断）")
+        builder.append("\n\n").append(title).append('\n').append(normalized.redactDisplaySecrets())
+        if (truncatedFlag) builder.append("\n（工具返回不完整，可继续分页读取）")
     }
 
     private fun contentPreview(content: String, maxLines: Int, maxChars: Int): String? {
@@ -990,23 +1159,12 @@ internal class AgentTraceFormatter {
 
     private companion object {
         const val BROWSER_TOOL_NAME = "browser_use"
-        const val MAX_DISPLAY_COMMAND_CHARS = 4_000
         const val MAX_QUERY_SUMMARY_CHARS = 30
         const val MAX_LISTED_APP_NAMES = 3
         const val MAX_TODO_PREVIEW_ITEMS = 7
         const val MAX_TERMINAL_PREVIEW_LINES = 3
         const val MAX_TERMINAL_PREVIEW_CHARS = 240
         const val MAX_FILE_NAME_SUMMARY_CHARS = 60
-        const val MAX_DETAIL_CHARS = 1_600
-        const val MAX_DETAIL_DIFF_CHARS = 1_000
-        const val MAX_DETAIL_PREVIEW_LINES = 12
-        const val MAX_DETAIL_PREVIEW_CHARS = 800
-        const val MAX_DETAIL_TERMINAL_LINES = 14
-        const val MAX_DETAIL_TERMINAL_CHARS = 1_200
-        const val MAX_DETAIL_STDERR_LINES = 8
-        const val MAX_DETAIL_STDERR_CHARS = 500
-        const val MAX_SUBAGENT_DETAIL_ITEMS = 12
-        const val MAX_SUBAGENT_FILTERED_TOOLS_SHOWN = 5
         val SENSITIVE_ASSIGNMENT = Regex(
             """(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|TOKEN|PASSWORD|PASSWD|SECRET)[A-Z0-9_]*)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s;&|]+)"""
         )

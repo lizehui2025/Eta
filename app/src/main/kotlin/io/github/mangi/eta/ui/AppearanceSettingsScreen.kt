@@ -1,14 +1,29 @@
 package io.github.mangi.eta.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -18,7 +33,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
@@ -32,9 +52,11 @@ import io.github.mangi.eta.data.model.MIN_INTERFACE_SCALE
 import io.github.mangi.eta.data.model.normalizeInterfaceScale
 import io.github.mangi.eta.data.repository.AppearanceSettingsRepository
 import io.github.mangi.eta.ui.app.LocalAppearanceSettings
+import io.github.mangi.eta.ui.app.seedColor
 import io.github.mangi.eta.ui.components.EtaArrowPreference
 import io.github.mangi.eta.ui.components.EtaCard
 import io.github.mangi.eta.ui.components.EtaOverlayDropdownPreference
+import io.github.mangi.eta.ui.components.EtaPreference
 import io.github.mangi.eta.ui.components.EtaPreferenceDivider
 import io.github.mangi.eta.ui.components.EtaPreferenceGroup
 import io.github.mangi.eta.ui.components.EtaPreferenceGroupTitle
@@ -46,8 +68,10 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.SliderDefaults
+import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.basic.TooltipBox
 import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -94,7 +118,7 @@ internal fun AppearanceSettingsScreen(onBack: () -> Unit) {
     )
     val accentColors = AppearanceAccentColor.entries
     val accentLabels = listOf(
-        stringResource(R.string.appearance_accent_system),
+        stringResource(if (appearance.monetEnabled) R.string.appearance_accent_system else R.string.appearance_accent_default),
         stringResource(R.string.appearance_accent_blue),
         stringResource(R.string.appearance_accent_purple),
         stringResource(R.string.appearance_accent_pink),
@@ -140,11 +164,78 @@ internal fun AppearanceSettingsScreen(onBack: () -> Unit) {
                     summary = stringResource(R.string.appearance_monet_summary),
                     checked = appearance.monetEnabled,
                     onCheckedChange = { enabled ->
-                        update { current -> current.copy(monetEnabled = enabled) }
+                        update { current -> current.copy(monetEnabled = enabled, accentColor = AppearanceAccentColor.SYSTEM) }
+                    },
+                )
+                EtaPreferenceDivider(hasLeading = false)
+                EtaPreference(
+                    title = stringResource(R.string.appearance_accent_color),
+                    summary = accentLabels[appearance.accentColor.ordinal],
+                    bottomAction = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            accentColors.forEachIndexed { index, accent ->
+                                val selected = appearance.accentColor == accent
+                                val scale by animateFloatAsState(
+                                    targetValue = if (selected) 1f else 0.88f,
+                                    animationSpec = tween(180),
+                                    label = "accent_swatch_scale",
+                                )
+                                val swatchColor = if (accent == AppearanceAccentColor.SYSTEM) {
+                                    MiuixTheme.colorScheme.primary
+                                } else {
+                                    accent.seedColor()
+                                }
+                                TooltipBox(text = accentLabels[index]) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .graphicsLayer { scaleX = scale; scaleY = scale }
+                                            .border(
+                                                width = if (selected) 2.dp else 1.dp,
+                                                color = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.outline,
+                                                shape = CircleShape,
+                                            )
+                                            .padding(4.dp)
+                                            .background(swatchColor, CircleShape)
+                                            .selectable(
+                                                selected = selected,
+                                                role = Role.RadioButton,
+                                                onClick = {
+                                                    update { current ->
+                                                        current.copy(
+                                                            accentColor = accent,
+                                                            monetEnabled = if (accent == AppearanceAccentColor.SYSTEM) current.monetEnabled else false,
+                                                        )
+                                                    }
+                                                },
+                                            )
+                                            .semantics { contentDescription = accentLabels[index] },
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        if (selected || accent == AppearanceAccentColor.SYSTEM) {
+                                            Icon(
+                                                imageVector = if (selected) Icons.Rounded.Check else Icons.Rounded.Palette,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp),
+                                                tint = if (accent == AppearanceAccentColor.YELLOW) {
+                                                    Color(0xFF28313A)
+                                                } else {
+                                                    Color.White
+                                                },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     },
                 )
                 AnimatedVisibility(
-                    visible = appearance.monetEnabled,
+                    visible = appearance.monetEnabled || appearance.accentColor != AppearanceAccentColor.SYSTEM,
                     enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(),
                     exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(),
                 ) {
@@ -158,18 +249,6 @@ internal fun AppearanceSettingsScreen(onBack: () -> Unit) {
                             onSelectedIndexChange = { index ->
                                 paletteStyles.getOrNull(index)?.let { style ->
                                     update { current -> current.copy(paletteStyle = style) }
-                                }
-                            },
-                        )
-                        EtaPreferenceDivider(hasLeading = false)
-                        EtaOverlayDropdownPreference(
-                            title = stringResource(R.string.appearance_accent_color),
-                            summary = accentLabels[appearance.accentColor.ordinal],
-                            items = accentLabels,
-                            selectedIndex = appearance.accentColor.ordinal,
-                            onSelectedIndexChange = { index ->
-                                accentColors.getOrNull(index)?.let { accent ->
-                                    update { current -> current.copy(accentColor = accent) }
                                 }
                             },
                         )

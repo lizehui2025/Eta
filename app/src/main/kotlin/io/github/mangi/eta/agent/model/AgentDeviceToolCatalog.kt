@@ -5,6 +5,11 @@ import org.json.JSONObject
 
 /** 常用设备能力的结构化 schema；按风险组决定是否向模型公开。 */
 internal object AgentDeviceToolCatalog {
+    /** Expose only the independent sensitive tools when the compact catalog is active. */
+    fun appendIndependentSensitiveReadTools(tools: JSONArray) = appendSensitiveReadTools(tools)
+
+    fun appendIndependentSensitiveActionTools(tools: JSONArray) = appendSensitiveActionTools(tools)
+
     fun appendTo(
         tools: JSONArray,
         directTools: Boolean,

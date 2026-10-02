@@ -1,11 +1,10 @@
 package io.github.mangi.eta.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,11 +18,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ChevronRight
-import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -148,10 +144,29 @@ private fun SubagentStepRow(step: ToolStepUi) {
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
                 .clickable(enabled = hasDetail) { expanded = !expanded }
-                .padding(horizontal = 6.dp, vertical = 6.dp),
+                .padding(horizontal = 2.dp, vertical = 5.dp),
         ) {
+            Column(
+                modifier = Modifier
+                    .width(18.dp)
+                    .heightIn(min = 34.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(step.status.statusColor()),
+                )
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(18.dp)
+                        .background(MiuixTheme.colorScheme.outline.copy(alpha = 0.3f)),
+                )
+            }
+            Spacer(modifier = Modifier.width(7.dp))
             Icon(
                 imageVector = iconForTool(step.toolName),
                 contentDescription = null,
@@ -159,23 +174,23 @@ private fun SubagentStepRow(step: ToolStepUi) {
                 tint = step.status.statusColor(),
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = step.summary.ifBlank { toolDisplayName(step.toolName) },
-                style = MiuixTheme.textStyles.body2,
-                color = MiuixTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = step.status.statusLabel(),
-                style = MiuixTheme.textStyles.footnote2,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = step.summary.ifBlank { toolDisplayName(step.toolName) },
+                    style = MiuixTheme.textStyles.body2,
+                    color = MiuixTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = step.status.statusLabel(),
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+            }
             if (hasDetail) {
-                Spacer(modifier = Modifier.width(2.dp))
-                Icon(
-                    imageVector = if (expanded) Icons.Rounded.ExpandMore else Icons.Rounded.ChevronRight,
+                ExpandChevron(
+                    expanded = expanded,
                     contentDescription = null,
                     modifier = Modifier.size(13.dp),
                     tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.6f),
@@ -184,18 +199,29 @@ private fun SubagentStepRow(step: ToolStepUi) {
         }
         AnimatedVisibility(
             visible = expanded && hasDetail,
-            enter = fadeIn(tween(120)),
-            exit = fadeOut(tween(80)),
+            enter = panelExpandEnter(),
+            exit = panelCollapseExit(),
         ) {
-            SelectionContainer {
-                Text(
-                    text = step.detail,
-                    style = MiuixTheme.textStyles.footnote2.copy(fontFamily = FontFamily.Monospace),
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 26.dp, end = 6.dp, top = 2.dp, bottom = 6.dp),
-                )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 26.dp, end = 6.dp, top = 2.dp, bottom = 6.dp),
+            ) {
+                SelectionContainer {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp)
+                            .verticalScroll(rememberScrollState())
+                            .horizontalScroll(rememberScrollState()),
+                    ) {
+                        Text(
+                            text = step.detail,
+                            style = MiuixTheme.textStyles.footnote2.copy(fontFamily = FontFamily.Monospace),
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                    }
+                }
             }
         }
     }

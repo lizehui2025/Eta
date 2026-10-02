@@ -15,6 +15,7 @@ internal class AgentRequestProjectionCache(
     private val limit: Int = DEFAULT_LIMIT,
 ) {
     private val chatMessages = IdentityHashMap<JSONObject, JSONObject>()
+    private val chatMessagesWithoutReasoning = IdentityHashMap<JSONObject, JSONObject>()
     private val responsesInputs = IdentityHashMap<JSONObject, JSONArray>()
     private val anthropicMessages = IdentityHashMap<JSONObject, JSONObject>()
     private val anthropicMessagesWithoutCacheControl = IdentityHashMap<JSONObject, JSONObject>()
@@ -24,12 +25,11 @@ internal class AgentRequestProjectionCache(
         stripReasoning: Boolean,
         project: (JSONObject) -> JSONObject,
     ): JSONObject {
-        // 降级重试只有一次且会去掉 reasoning_content；此时不污染正常投影缓存。
-        if (stripReasoning) return project(source)
-        chatMessages[source]?.let { return it }
+        val target = if (stripReasoning) chatMessagesWithoutReasoning else chatMessages
+        target[source]?.let { return it }
         return project(source).also { projected ->
-            if (chatMessages.size >= limit) chatMessages.clear()
-            chatMessages[source] = projected
+            if (target.size >= limit) target.clear()
+            target[source] = projected
         }
     }
 

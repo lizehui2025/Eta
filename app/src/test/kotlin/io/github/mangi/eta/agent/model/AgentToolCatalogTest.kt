@@ -9,6 +9,43 @@ import org.junit.Test
 
 class AgentToolCatalogTest {
     @Test
+    fun defaultCatalogPublishesOnlyCanonicalDomainTools() {
+        val names = AgentToolCatalog.build(
+            terminalTools = true,
+            browserTools = true,
+            memoryTools = true,
+            skillGitHubDiscovery = true,
+            skillGitHubInstall = true,
+        ).toolNames()
+        assertEquals(names.size, names.toSet().size)
+        assertTrue(names.size <= 18)
+        assertTrue(names.containsAll(setOf(
+            "observe_screen", "ui_action", "app_action", "device_info", "device_control",
+            "browser_use", "terminal", "file_ops", "read_image", "skill", "skill_github",
+            "memory", "ask_user", "todo_write", "spawn_agents",
+        )))
+        assertFalse("tap_element" in names)
+        assertFalse("read_file" in names)
+        assertFalse("skills_list" in names)
+    }
+
+    @Test
+    fun planProjectsReadOperationsOnlyFromCanonicalTools() {
+        val all = AgentToolCatalog.build(true, true, memoryTools = true)
+        val plan = projectPlanTools(all).toolNames().toSet()
+        assertTrue(plan.containsAll(setOf("observe_screen", "app_action", "device_info", "file_ops", "skill", "memory", "read_image")))
+        assertFalse("ui_action" in plan)
+        assertFalse("terminal" in plan)
+        assertFalse("device_control" in plan)
+        assertEquals(listOf("read", "search", "list"), projectPlanTools(all).function("file_ops")
+            .getJSONObject("parameters").getJSONObject("properties").getJSONObject("operation")
+            .getJSONArray("enum").stringValues())
+        assertEquals(listOf("search"), projectPlanTools(all).function("app_action")
+            .getJSONObject("parameters").getJSONObject("properties").getJSONObject("action")
+            .getJSONArray("enum").stringValues())
+    }
+
+    @Test
     fun featureFlagsProduceExactUniqueToolUnions() {
         val base = AgentToolCatalog.build(
             terminalTools = false,
@@ -30,7 +67,8 @@ class AgentToolCatalogTest {
         assertTrue(
             base.containsAll(
                 setOf(
-                    "observe_screen", "skills_list", "skills_read", "skills_read_resource", "todo_write",
+                    "observe_screen", "ui_action", "app_action", "device_info", "device_control",
+                    "clipboard", "skill", "ask_user", "todo_write", "spawn_agents",
                 ),
             ),
         )
@@ -66,19 +104,27 @@ class AgentToolCatalogTest {
     }
 
     @Test
-    fun elementToolsRequireObservationIdFromTheSameObservation() {
+    fun uiActionDeclaresObservationPairingAndAllSupportedActions() {
         val tools = AgentToolCatalog.build(terminalTools = false, browserTools = false)
+        val function = tools.function("ui_action")
+        val parameters = function.getJSONObject("parameters")
+        val properties = parameters.getJSONObject("properties")
+        assertEquals(
+            listOf("tap", "long_press", "swipe", "scroll", "input", "clear", "key", "wait", "open_system_panel"),
+            properties.getJSONObject("action").getJSONArray("enum").stringValues(),
+        )
+        assertEquals("string", properties.getJSONObject("observation_id").getString("type"))
+        assertTrue(function.getString("description").contains("observe_screen"))
+    }
 
-        listOf("tap_element", "long_press_element", "scroll_element").forEach { name ->
-            val function = tools.function(name)
-            val parameters = function.getJSONObject("parameters")
-            val properties = parameters.getJSONObject("properties")
-
-            assertEquals("string", properties.getJSONObject("observation_id").getString("type"))
-            assertTrue("observation_id must be required for $name", "observation_id" in parameters.requiredNames())
-            assertTrue(function.getString("description").contains("同一次"))
-            assertTrue(function.getString("description").contains("observe_screen"))
-            assertTrue(function.getString("description").contains("重新观察"))
+    @Test
+    fun canonicalObjectSchemasRejectUnknownFields() {
+        val tools = AgentToolCatalog.build(terminalTools = true, browserTools = true)
+        tools.toolNames().forEach { name ->
+            val parameters = tools.function(name).getJSONObject("parameters")
+            if (parameters.getString("type") == "object") {
+                assertFalse("$name must be a closed canonical contract", parameters.optBoolean("additionalProperties", true))
+            }
         }
     }
 
@@ -106,59 +152,29 @@ class AgentToolCatalogTest {
         val tools = AgentToolCatalog.build(terminalTools = false, browserTools = false)
         val expectedDirections = listOf("up", "down", "left", "right")
 
-        listOf("scroll", "scroll_element").forEach { name ->
-            val function = tools.function(name)
-            val directions = function
-                .getJSONObject("parameters")
-                .getJSONObject("properties")
-                .getJSONObject("direction")
-                .getJSONArray("enum")
-                .stringValues()
-
-            assertEquals(expectedDirections, directions)
-            assertTrue(function.getString("description").contains("down 显示下方内容"))
-            assertTrue(function.getString("description").contains("up 显示上方内容"))
-        }
+        val function = tools.function("ui_action")
+        val directions = function.getJSONObject("parameters").getJSONObject("properties")
+            .getJSONObject("direction").getJSONArray("enum").stringValues()
+        assertEquals(expectedDirections, directions)
     }
 
     @Test
-    fun indexedTextToolsDescribeObservationPairingWithoutRequiringItForFocusedInput() {
+    fun uiActionTextOperationsDescribeObservationPairingWithoutRequiringItForFocusedInput() {
         val tools = AgentToolCatalog.build(terminalTools = false, browserTools = false)
-
-        listOf("replace_text", "clear_text").forEach { name ->
-            val function = tools.function(name)
-            val parameters = function.getJSONObject("parameters")
-            val properties = parameters.getJSONObject("properties")
-
-            assertEquals("string", properties.getJSONObject("observation_id").getString("type"))
-            assertFalse("observation_id remains optional when $name targets focus", "observation_id" in parameters.requiredNames())
-            assertTrue(function.getString("description").contains("index 与 observation_id"))
-            assertTrue(properties.getJSONObject("index").getString("description").contains("同时传入"))
-        }
-
-        val inputText = tools.function("input_text")
-        val inputProperties = inputText
-            .getJSONObject("parameters")
-            .getJSONObject("properties")
-        assertEquals("integer", inputProperties.getJSONObject("index").getString("type"))
-        assertEquals(
-            "string",
-            inputProperties.getJSONObject("observation_id").getString("type"),
-        )
-        assertTrue(
-            inputProperties.getJSONObject("index").getString("description")
-                .contains("observation_id"),
-        )
+        val parameters = tools.function("ui_action").getJSONObject("parameters")
+        val properties = parameters.getJSONObject("properties")
+        assertEquals("integer", properties.getJSONObject("index").getString("type"))
+        assertEquals("string", properties.getJSONObject("observation_id").getString("type"))
+        assertEquals("string", properties.getJSONObject("text").getString("type"))
+        assertFalse("observation_id is optional for focused input", "observation_id" in parameters.requiredNames())
     }
 
     @Test
     fun textToolsDeclareTheSameLimitsAsRuntime() {
         val tools = AgentToolCatalog.build(terminalTools = false, browserTools = false)
 
-        assertEquals(1_000, tools.maxTextLength("input_text"))
-        assertEquals(4_000, tools.maxTextLength("replace_text"))
-        assertEquals(20_000, tools.maxTextLength("set_clipboard"))
-        assertEquals(20_000, tools.maxTextLength("paste_text"))
+        assertEquals(20_000, tools.maxTextLength("ui_action"))
+        assertEquals(20_000, tools.maxTextLength("clipboard"))
     }
 
     @Test
@@ -184,16 +200,15 @@ class AgentToolCatalogTest {
             browserTools = false,
             memoryTools = false,
         ).toolNames()
-        assertFalse("memory_get" in disabled)
-        assertFalse("memory_write" in disabled)
+        assertFalse("memory" in disabled)
 
         val enabled = AgentToolCatalog.build(
             terminalTools = false,
             browserTools = false,
             memoryTools = true,
         )
-        assertTrue("memory_get" in enabled.toolNames())
-        val write = enabled.function("memory_write")
+        assertTrue("memory" in enabled.toolNames())
+        val write = enabled.function("memory")
         val properties = write.getJSONObject("parameters").getJSONObject("properties")
         assertEquals(3_500, properties.getJSONObject("content").getInt("maxLength"))
         assertEquals(
@@ -211,8 +226,10 @@ class AgentToolCatalogTest {
             memoryTools = true,
             memoryWritable = false,
         ).toolNames()
-        assertTrue("memory_get" in readOnly)
-        assertFalse("memory_write" in readOnly)
+        assertTrue("memory" in readOnly)
+        assertEquals(listOf("get"), AgentToolCatalog.build(false, false, memoryTools = true, memoryWritable = false)
+            .function("memory").getJSONObject("parameters").getJSONObject("properties")
+            .getJSONObject("operation").getJSONArray("enum").stringValues())
 
         val writable = AgentToolCatalog.build(
             terminalTools = false,
@@ -220,8 +237,10 @@ class AgentToolCatalogTest {
             memoryTools = true,
             memoryWritable = true,
         ).toolNames()
-        assertTrue("memory_get" in writable)
-        assertTrue("memory_write" in writable)
+        assertTrue("memory" in writable)
+        assertEquals(listOf("get", "write"), AgentToolCatalog.build(false, false, memoryTools = true)
+            .function("memory").getJSONObject("parameters").getJSONObject("properties")
+            .getJSONObject("operation").getJSONArray("enum").stringValues())
     }
 
     @Test
@@ -261,7 +280,7 @@ class AgentToolCatalogTest {
         val function = AgentToolCatalog.build(
             terminalTools = true,
             browserTools = false,
-        ).function("list_directory")
+        ).function("file_ops")
         val properties = function
             .getJSONObject("parameters")
             .getJSONObject("properties")
@@ -269,9 +288,9 @@ class AgentToolCatalogTest {
         assertTrue(properties.has("offset"))
         assertTrue(properties.has("glob"))
         assertTrue(properties.has("recursive"))
-        assertTrue(function.getString("description").contains("翻页"))
-        assertTrue(function.getString("description").contains("search_code"))
-        assertTrue(function.getString("description").contains("search_files"))
+        assertTrue(function.getString("description").contains("读取、写入、编辑、搜索"))
+        assertEquals(listOf("read", "write", "edit", "search", "list"),
+            properties.getJSONObject("operation").getJSONArray("enum").stringValues())
     }
 
     @Test
@@ -279,10 +298,12 @@ class AgentToolCatalogTest {
         val function = AgentToolCatalog.build(
             terminalTools = true,
             browserTools = false,
-        ).function("search_code")
+        ).function("file_ops")
 
-        assertTrue(function.getString("description").contains("绝对路径"))
-        assertTrue(function.getString("description").contains("INVALID_PATTERN"))
+        val properties = function.getJSONObject("parameters").getJSONObject("properties")
+        assertTrue(properties.has("pattern"))
+        assertTrue(properties.has("query"))
+        assertTrue(properties.has("path"))
     }
 
     private fun JSONArray.toolNames(): List<String> =
@@ -295,6 +316,10 @@ class AgentToolCatalogTest {
             .asSequence()
             .map { index -> getJSONObject(index).getJSONObject("function") }
             .first { function -> function.getString("name") == name }
+
+    private fun JSONArray.functionOrNull(name: String): JSONObject? =
+        (0 until length()).asSequence().map { getJSONObject(it).getJSONObject("function") }
+            .firstOrNull { it.getString("name") == name }
 
     private fun JSONObject.requiredNames(): Set<String> =
         optJSONArray("required")?.stringValues()?.toSet().orEmpty()
@@ -320,12 +345,7 @@ class AgentToolCatalogTest {
         val TERMINAL_TOOLS = setOf(
             "read_image",
             "terminal",
-            "run_command",
-            "read_file",
-            "write_file",
-            "edit_file",
-            "search_code",
-            "list_directory",
+            "file_ops",
         )
     }
 }

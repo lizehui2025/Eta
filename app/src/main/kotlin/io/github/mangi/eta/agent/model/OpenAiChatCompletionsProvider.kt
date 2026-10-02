@@ -409,17 +409,17 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             (delta.opt(key) as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
         }
         val details = delta.optJSONArray("reasoning_details") ?: return ""
-        return buildString {
-            for (index in 0 until details.length()) {
-                val detail = details.optJSONObject(index) ?: continue
-                val key = when (detail.optString("type")) {
-                    "reasoning.text" -> "text"
-                    "reasoning.summary" -> "summary"
-                    else -> continue
-                }
-                (detail.opt(key) as? String)?.let(::append)
+        val text = StringBuilder()
+        val summary = StringBuilder()
+        for (index in 0 until details.length()) {
+            val detail = details.optJSONObject(index) ?: continue
+            when (detail.optString("type")) {
+                "reasoning.text" -> (detail.opt("text") as? String)?.let(text::append)
+                "reasoning.summary" -> (detail.opt("summary") as? String)?.let(summary::append)
             }
         }
+        // Raw text and its summary are alternative representations, not successive tokens.
+        return text.toString().ifEmpty { summary.toString() }
     }
 
     private fun mergeExtraBody(request: JSONObject, extraBodyJson: String) {

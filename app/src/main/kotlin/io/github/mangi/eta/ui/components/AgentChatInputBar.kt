@@ -53,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.dropShadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.shadow.Shadow
@@ -129,6 +130,7 @@ internal fun AgentChatInputBar(
     onAttachFilePath: (String) -> Unit,
     onRemoveFileReference: (String) -> Unit,
     onCancelMessageEdit: () -> Unit,
+    agentControl: AgentControlUi = AgentControlUi(),
     modifier: Modifier = Modifier,
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
@@ -138,6 +140,16 @@ internal fun AgentChatInputBar(
     val canSend = textFieldState.text.isNotBlank() ||
         pendingImages.isNotEmpty() ||
         pendingFileReferences.isNotEmpty()
+    var inputFocused by remember { mutableStateOf(false) }
+    val inputOutlineColor by animateColorAsState(
+        targetValue = when {
+            inputFocused -> MiuixTheme.colorScheme.primary.copy(alpha = 0.75f)
+            isStreaming -> MiuixTheme.colorScheme.primary.copy(alpha = 0.35f)
+            else -> Color.Transparent
+        },
+        animationSpec = tween(180),
+        label = "input_outline",
+    )
     val density = LocalDensity.current
     val statusBarTopPx = WindowInsets.statusBars.getTop(density)
     var inputContainerTopPx by remember { mutableIntStateOf(0) }
@@ -248,6 +260,7 @@ internal fun AgentChatInputBar(
                         ),
                     )
                     .liquidGlassSurface(cornerRadius = 24.dp)
+                    .squircleBorder(width = 1.dp, color = inputOutlineColor, cornerRadius = 24.dp)
                     .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
                 Box(
@@ -272,7 +285,8 @@ internal fun AgentChatInputBar(
                         state = textFieldState,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .focusRequester(focusRequester),
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { inputFocused = it.isFocused },
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
                         textStyle = TextStyle(
                             color = MiuixTheme.colorScheme.onSurface,
@@ -326,6 +340,18 @@ internal fun AgentChatInputBar(
                                     onEffortChange = onReasoningEffortChange,
                                 )
                             }
+
+                            AgentControlBar(
+                                mode = agentControl.mode,
+                                agent = agentControl.agent,
+                                review = agentControl.review,
+                                onAgentChange = agentControl.onAgentChange,
+                                onReviewChange = agentControl.onReviewChange,
+                                popupAnchorTopPx = inputContainerTopPx,
+                                popupMaxHeight = thinkingPopupMaxHeight,
+                                enabled = !isStreaming,
+                                modifier = Modifier.padding(start = 2.dp),
+                            )
                         }
 
                         Spacer(modifier = Modifier.weight(1f))

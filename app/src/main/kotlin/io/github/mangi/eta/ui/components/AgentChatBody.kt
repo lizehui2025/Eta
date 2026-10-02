@@ -17,6 +17,7 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.PaddingValues
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -34,7 +36,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
@@ -70,6 +74,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
@@ -84,6 +89,8 @@ import io.github.mangi.eta.ui.model.AgentModelPickerUiState
 import io.github.mangi.eta.ui.model.MessageEditUiState
 import io.github.mangi.eta.ui.model.PendingFileReferenceUi
 import io.github.mangi.eta.ui.model.PendingImageUi
+import io.github.mangi.eta.ui.model.SystemNoticeCode
+import io.github.mangi.eta.ui.model.SystemNoticeMessageUi
 import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
@@ -94,6 +101,7 @@ import kotlin.math.min
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -149,10 +157,12 @@ internal fun AgentChatBody(
     onCancelMessageEdit: () -> Unit,
     onDeleteMessage: (String) -> Unit,
     onRegenerateMessage: (String) -> Unit,
+    onRetryFailedRun: (String) -> Unit,
     onSelectReplyCandidate: (String, Int) -> Unit,
     onSuggestionClick: (String) -> Unit,
     onRunTraceClick: () -> Unit,
     onOpenBrowser: () -> Unit,
+    agentControl: AgentControlUi = AgentControlUi(),
     characterName: String? = null,
     isDrawerOpen: Boolean = false,
     modifier: Modifier = Modifier,
@@ -196,6 +206,18 @@ internal fun AgentChatBody(
     }
     var sentFromKeyboard by remember { mutableStateOf(false) }
     var keepBottomAnchored by remember { mutableStateOf(true) }
+    var userTurnScrollState by remember { mutableStateOf(UserTurnScrollState()) }
+    var thinkingCollapseResetKey by remember { mutableStateOf(0L) }
+
+    // A newly opened conversation should show its latest messages immediately. This effect is
+    // keyed only by the first non-empty layout, so streaming updates and user scrolling do not
+    // repeatedly steal the scroll position.
+    LaunchedEffect(visibleMessages.isNotEmpty()) {
+        if (visibleMessages.isNotEmpty()) {
+            withFrameNanos { }
+            scrollState.requestScrollToItem(scrollState.layoutInfo.totalItemsCount.coerceAtLeast(1) - 1)
+        }
+    }
 
     LaunchedEffect(isStreaming) {
         if (isStreaming && sentFromKeyboard) {
@@ -227,7 +249,12 @@ internal fun AgentChatBody(
         showEmptySuggestions = !isKeyboardVisible,
         characterName = characterName,
         keepBottomAnchored = keepBottomAnchored,
+        userTurnScrollState = userTurnScrollState,
+        thinkingCollapseResetKey = thinkingCollapseResetKey,
         onBottomAnchorChanged = { keepBottomAnchored = it },
+        onUserTurnScrollStateChanged = { next ->
+            userTurnScrollState = next
+        },
         onSubmit = { text ->
             val pending = visibleMessages.lastOrNull { it is UserQuestionMessageUi && it.running }
                 as? UserQuestionMessageUi
@@ -236,9 +263,18 @@ internal fun AgentChatBody(
                 onAnswerUserQuestion(pending.questionId, text, emptyList())
             } else {
                 sentFromKeyboard = true
-                // 发送即重新锚定底部：用户从历史上方直接发送时，同帧内 isStreaming 与
-                // 新消息一起到位，立即回到底部并恢复后续的流式平滑跟底。
+                // 新回合先把用户消息定位到顶部；短内容保留留白，溢出后再平滑跟随。
                 keepBottomAnchored = true
+                userTurnScrollState = resolveUserTurnScrollTransition(
+                    userTurnScrollState,
+                    UserTurnScrollEvent.Submitted(
+                        anchorMessageId = messageEdit?.targetMessageId?.takeIf { target ->
+                            visibleMessages.any { it is UserMessageUi && it.id == target }
+                        },
+                        previousUserMessageId = visibleMessages.lastOrNull { it is UserMessageUi }?.id,
+                    ),
+                )
+                thinkingCollapseResetKey += 1L
                 onSubmit(text)
             }
         },
@@ -260,10 +296,12 @@ internal fun AgentChatBody(
         onCancelMessageEdit = onCancelMessageEdit,
         onDeleteMessage = onDeleteMessage,
         onRegenerateMessage = onRegenerateMessage,
+        onRetryFailedRun = onRetryFailedRun,
         onSelectReplyCandidate = onSelectReplyCandidate,
         onSuggestionClick = onSuggestionClick,
         onRunTraceClick = onRunTraceClick,
         onOpenBrowser = onOpenBrowser,
+        agentControl = agentControl,
         currentBrowserMessageId = currentBrowserMessageId,
         modifier = modifier,
     )
@@ -288,7 +326,10 @@ private fun AgentChatScaffold(
     showEmptySuggestions: Boolean,
     characterName: String?,
     keepBottomAnchored: Boolean,
+    userTurnScrollState: UserTurnScrollState = UserTurnScrollState(),
+    thinkingCollapseResetKey: Long = 0L,
     onBottomAnchorChanged: (Boolean) -> Unit,
+    onUserTurnScrollStateChanged: (UserTurnScrollState) -> Unit = {},
     onSubmit: (String) -> Unit,
     onAnswerUserQuestion: (String, String, List<String>) -> Unit,
     pendingQuestion: UserQuestionMessageUi?,
@@ -307,10 +348,12 @@ private fun AgentChatScaffold(
     onCancelMessageEdit: () -> Unit,
     onDeleteMessage: (String) -> Unit,
     onRegenerateMessage: (String) -> Unit,
+    onRetryFailedRun: (String) -> Unit,
     onSelectReplyCandidate: (String, Int) -> Unit,
     onSuggestionClick: (String) -> Unit,
     onRunTraceClick: () -> Unit,
     onOpenBrowser: () -> Unit,
+    agentControl: AgentControlUi,
     currentBrowserMessageId: String?,
     modifier: Modifier = Modifier,
 ) {
@@ -360,6 +403,7 @@ private fun AgentChatScaffold(
                 onAttachFilePath = onAttachFilePath,
                 onRemoveFileReference = onRemoveFileReference,
                 onCancelMessageEdit = onCancelMessageEdit,
+                agentControl = agentControl,
             )
         },
     ) { innerPadding ->
@@ -380,13 +424,17 @@ private fun AgentChatScaffold(
                 isStreaming = isStreaming,
                 bottomInset = bottomPadding,
                 keepBottomAnchored = keepBottomAnchored,
+                userTurnScrollState = userTurnScrollState,
+                thinkingCollapseResetKey = thinkingCollapseResetKey,
                 onBottomAnchorChanged = onBottomAnchorChanged,
+                onUserTurnScrollStateChanged = onUserTurnScrollStateChanged,
                 onSuggestionClick = onSuggestionClick,
                 onRunTraceClick = onRunTraceClick,
                 onOpenBrowser = onOpenBrowser,
                 onEditMessage = onEditMessage,
                 onDeleteMessage = onDeleteMessage,
                 onRegenerateMessage = onRegenerateMessage,
+                onRetryFailedRun = onRetryFailedRun,
                 onSelectReplyCandidate = onSelectReplyCandidate,
                 messageActionsEnabled = !isStreaming && messageEdit == null,
                 editTargetMessageId = messageEdit?.targetMessageId,
@@ -407,7 +455,10 @@ internal fun AgentConversationMessages(
     isStreaming: Boolean,
     bottomInset: Dp,
     keepBottomAnchored: Boolean,
+    userTurnScrollState: UserTurnScrollState = UserTurnScrollState(),
+    thinkingCollapseResetKey: Long = 0L,
     onBottomAnchorChanged: (Boolean) -> Unit,
+    onUserTurnScrollStateChanged: (UserTurnScrollState) -> Unit = {},
     assistantOverlay: Boolean = false,
     onSuggestionClick: (String) -> Unit = {},
     onRunTraceClick: () -> Unit = {},
@@ -415,6 +466,7 @@ internal fun AgentConversationMessages(
     onEditMessage: (String) -> Unit = {},
     onDeleteMessage: (String) -> Unit = {},
     onRegenerateMessage: (String) -> Unit = {},
+    onRetryFailedRun: (String) -> Unit = {},
     onSelectReplyCandidate: (String, Int) -> Unit = { _, _ -> },
     messageActionsEnabled: Boolean = false,
     editTargetMessageId: String? = null,
@@ -448,25 +500,155 @@ internal fun AgentConversationMessages(
     }
 
     val bottomItemIndex = timelineEntries.size
+    val latestUserMessage = visibleMessages.lastOrNull { it is UserMessageUi } as? UserMessageUi
+    val latestUserEntryIndex = latestUserMessage?.let { user ->
+        timelineEntries.indexOfFirst { entry -> entry.key == user.id }.takeIf { it >= 0 }
+    }
+    val pinLatestUserTurn = isUserTurnAnchorReady(userTurnScrollState, latestUserMessage?.id)
+    val baseBottomPadding = bottomInset + 14.dp
+    val baseBottomPaddingPx = with(LocalDensity.current) { baseBottomPadding.roundToPx() }
+    var pinnedMessageId by remember(thinkingCollapseResetKey) { mutableStateOf<String?>(null) }
+    val pinReservePx by remember(scrollState, latestUserEntryIndex, pinLatestUserTurn, baseBottomPaddingPx) {
+        derivedStateOf {
+            if (!pinLatestUserTurn || latestUserEntryIndex == null) return@derivedStateOf 0
+            val layoutInfo = scrollState.layoutInfo
+            val viewportHeight = resolveUserTurnViewportEndPx(
+                layoutInfo.viewportEndOffset,
+                baseBottomPaddingPx,
+            )
+            val anchor = layoutInfo.visibleItemsInfo.firstOrNull { it.index == latestUserEntryIndex }
+            val sentinel = layoutInfo.visibleItemsInfo.firstOrNull { it.key == ChatBottomSentinelKey }
+            resolveUserTurnReservePx(
+                viewportHeightPx = viewportHeight,
+                contentAfterAnchorPx = if (anchor != null && sentinel != null) {
+                    (sentinel.offset + sentinel.size - anchor.offset).coerceAtLeast(0)
+                } else null,
+            )
+        }
+    }
+    val pinReserve = with(LocalDensity.current) { pinReservePx.toDp() }
     val isUserDragging by scrollState.interactionSource.collectIsDraggedAsState()
     val isAtBottom by remember(scrollState) {
         derivedStateOf { !scrollState.canScrollForward }
     }
     val densityScale = LocalDensity.current.density
     val coroutineScope = rememberCoroutineScope()
+    var wasStreaming by remember { mutableStateOf(false) }
+    var finishingTurn by remember { mutableStateOf(false) }
+    var preserveEndGap by remember { mutableStateOf(false) }
+    val currentUserTurnPhase by rememberUpdatedState(userTurnScrollState.phase)
+    val currentUserDragging by rememberUpdatedState(isUserDragging)
+
+    LaunchedEffect(isStreaming) {
+        if (isStreaming) {
+            wasStreaming = true
+            finishingTurn = false
+            preserveEndGap = false
+        } else if (wasStreaming) {
+            wasStreaming = false
+            finishingTurn = true
+            preserveEndGap = !shouldAlignTurnToBottom(currentUserTurnPhase, currentUserDragging)
+            // Let the thinking body finish folding and the temporary tail reserve disappear.
+            delay(PANEL_COLLAPSE_MILLIS.toLong() + 80L)
+            withFrameNanos { }
+            if (shouldAlignTurnToBottom(currentUserTurnPhase, currentUserDragging)) {
+                preserveEndGap = false
+                scrollState.animateScrollToItem(bottomItemIndex)
+                onUserTurnScrollStateChanged(UserTurnScrollState())
+                onBottomAnchorChanged(true)
+            }
+            finishingTurn = false
+        }
+    }
+
+    LaunchedEffect(preserveEndGap, isAtBottom, isUserDragging, userTurnScrollState.phase) {
+        if (preserveEndGap && isAtBottom && !isUserDragging &&
+            userTurnScrollState.phase != UserTurnScrollPhase.UserControlled
+        ) {
+            preserveEndGap = false
+            withFrameNanos { }
+            scrollState.animateScrollToItem(bottomItemIndex)
+        }
+    }
 
     LaunchedEffect(
         isUserDragging,
         isAtBottom,
         keepBottomAnchored,
+        userTurnScrollState,
     ) {
-        val next = resolveKeepBottomAnchored(
-            current = keepBottomAnchored,
-            isUserDragging = isUserDragging,
-            isAtBottom = isAtBottom,
-        )
-        if (next != keepBottomAnchored) {
-            onBottomAnchorChanged(next)
+        if (isUserDragging) {
+            val next = resolveUserTurnScrollTransition(
+                userTurnScrollState,
+                UserTurnScrollEvent.UserDragged(atBottom = isAtBottom),
+            )
+            if (next != userTurnScrollState) onUserTurnScrollStateChanged(next)
+            if (!isAtBottom) onBottomAnchorChanged(false)
+        } else if (
+            userTurnScrollState.phase == UserTurnScrollPhase.UserControlled &&
+            userTurnScrollState.resumeAfterDrag && isAtBottom
+        ) {
+            val next = resolveUserTurnScrollTransition(
+                userTurnScrollState,
+                UserTurnScrollEvent.ReturnedToBottom,
+            )
+            if (next != userTurnScrollState) onUserTurnScrollStateChanged(next)
+            onBottomAnchorChanged(true)
+        } else if (userTurnScrollState.phase == UserTurnScrollPhase.Idle) {
+            val next = resolveKeepBottomAnchored(
+                current = keepBottomAnchored,
+                isUserDragging = isUserDragging,
+                isAtBottom = isAtBottom,
+            )
+            if (next != keepBottomAnchored) onBottomAnchorChanged(next)
+        }
+    }
+
+    LaunchedEffect(
+        latestUserMessage?.id,
+        latestUserEntryIndex,
+        pinLatestUserTurn,
+        thinkingCollapseResetKey,
+    ) {
+        val target = latestUserEntryIndex ?: return@LaunchedEffect
+        if (!pinLatestUserTurn) return@LaunchedEffect
+        if (isUserDragging) return@LaunchedEffect
+        // Reserve is applied in the same layout as the new message, so it can reach the top
+        // immediately, even when no response exists yet.
+        withFrameNanos { }
+        if (!currentUserDragging && currentUserTurnPhase == UserTurnScrollPhase.Pinned) {
+            scrollState.scrollToItem(target, 0)
+            withFrameNanos { }
+            pinnedMessageId = latestUserMessage?.id
+        }
+    }
+
+    val pinContentOverflow by remember(
+        scrollState, latestUserEntryIndex, pinLatestUserTurn, pinnedMessageId, baseBottomPaddingPx,
+    ) {
+        derivedStateOf {
+            if (!pinLatestUserTurn || latestUserEntryIndex == null ||
+                pinnedMessageId != latestUserMessage?.id
+            ) return@derivedStateOf false
+            val layoutInfo = scrollState.layoutInfo
+            val anchor = layoutInfo.visibleItemsInfo.firstOrNull { it.index == latestUserEntryIndex }
+                ?: return@derivedStateOf false
+            // Tail reserve enables top anchoring; it does not reduce the visible content area.
+            val viewportEnd = resolveUserTurnViewportEndPx(layoutInfo.viewportEndOffset, baseBottomPaddingPx)
+            val sentinel = layoutInfo.visibleItemsInfo.firstOrNull { it.key == ChatBottomSentinelKey }
+            sentinel == null || sentinel.offset + sentinel.size > viewportEnd
+        }
+    }
+
+    LaunchedEffect(pinContentOverflow, userTurnScrollState.phase) {
+        if (pinContentOverflow && userTurnScrollState.phase == UserTurnScrollPhase.Pinned) {
+            onUserTurnScrollStateChanged(
+                resolveUserTurnScrollTransition(
+                    userTurnScrollState,
+                    UserTurnScrollEvent.ContentOverflow,
+                ),
+            )
+            onBottomAnchorChanged(true)
         }
     }
 
@@ -498,7 +680,9 @@ internal fun AgentConversationMessages(
             keepBottomAnchored = keepBottomAnchored,
             isUserDragging = isUserDragging,
             isBottomSettling = isBottomSettling,
-        )
+            pinLatestUserTurn = pinLatestUserTurn,
+            userTurnPhase = userTurnScrollState.phase,
+        ) && !finishingTurn
     )
     val currentBottomItemIndex by rememberUpdatedState(bottomItemIndex)
     val bottomFollowDecisions = remember(scrollState) {
@@ -510,11 +694,14 @@ internal fun AgentConversationMessages(
         keepBottomAnchored,
         isUserDragging,
         isStreaming,
+        pinLatestUserTurn,
+        userTurnScrollState.phase,
     ) {
         if (shouldRequestInitialBottom(
                 isStreaming = isStreaming,
                 keepBottomAnchored = keepBottomAnchored,
                 isUserDragging = isUserDragging,
+                userTurnPhase = userTurnScrollState.phase,
             )
         ) {
             scrollState.requestScrollToItem(bottomItemIndex)
@@ -581,20 +768,16 @@ internal fun AgentConversationMessages(
             }
 
             requestIndex?.let { targetIndex ->
-                scrollState.requestScrollToItem(targetIndex)
+                try {
+                    scrollState.animateScrollToItem(targetIndex)
+                } catch (cancelled: CancellationException) {
+                    if (!currentCoroutineContext().isActive) throw cancelled
+                }
                 requestIndex = null
                 remainingDistancePx = 0f
                 return@let
             }
             if (remainingDistancePx <= 0f) continue
-
-            // 大段突发直接贴底，避免长时间追赶式的滞后卡顿感。
-            if (remainingDistancePx >= BOTTOM_FOLLOW_INSTANT_JUMP_PX) {
-                scrollState.requestScrollToItem(currentBottomItemIndex)
-                remainingDistancePx = 0f
-                previousFrameNanos = 0L
-                continue
-            }
 
             val frameNanos = withFrameNanos { it }
             val elapsedSeconds = if (previousFrameNanos == 0L) {
@@ -635,30 +818,33 @@ internal fun AgentConversationMessages(
 
     // 滚动层保持整屏，输入器作为后绘制浮层；输入器高度进入列表的
     // afterContentPadding，确保跟到底部时最后一行停在输入器上方。
-    Box(modifier = modifier.clipToBounds()) {
+    BoxWithConstraints(modifier = modifier.clipToBounds()) {
+        val thinkingViewportHeight = (maxHeight - bottomInset).coerceAtLeast(0.dp)
         LazyColumn(
             state = scrollState,
-            verticalArrangement = Arrangement.Top,
+            verticalArrangement = if (
+                isStreaming || userTurnScrollState.phase != UserTurnScrollPhase.Idle
+            ) Arrangement.Top else Arrangement.Bottom,
             modifier = Modifier
                 .fillMaxSize()
                 .scrollEndHaptic()
                 .overScrollVertical(),
             contentPadding = PaddingValues(
                 top = 14.dp,
-                bottom = bottomInset + 14.dp,
+                bottom = baseBottomPadding + pinReserve,
             ),
             overscrollEffect = null,
         ) {
-            items(
+            itemsIndexed(
                 items = timelineEntries,
-                key = { it.key },
-                contentType = { entry ->
+                key = { _, entry -> entry.key },
+                contentType = { _, entry ->
                     when (entry) {
                         is AgentTimelineEntry.Message -> entry.message::class
                         is AgentTimelineEntry.ThinkingBlock -> AgentTimelineEntry.ThinkingBlock::class
                     }
                 },
-            ) { entry ->
+            ) { entryIndex, entry ->
                 // 历史消息滚动是主要交互路径：不再给每个 item 挂 animateItem，
                 // 避免滚动时额外的 item 动画调度与重组开销。
                 val itemModifier = Modifier
@@ -667,6 +853,17 @@ internal fun AgentConversationMessages(
                         val message = entry.message
                         ChatMessageItem(
                             message = message,
+                            thinkingCollapseResetKey = thinkingCollapseResetKey,
+                            thinkingViewportHeight = thinkingViewportHeight,
+                            onThinkingToggle = {
+                                onBottomAnchorChanged(false)
+                                onUserTurnScrollStateChanged(
+                                    resolveUserTurnScrollTransition(
+                                        userTurnScrollState,
+                                        UserTurnScrollEvent.PanelToggled,
+                                    ),
+                                )
+                            },
                             assistantOverlay = assistantOverlay,
                             retainedStreamingState = (message as? AgentMessageUi)
                                 ?.takeIf { it.isStreaming || streamingMarkdownStates.containsKey(it.id) }
@@ -688,22 +885,33 @@ internal fun AgentConversationMessages(
                             onEditMessage = onEditMessage,
                             onDeleteMessage = onDeleteMessage,
                             onRegenerateMessage = onRegenerateMessage,
+                            onRetryFailedRun = onRetryFailedRun,
+                            canRetryFailedRun = !isStreaming && message is SystemNoticeMessageUi &&
+                                message.code == SystemNoticeCode.RuntimeFailed &&
+                                message.id == visibleMessages.lastOrNull()?.id,
                             onSelectReplyCandidate = onSelectReplyCandidate,
                             modifier = itemModifier,
                         )
                     }
 
                     is AgentTimelineEntry.ThinkingBlock -> {
-                        entry.messages.forEach { message ->
-                            if (message is ThinkingMessageUi && message.isStreaming) {
-                                retainStreamingMarkdownState(message.id)
-                            }
-                        }
                         AgentThinkingBlock(
                             id = entry.key,
                             messages = entry.messages,
                             assistantOverlay = assistantOverlay,
-                            retainedStreamingStates = streamingMarkdownStates,
+                            collapseResetKey = thinkingCollapseResetKey,
+                            thinkingViewportHeight = thinkingViewportHeight,
+                            currentBrowserMessageId = currentBrowserMessageId,
+                            onOpenBrowser = onOpenBrowser,
+                            onThinkingToggle = {
+                                onBottomAnchorChanged(false)
+                                onUserTurnScrollStateChanged(
+                                    resolveUserTurnScrollTransition(
+                                        userTurnScrollState,
+                                        UserTurnScrollEvent.PanelToggled,
+                                    ),
+                                )
+                            },
                             modifier = itemModifier,
                         )
                     }
@@ -729,6 +937,7 @@ internal fun AgentConversationMessages(
             IconButton(
                 onClick = {
                     onBottomAnchorChanged(true)
+                    onUserTurnScrollStateChanged(UserTurnScrollState())
                     coroutineScope.launch {
                         scrollState.animateScrollToItem(bottomItemIndex)
                     }
@@ -793,7 +1002,21 @@ internal fun smoothBottomFollowStep(
     return min(distancePx, min(easedStep.coerceAtLeast(BOTTOM_FOLLOW_MIN_STEP_PX), speedLimitedStep))
 }
 
-private sealed interface AgentTimelineEntry {
+/** Returns true once the latest user turn has produced any visible work or answer output. */
+internal fun latestUserTurnHasOutput(messages: List<AgentChatMessageUi>): Boolean {
+    val userIndex = messages.indexOfLast { it is UserMessageUi }
+    if (userIndex < 0) return false
+    return messages.drop(userIndex + 1).any { message ->
+        when (message) {
+            is AgentMessageUi -> message.content.isNotBlank()
+            is ThinkingMessageUi -> message.isStreaming || message.content.isNotBlank()
+            is ToolActivityMessageUi -> true
+            else -> false
+        }
+    }
+}
+
+internal sealed interface AgentTimelineEntry {
     val key: String
 
     data class Message(
@@ -808,7 +1031,7 @@ private sealed interface AgentTimelineEntry {
     ) : AgentTimelineEntry
 }
 
-private fun List<AgentChatMessageUi>.toTimelineEntries(): List<AgentTimelineEntry> = buildList {
+internal fun List<AgentChatMessageUi>.toTimelineEntries(): List<AgentTimelineEntry> = buildList {
     val thinkingMessages = mutableListOf<AgentChatMessageUi>()
 
     fun flushThinkingBlock() {
@@ -823,7 +1046,9 @@ private fun List<AgentChatMessageUi>.toTimelineEntries(): List<AgentTimelineEntr
     }
 
     this@toTimelineEntries.forEach { message ->
-        if (message is ThinkingMessageUi) {
+        // 连续的思考与工具调用收束为同一个「工作过程」块，只有正文/用户消息等才中断，
+        // 工具行不再散落在正文里（对齐 VS Code 的 thinking + tool chain 呈现）。
+        if (message is ThinkingMessageUi || message is ToolActivityMessageUi) {
             thinkingMessages += message
         } else {
             flushThinkingBlock()
@@ -889,6 +1114,7 @@ private fun AgentChatBottomBar(
     onAttachFilePath: (String) -> Unit,
     onRemoveFileReference: (String) -> Unit,
     onCancelMessageEdit: () -> Unit,
+    agentControl: AgentControlUi,
 ) {
     Column(
         modifier = Modifier
@@ -977,6 +1203,7 @@ private fun AgentChatBottomBar(
                 onAttachFilePath = onAttachFilePath,
                 onRemoveFileReference = onRemoveFileReference,
                 onCancelMessageEdit = onCancelMessageEdit,
+                agentControl = agentControl,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -991,7 +1218,6 @@ private const val BOTTOM_FOLLOW_MAX_FRAME_SECONDS = 0.05f
 private const val BOTTOM_FOLLOW_MAX_SPEED_DP_PER_SECOND = 1400f
 private const val BOTTOM_FOLLOW_MIN_STEP_PX = 1f
 private const val BOTTOM_FOLLOW_SNAP_DISTANCE_PX = 3f
-private const val BOTTOM_FOLLOW_INSTANT_JUMP_PX = 2400f
 
 // 流式 Markdown 缓存状态（解析会话、AST 快照、显现全文副本）按消息 id 保留的数量上限。
 private const val MAX_RETAINED_STREAMING_MARKDOWN_STATES = 64
@@ -1011,13 +1237,23 @@ internal fun resolveBottomFollowEnabled(
     keepBottomAnchored: Boolean,
     isUserDragging: Boolean,
     isBottomSettling: Boolean = false,
-): Boolean = (isStreaming || isBottomSettling) && keepBottomAnchored && !isUserDragging
+    pinLatestUserTurn: Boolean = false,
+    userTurnPhase: UserTurnScrollPhase? = null,
+): Boolean = (isStreaming || isBottomSettling) &&
+    keepBottomAnchored &&
+    !isUserDragging &&
+    !pinLatestUserTurn &&
+    (userTurnPhase == null || userTurnPhase == UserTurnScrollPhase.Idle || userTurnPhase == UserTurnScrollPhase.FollowingOverflow)
 
 internal fun shouldRequestInitialBottom(
     isStreaming: Boolean,
     keepBottomAnchored: Boolean,
     isUserDragging: Boolean,
-): Boolean = isStreaming && keepBottomAnchored && !isUserDragging
+    userTurnPhase: UserTurnScrollPhase? = null,
+): Boolean = isStreaming &&
+    keepBottomAnchored &&
+    !isUserDragging &&
+    (userTurnPhase == null || userTurnPhase == UserTurnScrollPhase.Idle)
 
 @Composable
 private fun EmptyChatState(
@@ -1032,21 +1268,25 @@ private fun EmptyChatState(
             title = stringResource(R.string.ui_analyze_current_screen_ebf08f),
             icon = Icons.Rounded.DocumentScanner,
             prompt = stringResource(R.string.suggestion_analyze_screen_prompt),
+            tint = Color(0xFF2E9DA5),
         ),
         SuggestionItem(
             title = stringResource(R.string.ui_open_wechat_6b2c28),
             icon = Icons.Rounded.RocketLaunch,
             prompt = stringResource(R.string.suggestion_open_wechat_prompt),
+            tint = Color(0xFFE1864D),
         ),
         SuggestionItem(
             title = stringResource(R.string.ui_browse_the_web_da7afb),
             icon = Icons.Rounded.Language,
             prompt = stringResource(R.string.suggestion_browse_web_prompt),
+            tint = Color(0xFF4F8DFF),
         ),
         SuggestionItem(
             title = stringResource(R.string.ui_check_memory_pressure_2d9600),
             icon = Icons.Rounded.Terminal,
             prompt = stringResource(R.string.suggestion_memory_pressure_prompt),
+            tint = Color(0xFF3A9B72),
         ),
     )
 
@@ -1126,22 +1366,29 @@ private fun SuggestionCard(
 ) {
     Column(
         modifier = modifier
+            .heightIn(min = 92.dp)
             .liquidGlassSurface(cornerRadius = 20.dp)
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 14.dp),
     ) {
-        Icon(
-            imageVector = item.icon,
-            contentDescription = null,
-            modifier = Modifier.size(17.dp),
-            tint = MiuixTheme.colorScheme.onBackground,
-        )
+        Box(
+            modifier = Modifier.size(32.dp).background(item.tint.copy(alpha = 0.14f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = item.icon,
+                contentDescription = null,
+                modifier = Modifier.size(17.dp),
+                tint = item.tint,
+            )
+        }
         Spacer(modifier = Modifier.height(9.dp))
         Text(
             text = item.title,
             style = MiuixTheme.textStyles.body2,
             color = MiuixTheme.colorScheme.onSurface,
-            maxLines = 1,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -1150,4 +1397,5 @@ private data class SuggestionItem(
     val title: String,
     val icon: ImageVector,
     val prompt: String,
+    val tint: Color,
 )

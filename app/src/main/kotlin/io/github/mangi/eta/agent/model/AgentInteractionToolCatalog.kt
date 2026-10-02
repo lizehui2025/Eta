@@ -81,7 +81,8 @@ internal object AgentInteractionToolCatalog {
                                     ),
                             ),
                     )
-                    .put("required", JSONArray().put("question")),
+                    .put("required", JSONArray().put("question"))
+                    .put("additionalProperties", false),
             ),
         )
     }

@@ -5,8 +5,12 @@ import io.github.mangi.eta.agent.accessibility.AgentAccessibilityKeeper
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentConversationToolCatalog
 import io.github.mangi.eta.agent.model.AgentMode
+import io.github.mangi.eta.agent.model.AgentKind
+import io.github.mangi.eta.agent.model.InstructionReview
 import io.github.mangi.eta.agent.tool.ConversationHistoryTool
 import io.github.mangi.eta.data.db.EtaDatabase
+import io.github.mangi.eta.data.repository.RoomContextEpochStore
+import io.github.mangi.eta.agent.context.ContextEpoch
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentModelExecutionException
 import io.github.mangi.eta.agent.model.AgentModelFailure
@@ -41,6 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
+import java.security.MessageDigest
 
 /**
  * 单次 Runtime run 的阻塞执行器。
@@ -157,6 +162,8 @@ internal class AgentRuntimeRunExecutor(
             // 交互模式在 run 开始时快照：决定本次 run 的提示词与工具表；
             // 记忆写入许可在执行期还会动态复查（见 AgentLocalTools 的 memoryWriteBlockedReason）。
             val agentMode = AgentMode.current()
+            val agentKind = AgentKind.current(agentMode)
+            val instructionReview = InstructionReview.current()
             // 编码模式在 run 开始时快照：主循环、子代理与内部调用一致生效（temperature=0.1）；
             // 其余 request.config 用途（工具开关等）不受影响。
             val runConfig = if (agentMode == AgentMode.CODING) {
@@ -315,6 +322,22 @@ internal class AgentRuntimeRunExecutor(
                     characterMemoryTools.execute(call)
                 } else routingExecutor.execute(call)
             }
+            val contextEpoch = conversationId
+                ?.takeIf { request.operation != AgentRuntimeWire.OP_REWRITE_REPLY }
+                ?.let { id ->
+                    val scopeHash = contextScopeHash(
+                        config = runConfig,
+                        agentMode = agentMode,
+                        agentKind = agentKind,
+                        instructionReview = instructionReview,
+                        roleplay = roleplayContext != null,
+                    )
+                    ContextEpoch(
+                        conversationId = id,
+                        scopeHash = scopeHash,
+                        store = RoomContextEpochStore(EtaDatabase.get(appContext).conversationDao()),
+                    )
+                }
             val completedResponse = AgentModelClient.complete(
                 config = runConfig,
                 sessionId = request.effectiveModelSessionId,
@@ -323,6 +346,10 @@ internal class AgentRuntimeRunExecutor(
                 initialSupplementIndex = uiPayload?.lastSupplementIndex ?: 0,
                 roleplayContext = roleplayContext,
                 agentMode = agentMode,
+                agentKind = agentKind,
+                agentKindProvider = { AgentKind.current(AgentMode.current()) },
+                instructionReview = instructionReview,
+                persistentRecovery = request.operation == AgentRuntimeWire.OP_CHAT,
                 rewriteReply = request.operation == AgentRuntimeWire.OP_REWRITE_REPLY,
                 compactOnly = request.operation == AgentRuntimeWire.OP_COMPACT,
                 onContextSnapshot = { snapshot ->
@@ -339,6 +366,7 @@ internal class AgentRuntimeRunExecutor(
                     )
                     session.appendTranscript(publish.messages, publish.fullRebuild)
                 },
+                contextEpoch = contextEpoch,
                 capabilitiesProvider = { AgentToolCapabilities.capture(appContext) },
                 prompt = request.prompt,
                 assistantScreenContext = request.assistantScreenContext,
@@ -493,6 +521,33 @@ internal class AgentRuntimeRunExecutor(
                 checkpointRecorder = checkpointRecorder,
             )
         }
+    }
+
+    private fun contextScopeHash(
+        config: AgentModelClient.ModelConfig,
+        agentMode: AgentMode,
+        agentKind: AgentKind,
+        instructionReview: InstructionReview,
+        roleplay: Boolean,
+    ): String {
+        val source = listOf(
+            "epoch-v1",
+            config.providerId,
+            config.model,
+            config.systemPrompt,
+            config.terminalTools,
+            config.browserTools,
+            config.deviceDirectTools,
+            config.deviceSensitiveReadTools,
+            config.deviceSensitiveActionTools,
+            agentMode.wireValue,
+            agentKind.wireValue,
+            instructionReview.wireValue,
+            roleplay,
+        ).joinToString("\u0000")
+        return MessageDigest.getInstance("SHA-256")
+            .digest(source.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
     }
 
     private fun acceptEventNow(
