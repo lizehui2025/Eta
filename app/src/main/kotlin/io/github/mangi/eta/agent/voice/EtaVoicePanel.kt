@@ -55,8 +55,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
+import io.github.mangi.eta.R
 import io.github.mangi.eta.ui.components.AgentConversationMessages
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import kotlin.math.abs
@@ -67,6 +69,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.anim.folmeSpring
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal enum class EtaVoicePhase {
@@ -241,7 +245,7 @@ internal fun EtaVoicePanel(
                     density.density,
                 ) {
                     assistantBaseHeightPx(
-                        messages = state.messages,
+                        messages = state.messages.takeLast(OverlayMessageWindowSize),
                         maxHeightPx = maxContentHeightPx,
                         density = density.density,
                     )
@@ -582,6 +586,11 @@ private fun BoxScope.AssistantPanel(
         modifier = Modifier
             .align(Alignment.BottomCenter)
             .fillMaxWidth()
+            // 面板自身消费落在空白处的点击，避免穿透到全屏 scrim 误关浮窗。
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) {}
             .offset(y = with(density) { sheetTranslationPx.toDp() })
             .clip(sheetShape)
             .drawBehind {
@@ -603,23 +612,39 @@ private fun BoxScope.AssistantPanel(
                 .height(with(density) { visibleSheetHeightPx.toDp() })
                 .nestedScroll(nestedScrollConnection),
         ) {
-            DragHandle(
-                colors = colors,
-                modifier = Modifier.pointerInput(baseContentHeightPx, maxContentHeightPx) {
-                    detectVerticalDragGestures(
-                        onDragStart = {
-                            stopAutoExpand()
-                            draggedHeightPx = currentAnimatedHeight.value
+            Box(modifier = Modifier.fillMaxWidth()) {
+                DragHandle(
+                    colors = colors,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .pointerInput(baseContentHeightPx, maxContentHeightPx) {
+                            detectVerticalDragGestures(
+                                onDragStart = {
+                                    stopAutoExpand()
+                                    draggedHeightPx = currentAnimatedHeight.value
+                                },
+                                onVerticalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    dragBy(dragAmount)
+                                },
+                                onDragEnd = { finishDrag() },
+                                onDragCancel = { finishDrag() },
+                            )
                         },
-                        onVerticalDrag = { change, dragAmount ->
-                            change.consume()
-                            dragBy(dragAmount)
-                        },
-                        onDragEnd = { finishDrag() },
-                        onDragCancel = { finishDrag() },
+                )
+                if (canOpenConversation) {
+                    // 显式入口：以前只能先把面板拉到近全屏再上滑，手机上很难触发。
+                    TextButton(
+                        text = stringResource(R.string.voice_open_in_app),
+                        onClick = onOpenConversation,
+                        colors = ButtonDefaults.textButtonColorsPrimary(),
+                        minHeight = 32.dp,
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 8.dp),
                     )
-                },
-            )
+                }
+            }
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -629,8 +654,13 @@ private fun BoxScope.AssistantPanel(
                     },
             ) {
                 if (hasMessages) {
+                    // 浮窗只渲染最近的消息窗口：长会话下每 50ms 的事件批不再对全量历史
+                    // 做分组/最终标记等 O(n) 推导（完整历史在主应用查看）。
+                    val overlayMessages = remember(state.messages) {
+                        state.messages.takeLast(OverlayMessageWindowSize)
+                    }
                     AgentConversationMessages(
-                        visibleMessages = state.messages,
+                        visibleMessages = overlayMessages,
                         scrollState = listState,
                         isStreaming = state.phase == EtaVoicePhase.PROCESSING,
                         bottomInset = 8.dp,
@@ -690,6 +720,9 @@ private fun DragHandle(colors: EtaVoicePanelColors, modifier: Modifier = Modifie
         )
     }
 }
+
+/** 浮窗只渲染最近的消息窗口，避免长会话下每批事件对全量历史做 O(n) 推导。 */
+private const val OverlayMessageWindowSize = 24
 
 private fun measuredConversationHeightPx(listState: LazyListState): Float? {
     val layout = listState.layoutInfo

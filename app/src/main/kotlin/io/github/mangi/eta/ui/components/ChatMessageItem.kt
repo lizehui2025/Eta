@@ -40,7 +40,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
@@ -75,12 +75,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -91,6 +96,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.isTraversalGroup
@@ -447,6 +453,13 @@ internal fun AgentThinkingBlock(
     thinkingViewportHeight: androidx.compose.ui.unit.Dp? = null,
     currentBrowserMessageId: String? = null,
     onOpenBrowser: () -> Unit = {},
+    /**
+     * 整个工作过程是否仍在进行（当前 run 未结束且本块是时间线最后一项）。
+     *
+     * 有了它，块在「思考结束→工具还没开始」「工具结束→下一轮思考」的间隙不会反复折叠，
+     * 只有后续正文出现或 run 结束时才收起，对齐 VS Code 的 thinking preview 行为。
+     */
+    blockActive: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val thinkingRunning = messages.any { message ->
@@ -456,6 +469,7 @@ internal fun AgentThinkingBlock(
         message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running
     }
     val running = thinkingRunning || toolsRunning
+    val active = running || blockActive
     val lastThinking = messages.lastOrNull { it is ThinkingMessageUi } as? ThinkingMessageUi
     val stepCount = messages.count { it is ToolActivityMessageUi }
     val hasThinkingContent = messages.any { it is ThinkingMessageUi && it.content.isNotBlank() }
@@ -463,19 +477,19 @@ internal fun AgentThinkingBlock(
     // 结束后优先显示步骤总数，只有思考内容时保留原有的计时文案。
     val headerText = when {
         toolsRunning -> pluralStringResource(R.plurals.work_processing_step, stepCount, stepCount)
-        thinkingRunning -> stringResource(R.string.reasoning_in_progress)
+        thinkingRunning || blockActive -> stringResource(R.string.reasoning_in_progress)
         stepCount > 0 -> pluralStringResource(R.plurals.work_completed_steps, stepCount, stepCount)
         else -> lastThinking?.elapsedSeconds?.takeIf { it > 0 }?.let { seconds ->
             pluralStringResource(R.plurals.reasoning_completed_seconds, seconds, seconds)
         } ?: stringResource(R.string.reasoning_completed)
     }
-    // A new thinking segment opens by default; its end resets manual overrides.
-    var expansionOverride by rememberSaveable(id, running, lastThinking?.id) {
+    // 展开状态只随「工作过程是否进行中」重置：手动收起不会被下一轮消息重新打开。
+    var expansionOverride by rememberSaveable(id, active) {
         mutableStateOf<Boolean?>(null)
     }
-    val expanded = expansionOverride ?: running
-    var startedRunning by remember(id) { mutableStateOf(running) }
-    if (running) startedRunning = true
+    val expanded = expansionOverride ?: active
+    var startedRunning by remember(id) { mutableStateOf(active) }
+    if (active) startedRunning = true
     var collapsedHeightPx by rememberSaveable(id) { mutableStateOf(0) }
     var appliedCollapseResetKey by rememberSaveable(id) { mutableStateOf(0L) }
     val expansionProgress = rememberThinkingExpansionProgress(expanded)
@@ -486,7 +500,7 @@ internal fun AgentThinkingBlock(
         }
     }
 
-    val pulseAlpha = rememberActivePulse(active = running, label = "work_pulse")
+    val pulseAlpha = rememberActivePulse(active = active, label = "work_pulse")
 
     if (assistantOverlay) {
         Column(
@@ -508,7 +522,7 @@ internal fun AgentThinkingBlock(
                         .size(6.dp)
                         .clip(CircleShape)
                         .background(MiuixTheme.colorScheme.onSurface)
-                        .graphicsLayer(alpha = if (running) pulseAlpha else 1f),
+                        .graphicsLayer(alpha = if (active) pulseAlpha else 1f),
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -526,12 +540,12 @@ internal fun AgentThinkingBlock(
                 ThinkingMessageList(
                     id = id,
                     messages = messages,
-                    running = running,
+                    running = active,
                     assistantOverlay = true,
                     onThinkingToggle = onThinkingToggle,
                     currentBrowserMessageId = currentBrowserMessageId,
                     onOpenBrowser = onOpenBrowser,
-                    runningBodyHeight = thinkingViewportHeight?.takeIf { startedRunning }?.let {
+                    windowMaxHeight = thinkingViewportHeight?.takeIf { startedRunning }?.let {
                         thinkingBodyHeightDp(it.value).dp
                     },
                 )
@@ -540,75 +554,62 @@ internal fun AgentThinkingBlock(
         return
     }
 
+    // 无卡片外壳：工作过程直接内联在聊天流里，靠左侧链线与缩进表达层级，
+    // 对齐 Copilot Chat 的 thinking 列表（不用圆角框/底色/描边）。
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 4.dp),
+            .padding(horizontal = 20.dp, vertical = 4.dp)
+            .testTag("thinking-card-$id"),
     ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("thinking-card-$id")
-            .clip(RoundedCornerShape(14.dp))
-            .background(MiuixTheme.colorScheme.surface)
-            .border(
-                width = 0.5.dp,
-                color = MiuixTheme.colorScheme.outline.copy(alpha = 0.50f),
-                shape = RoundedCornerShape(14.dp),
-            ),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable {
-                    onThinkingToggle()
-                    expansionOverride = !expanded
-                }
-                .padding(horizontal = 13.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                imageVector = if (stepCount > 0 && !hasThinkingContent) {
-                    Icons.Rounded.Build
-                } else {
-                    Icons.Rounded.Lightbulb
-                },
-                contentDescription = null,
+        // 流式期间隐藏「正在思考」头部（VS Code fixedScrolling）：工作状态由内容窗口
+        // 尾部的提示行承担；结束后才出现可折叠的摘要行。
+        if (!active) {
+            Row(
                 modifier = Modifier
-                    .size(15.dp)
-                    .graphicsLayer(alpha = if (running) pulseAlpha else 1f),
-                tint = if (running) {
-                    MiuixTheme.colorScheme.primary
-                } else {
-                    MiuixTheme.colorScheme.onSurfaceVariantSummary
-                },
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = headerText,
-                style = MiuixTheme.textStyles.body2,
-                color = if (running) {
-                    MiuixTheme.colorScheme.onSurface
-                } else {
-                    MiuixTheme.colorScheme.onSurfaceVariantSummary
-                },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            ExpandChevron(
-                expanded = expanded,
-                contentDescription = stringResource(
-                    when {
-                        stepCount > 0 ->
-                            if (expanded) R.string.work_collapse else R.string.work_expand
-                        else ->
-                            if (expanded) R.string.reasoning_collapse else R.string.reasoning_expand
+                    .fillMaxWidth()
+                    .clickable {
+                        onThinkingToggle()
+                        expansionOverride = !expanded
+                    }
+                    .padding(horizontal = 2.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 该分支的前提是 !active，头部只以终态呈现（运行中的状态在尾部提示行），
+                // 因此这里的颜色与透明度都是常量，不再保留运行态的脉冲/主色判断。
+                Icon(
+                    imageVector = if (stepCount > 0 && !hasThinkingContent) {
+                        Icons.Rounded.Build
+                    } else {
+                        Icons.Rounded.Lightbulb
                     },
-                ),
-                modifier = Modifier.size(14.dp),
-                tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f),
-            )
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                    tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = headerText,
+                    style = MiuixTheme.textStyles.body2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                ExpandChevron(
+                    expanded = expanded,
+                    contentDescription = stringResource(
+                        when {
+                            stepCount > 0 ->
+                                if (expanded) R.string.work_collapse else R.string.work_expand
+                            else ->
+                                if (expanded) R.string.reasoning_collapse else R.string.reasoning_expand
+                        },
+                    ),
+                    modifier = Modifier.size(14.dp),
+                    tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f),
+                )
+            }
         }
 
         ThinkingCollapseBody(
@@ -617,28 +618,74 @@ internal fun AgentThinkingBlock(
             measuredHeightPx = collapsedHeightPx,
             onHeightMeasured = { collapsedHeightPx = it },
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 13.dp)
-                    .height(0.5.dp)
-                    .background(MiuixTheme.colorScheme.outline.copy(alpha = 0.45f)),
-            )
             ThinkingMessageList(
                 id = id,
                 messages = messages,
-                running = running,
+                running = active,
                 assistantOverlay = false,
                 onThinkingToggle = onThinkingToggle,
                 currentBrowserMessageId = currentBrowserMessageId,
                 onOpenBrowser = onOpenBrowser,
-                runningBodyHeight = thinkingViewportHeight?.takeIf { startedRunning }?.let {
-                    thinkingBodyHeightDp(it.value).dp
+                // 工作窗口：VS Code fixedScrolling 的 200dp 与视口自适应的较小值。
+                windowMaxHeight = if (active) {
+                    minOf(
+                        thinkingViewportHeight?.let { thinkingBodyHeightDp(it.value).dp }
+                            ?: WorkProcessWindowHeight,
+                        WorkProcessWindowHeight,
+                    )
+                } else {
+                    null
                 },
-                modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
+                tailLabel = if (active) headerText else null,
+                tailPulseAlpha = pulseAlpha,
+                modifier = Modifier.padding(top = 2.dp, bottom = 6.dp),
             )
         }
     }
+}
+
+/**
+ * 整轮工作过程的折叠摘要行（对应 Copilot Chat 的 "Completed N steps"）。
+ * 默认折叠；点击展开/收起本轮最终回答之前的全部工作过程。
+ */
+@Composable
+internal fun AgentCompletedStepsRow(
+    stepCount: Int,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            // role=Button 让读屏把它当作可展开/收起的操作入口播报。
+            .clickable(role = Role.Button, onClick = onToggle)
+            .padding(horizontal = 20.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Check,
+            contentDescription = null,
+            modifier = Modifier.size(13.dp),
+            tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.8f),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = pluralStringResource(R.plurals.work_completed_steps, stepCount, stepCount),
+            style = MiuixTheme.textStyles.footnote1,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        ExpandChevron(
+            expanded = expanded,
+            contentDescription = stringResource(
+                if (expanded) R.string.work_collapse else R.string.work_expand,
+            ),
+            modifier = Modifier.size(13.dp),
+            tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f),
+        )
     }
 }
 
@@ -658,7 +705,9 @@ private fun ThinkingMessageList(
     onThinkingToggle: () -> Unit = {},
     currentBrowserMessageId: String? = null,
     onOpenBrowser: () -> Unit = {},
-    runningBodyHeight: androidx.compose.ui.unit.Dp? = null,
+    windowMaxHeight: androidx.compose.ui.unit.Dp? = null,
+    tailLabel: String? = null,
+    tailPulseAlpha: Float = 1f,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -730,20 +779,45 @@ private fun ThinkingMessageList(
             if (step > 0f) listState.scroll { scrollBy(step) }
         }
     }
+    val railColor = MiuixTheme.colorScheme.outline.copy(alpha = 0.45f)
+    // 链线节点中心必须跟随字体缩放：思考/尾部行按实际行高折算（sp 的 toPx 已含
+    // fontScale），工具行按「顶距 + 14dp 图标的一半」；固定 dp 在系统大字体下会与文本行错位。
+    val railDensity = LocalDensity.current
+    val thinkingGlyphCenterY = with(railDensity) {
+        WorkProcessTextTopPadding.toPx() +
+            chatMarkdownBodyStyle(ChatMarkdownTone.Thinking).lineHeight
+                .takeOrElse { 18.sp }.toPx() / 2f
+    }
+    val tailGlyphCenterY = with(railDensity) {
+        WorkProcessTextTopPadding.toPx() +
+            MiuixTheme.textStyles.footnote1.lineHeight.takeOrElse { 18.sp }.toPx() / 2f
+    }
+    val toolGlyphCenterY = with(railDensity) { 11.dp.toPx() }
+    val canScrollUp by remember(listState) { derivedStateOf { listState.canScrollBackward } }
+    val canScrollDown by remember(listState) { derivedStateOf { listState.canScrollForward } }
     LazyColumn(
         state = listState,
+        // 窗口内不做拉伸回弹，保持与 VS Code 一致的平滚动体验。
+        overscrollEffect = null,
         modifier = modifier
             .fillMaxWidth()
             .then(
-                if (runningBodyHeight != null) Modifier.height(runningBodyHeight)
+                if (windowMaxHeight != null) Modifier.heightIn(max = windowMaxHeight)
                 else Modifier.heightIn(max = if (assistantOverlay) 360.dp else 420.dp)
+            )
+            // 工作窗口的上下渐隐：只在还有内容可滚动的方向淡出（对齐 VS Code fixedScrolling）。
+            .workProcessWindowFade(
+                enabled = running,
+                fadeTop = canScrollUp,
+                fadeBottom = canScrollDown,
             ),
     ) {
-        items(
+        itemsIndexed(
             items = messages,
-            key = { it.id },
-            contentType = { it::class },
-        ) { message ->
+            key = { _, message -> message.id },
+            contentType = { _, message -> message::class },
+        ) { index, message ->
+            val isToolRow = message is ToolActivityMessageUi
             ChatMessageItem(
                 message = message,
                 onSuggestionClick = {},
@@ -755,9 +829,133 @@ private fun ThinkingMessageList(
                 compact = true,
                 assistantOverlay = assistantOverlay,
                 onThinkingToggle = onThinkingToggle,
+                // 工作过程链线：每行画自己那段并在节点处留空，首行从节点起、
+                // 末行到节点止（有尾部工作行时继续连到它）；思考文本行额外画小圆点。
+                modifier = Modifier.drawBehind {
+                    drawWorkProcessRail(
+                        railColor = railColor,
+                        isFirst = index == 0,
+                        isLast = index == messages.lastIndex && tailLabel == null,
+                        glyphCenterY = if (isToolRow) toolGlyphCenterY else thinkingGlyphCenterY,
+                        hasDot = !isToolRow &&
+                            (message as? ThinkingMessageUi)?.content?.isNotBlank() == true,
+                    )
+                },
             )
         }
+        if (tailLabel != null) {
+            item(key = "work-tail-$id", contentType = "work-tail") {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .drawBehind {
+                            drawWorkProcessRail(
+                                railColor = railColor,
+                                isFirst = messages.isEmpty(),
+                                isLast = true,
+                                glyphCenterY = tailGlyphCenterY,
+                                hasDot = true,
+                            )
+                        }
+                        .padding(
+                            start = 20.dp,
+                            end = 0.dp,
+                            top = WorkProcessTextTopPadding,
+                            bottom = 6.dp,
+                        ),
+                ) {
+                    Text(
+                        text = tailLabel,
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.graphicsLayer(alpha = tailPulseAlpha),
+                    )
+                }
+            }
+        }
     }
+}
+
+/**
+ * 工作过程左侧的链线：每一行只画自己那段并在节点处留空，
+ * 首行从节点中心起、末行到节点中心止；思考文本行额外画一个小圆点。
+ */
+private fun DrawScope.drawWorkProcessRail(
+    railColor: Color,
+    isFirst: Boolean,
+    isLast: Boolean,
+    glyphCenterY: Float,
+    hasDot: Boolean,
+) {
+    val railX = 9.dp.toPx()
+    val strokeWidth = 1.dp.toPx()
+    val halfGap = 5.dp.toPx()
+    if (!isFirst) {
+        drawLine(
+            color = railColor,
+            start = Offset(railX, 0f),
+            end = Offset(railX, (glyphCenterY - halfGap).coerceAtLeast(0f)),
+            strokeWidth = strokeWidth,
+        )
+    }
+    if (!isLast) {
+        drawLine(
+            color = railColor,
+            start = Offset(railX, glyphCenterY + halfGap),
+            end = Offset(railX, size.height),
+            strokeWidth = strokeWidth,
+        )
+    }
+    if (hasDot) {
+        drawCircle(
+            color = railColor,
+            radius = 2.5.dp.toPx(),
+            center = Offset(railX, glyphCenterY),
+        )
+    }
+}
+
+/** 工作窗口高度：对齐 VS Code fixedScrolling 的 200px 限高。 */
+private val WorkProcessWindowHeight = 200.dp
+
+/** 工作过程文本行的顶部内边距；链线节点中心按「顶距 + 行高/2」折算。 */
+private val WorkProcessTextTopPadding = 4.dp
+
+/**
+ * 工作窗口的上下渐隐遮罩：只在还有内容可滚动的方向淡出，
+ * 对齐 VS Code fixedScrolling 窗口的 mask-image 效果。
+ */
+private fun Modifier.workProcessWindowFade(
+    enabled: Boolean,
+    fadeTop: Boolean,
+    fadeBottom: Boolean,
+    fadeHeight: androidx.compose.ui.unit.Dp = 18.dp,
+): Modifier {
+    // 只有运行中的工作窗口才需要渐隐，也才需要离屏层；非运行态（历史展开块）
+    // 直接返回原样，避免长会话里每个展开块都长期持有一层离屏合成。
+    if (!enabled) return this
+    // 离屏层：让 DstIn 渐变只作用于工作窗口自身的内容；
+    // 没有它时遮罩会把底层聊天背景一并抹掉，表现为黑带/黑阴影。
+    return this
+        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+        .drawWithContent {
+            drawContent()
+            if ((!fadeTop && !fadeBottom) || size.height <= 0f) return@drawWithContent
+            val fraction = (fadeHeight.toPx() / size.height).coerceIn(0f, 0.5f)
+            drawRect(
+                brush = Brush.verticalGradient(
+                    0f to if (fadeTop) Color.Transparent else Color.Black,
+                    fraction to Color.Black,
+                    1f - fraction to Color.Black,
+                    1f to if (fadeBottom) Color.Transparent else Color.Black,
+                ),
+                size = size,
+                blendMode = BlendMode.DstIn,
+            )
+        }
 }
 
 // ── 用户消息：轻盈美观气泡 ──────────────────────────────────────────────
@@ -783,15 +981,20 @@ private fun UserMessageBubble(
     }
     val overlayBubbleColor = overlayBubbleColor()
 
-    Row(
+    // 气泡宽度改为按内容收缩：短消息不再撑成固定 84%/88% 宽导致文字贴左、右侧留白。
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
             .padding(
                 horizontal = if (assistantOverlay) 16.dp else 20.dp,
                 vertical = if (assistantOverlay) 4.dp else 7.dp,
             ),
-        horizontalArrangement = Arrangement.End,
+        contentAlignment = Alignment.CenterEnd,
     ) {
+        val bubbleMaxWidth = minOf(
+            maxWidth * (if (assistantOverlay) 0.88f else 0.84f),
+            360.dp,
+        )
         TooltipBox(
             positionProvider = TooltipDefaults.rememberTooltipPositionProvider(
                 positioning = TooltipAnchorPosition.Below,
@@ -833,8 +1036,7 @@ private fun UserMessageBubble(
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth(if (assistantOverlay) 0.88f else 0.84f)
-                    .widthIn(max = 360.dp)
+                    .widthIn(max = bubbleMaxWidth)
                     .then(
                         if (assistantOverlay) {
                             Modifier.background(overlayBubbleColor, RoundedCornerShape(10.dp))
@@ -2547,7 +2749,15 @@ private fun ThinkingRow(
 
     // The enclosing work-process panel owns expansion and scrolling.
     if (compact) {
-        Column(modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 8.dp)) {
+        // 链线节点在 x=9dp：文本从 20dp 起，与节点留出间距。
+        Column(
+            modifier = modifier.fillMaxWidth().padding(
+                start = 20.dp,
+                end = 0.dp,
+                top = WorkProcessTextTopPadding,
+                bottom = 6.dp,
+            ),
+        ) {
             thinkingChunks.forEachIndexed { index, chunk ->
                 key(index) {
                     Text(
@@ -2852,13 +3062,14 @@ private fun ToolActivityInline(
                     isExpanded = !isExpanded
                 }
             }
-            .padding(horizontal = if (compact) 10.dp else 20.dp, vertical = 2.dp)
+            // 卡内行不再自带外边距：缩进与层级由工作过程链线统一表达。
+            .padding(horizontal = if (compact) 0.dp else 20.dp, vertical = if (compact) 0.dp else 2.dp)
     ) {
         Row(
             verticalAlignment = Alignment.Top,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 2.dp, vertical = if (compact) 3.dp else 5.dp),
+                .padding(horizontal = 2.dp, vertical = if (compact) 4.dp else 5.dp),
         ) {
             // 工作过程卡内不再画独立时间线 marker：卡片本身已有缩进，状态由工具图标的
             // 颜色/脉冲承担，行的信息密度更接近 VS Code 的嵌套工具行。
@@ -2875,7 +3086,7 @@ private fun ToolActivityInline(
                 imageVector = iconForTool(message.toolName),
                 contentDescription = null,
                 modifier = Modifier
-                    .padding(top = 2.dp)
+                    .padding(top = if (compact) 0.dp else 2.dp)
                     .size(if (compact) 14.dp else 15.dp)
                     .graphicsLayer(
                         alpha = if (message.status == ToolActivityStatusUi.Running) pulseAlpha else 1f,
@@ -2892,7 +3103,7 @@ private fun ToolActivityInline(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
-                    style = MiuixTheme.textStyles.body2,
+                    style = if (compact) MiuixTheme.textStyles.footnote1 else MiuixTheme.textStyles.body2,
                     color = if (message.status == ToolActivityStatusUi.Running) {
                         MiuixTheme.colorScheme.onSurface
                     } else {
@@ -2958,18 +3169,19 @@ private fun ToolActivityInline(
             enter = panelExpandEnter(),
             exit = panelCollapseExit(),
         ) {
-            Column(
-                modifier = Modifier
+            // 卡内详情不再套一层底色盒子，工具内容直接内联（对齐 Copilot Chat）。
+            val detailContainerModifier = if (compact) {
+                Modifier
                     .fillMaxWidth()
-                    .padding(
-                        start = if (compact) 20.dp else 34.dp,
-                        end = 4.dp,
-                        top = 2.dp,
-                        bottom = 8.dp,
-                    )
+                    .padding(start = 20.dp, end = 4.dp, top = 2.dp, bottom = 6.dp)
+            } else {
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 34.dp, end = 4.dp, top = 2.dp, bottom = 8.dp)
                     .background(MiuixTheme.colorScheme.surfaceContainer.copy(alpha = 0.34f))
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-            ) {
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            }
+            Column(modifier = detailContainerModifier) {
                 if (!message.command.isNullOrBlank()) {
                     ToolCommandBlock(
                         command = message.command,

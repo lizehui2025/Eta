@@ -260,6 +260,7 @@
   <string name="tool_launch_app">開啟應用程式</string>
   <string name="tool_open_uri">使用應用程式開啟</string>
   <string name="tool_browser_use">瀏覽網頁</string>
+  <string name="tool_web_search">聯網搜尋</string>
   <string name="tool_terminal">終端機</string>
   <string name="tool_run_command">執行指令</string>
   <string name="tool_read_file">讀取檔案</string>
@@ -381,6 +382,7 @@
   <string name="ui_manually_fill_in_the_display_name_and_model_id_077a7b">手動填寫展示名稱與 Model ID</string>
   <string name="ui_long_press_on_the_gesture_bar_triggers_a_circle_to_s_b80117">長按手勢列啟動圈選搜尋</string>
   <string name="ui_open_current_browser_58358e">開啟目前瀏覽器</string>
+  <string name="voice_open_in_app">開啟應用</string>
   <string name="ui_open_wechat_6b2c28">打開微信</string>
   <string name="ui_search_provider_74e049">搜尋供應商</string>
   <string name="ui_search_model_df5586">搜尋模型</string>

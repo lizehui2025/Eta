@@ -294,6 +294,7 @@
   <string name="tool_launch_app">Launch app</string>
   <string name="tool_open_uri">Open with app</string>
   <string name="tool_browser_use">Browse web</string>
+  <string name="tool_web_search">Web search</string>
   <string name="tool_terminal">Terminal</string>
   <string name="tool_run_command">Run command</string>
   <string name="tool_read_file">Read file</string>
@@ -405,6 +406,7 @@
   <string name="ui_manually_fill_in_the_display_name_and_model_id_077a7b">Manually fill in the display name and Model ID</string>
   <string name="ui_long_press_on_the_gesture_bar_triggers_a_circle_to_s_b80117">Touch and hold the gesture bar to start Circle to Search</string>
   <string name="ui_open_current_browser_58358e">Open current browser</string>
+  <string name="voice_open_in_app">Open in app</string>
   <string name="ui_open_wechat_6b2c28">Open WeChat</string>
   <string name="ui_search_provider_74e049">Search provider</string>
   <string name="ui_search_model_df5586">Search model</string>

@@ -58,6 +58,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -118,7 +120,6 @@ import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 /**
@@ -474,6 +475,19 @@ internal fun AgentConversationMessages(
     modifier: Modifier = Modifier,
 ) {
     val timelineEntries = remember(visibleMessages) { visibleMessages.toTimelineEntries() }
+    // 整轮折叠：与 VS Code 的 collapseCompletedResponses 对齐——run 结束后，把最终回答
+    // 之前的全部工作过程（思考/工具/中间正文）收成一行「已完成 N 个步骤」，点开可看全过程。
+    val completedTurnRanges = remember(timelineEntries, isStreaming) {
+        timelineEntries.completedTurnRanges(isStreaming)
+    }
+    // 会话切换（首条消息变化）时清空展开状态；配置变更通过 Saver 保留。
+    val conversationKey = visibleMessages.firstOrNull()?.id
+    var expandedTurnKeys by rememberSaveable(conversationKey, stateSaver = ExpandedTurnKeysSaver) {
+        mutableStateOf(emptySet<String>())
+    }
+    val displayEntries = remember(timelineEntries, completedTurnRanges, expandedTurnKeys) {
+        timelineEntries.withCompletedTurnCollapse(completedTurnRanges, expandedTurnKeys)
+    }
     // 复制按钮只出现在每轮对话的最终结果上，中间步骤的过渡文本不提供复制入口。
     // 流式进行中当前这一轮尚未收尾，此时的“最后一条正文”只是中间步骤，不标记。
     val finalResultMessageIds = remember(visibleMessages, isStreaming) {
@@ -499,10 +513,10 @@ internal fun AgentConversationMessages(
         return state
     }
 
-    val bottomItemIndex = timelineEntries.size
+    val bottomItemIndex = displayEntries.size
     val latestUserMessage = visibleMessages.lastOrNull { it is UserMessageUi } as? UserMessageUi
     val latestUserEntryIndex = latestUserMessage?.let { user ->
-        timelineEntries.indexOfFirst { entry -> entry.key == user.id }.takeIf { it >= 0 }
+        displayEntries.indexOfFirst { entry -> entry.key == user.id }.takeIf { it >= 0 }
     }
     val pinLatestUserTurn = isUserTurnAnchorReady(userTurnScrollState, latestUserMessage?.id)
     val baseBottomPadding = bottomInset + 14.dp
@@ -827,8 +841,7 @@ internal fun AgentConversationMessages(
             ) Arrangement.Top else Arrangement.Bottom,
             modifier = Modifier
                 .fillMaxSize()
-                .scrollEndHaptic()
-                .overScrollVertical(),
+                .scrollEndHaptic(),
             contentPadding = PaddingValues(
                 top = 14.dp,
                 bottom = baseBottomPadding + pinReserve,
@@ -836,12 +849,13 @@ internal fun AgentConversationMessages(
             overscrollEffect = null,
         ) {
             itemsIndexed(
-                items = timelineEntries,
+                items = displayEntries,
                 key = { _, entry -> entry.key },
                 contentType = { _, entry ->
                     when (entry) {
                         is AgentTimelineEntry.Message -> entry.message::class
                         is AgentTimelineEntry.ThinkingBlock -> AgentTimelineEntry.ThinkingBlock::class
+                        is AgentTimelineEntry.CompletedSteps -> AgentTimelineEntry.CompletedSteps::class
                     }
                 },
             ) { entryIndex, entry ->
@@ -903,7 +917,35 @@ internal fun AgentConversationMessages(
                             thinkingViewportHeight = thinkingViewportHeight,
                             currentBrowserMessageId = currentBrowserMessageId,
                             onOpenBrowser = onOpenBrowser,
+                            // 工作过程直到 run 结束或后续正文出现前都保持展开，
+                            // 避免思考/工具交替时整个卡片反复折叠展开。
+                            // 该判定依赖一个不变量：运行中追加到工作块之后的条目只可能
+                            // 是正文或终结性消息（通知/提问会终结当前工作块）；若未来
+                            // 引入时间线末尾的“运行中占位条目”，这里需同步调整。
+                            blockActive = isStreaming && entryIndex == displayEntries.lastIndex,
                             onThinkingToggle = {
+                                onBottomAnchorChanged(false)
+                                onUserTurnScrollStateChanged(
+                                    resolveUserTurnScrollTransition(
+                                        userTurnScrollState,
+                                        UserTurnScrollEvent.PanelToggled,
+                                    ),
+                                )
+                            },
+                            modifier = itemModifier,
+                        )
+                    }
+
+                    is AgentTimelineEntry.CompletedSteps -> {
+                        AgentCompletedStepsRow(
+                            stepCount = entry.stepCount,
+                            expanded = entry.expanded,
+                            onToggle = {
+                                expandedTurnKeys = if (entry.expanded) {
+                                    expandedTurnKeys - entry.key
+                                } else {
+                                    expandedTurnKeys + entry.key
+                                }
                                 onBottomAnchorChanged(false)
                                 onUserTurnScrollStateChanged(
                                     resolveUserTurnScrollTransition(
@@ -1029,6 +1071,13 @@ internal sealed interface AgentTimelineEntry {
         override val key: String,
         val messages: List<AgentChatMessageUi>,
     ) : AgentTimelineEntry
+
+    /** 整轮工作过程的折叠摘要行（对应 Copilot Chat 的 "Completed N steps"）。 */
+    data class CompletedSteps(
+        override val key: String,
+        val stepCount: Int,
+        val expanded: Boolean,
+    ) : AgentTimelineEntry
 }
 
 internal fun List<AgentChatMessageUi>.toTimelineEntries(): List<AgentTimelineEntry> = buildList {
@@ -1056,6 +1105,109 @@ internal fun List<AgentChatMessageUi>.toTimelineEntries(): List<AgentTimelineEnt
         }
     }
     flushThinkingBlock()
+}
+
+/** 整轮折叠的展开状态：Set<String> 无法直接进 Bundle，用 listSaver 存成 List。 */
+private val ExpandedTurnKeysSaver = listSaver<Set<String>, String>(
+    save = { it.toList() },
+    restore = { it.toSet() },
+)
+
+/** 可被整轮折叠收走的步骤数：思考块按内部条目数、工具行与中间正文各第 1 步，其余为 0。 */
+internal fun AgentTimelineEntry.workStepCount(): Int = when (this) {
+    is AgentTimelineEntry.ThinkingBlock -> messages.size.coerceAtLeast(1)
+    is AgentTimelineEntry.Message -> when (message) {
+        is ToolActivityMessageUi, is AgentMessageUi -> 1
+        else -> 0
+    }
+    else -> 0
+}
+
+/** 一轮内可折叠的工作过程区间。 */
+internal data class CompletedTurnRange(
+    val key: String,
+    val startIndex: Int,
+    val endIndexExclusive: Int,
+    val stepCount: Int,
+)
+
+/**
+ * 找出可整轮折叠的区间：一轮（两条用户消息之间）中最终回答之前的连续工作条目。
+ * 只处理以用户消息开头的完整回合——被窗口截断的半截片段（如语音浮窗 takeLast 的
+ * 起点）不折叠，避免出现步数少算的假摘要。
+ * 进行中的最后一轮不折叠；不足 2 步或没有最终回答时不折叠（与 VS Code 一致）。
+ */
+internal fun List<AgentTimelineEntry>.completedTurnRanges(isStreaming: Boolean): List<CompletedTurnRange> {
+    val ranges = mutableListOf<CompletedTurnRange>()
+    var turnStart = 0
+    var turnUserLed = false
+
+    fun scanTurn(start: Int, endExclusive: Int, isLastTurn: Boolean, userLed: Boolean) {
+        if (!userLed) return
+        if (endExclusive <= start) return
+        if (isStreaming && isLastTurn) return
+        val finalAnswerIndex = (endExclusive - 1 downTo start).firstOrNull { index ->
+            val entry = this[index]
+            entry is AgentTimelineEntry.Message && entry.message is AgentMessageUi
+        } ?: return
+        var workStart = start
+        while (workStart < finalAnswerIndex && this[workStart].workStepCount() == 0) workStart++
+        if (workStart >= finalAnswerIndex) return
+        var stepCount = 0
+        for (index in workStart until finalAnswerIndex) {
+            val steps = this[index].workStepCount()
+            if (steps == 0) return
+            stepCount += steps
+        }
+        if (stepCount < 2) return
+        ranges += CompletedTurnRange(
+            key = "completed-${this[workStart].key}",
+            startIndex = workStart,
+            endIndexExclusive = finalAnswerIndex,
+            stepCount = stepCount,
+        )
+    }
+
+    forEachIndexed { index, entry ->
+        if (entry is AgentTimelineEntry.Message && entry.message is UserMessageUi) {
+            scanTurn(turnStart, index, isLastTurn = false, userLed = turnUserLed)
+            turnStart = index + 1
+            turnUserLed = true
+        }
+    }
+    scanTurn(turnStart, size, isLastTurn = true, userLed = turnUserLed)
+    return ranges
+}
+
+/**
+ * 按折叠状态生成渲染列表：折叠时区间被一行摘要替换，展开时摘要行后重新显示区间内容。
+ */
+internal fun List<AgentTimelineEntry>.withCompletedTurnCollapse(
+    ranges: List<CompletedTurnRange>,
+    expandedKeys: Set<String>,
+): List<AgentTimelineEntry> {
+    if (ranges.isEmpty()) return this
+    val source = this
+    val rangeByStart = ranges.associateBy { it.startIndex }
+    return buildList {
+        var index = 0
+        while (index < source.size) {
+            val range = rangeByStart[index]
+            if (range == null) {
+                add(source[index])
+                index++
+                continue
+            }
+            val expanded = range.key in expandedKeys
+            add(AgentTimelineEntry.CompletedSteps(range.key, range.stepCount, expanded))
+            if (expanded) {
+                for (inner in range.startIndex until range.endIndexExclusive) {
+                    add(source[inner])
+                }
+            }
+            index = range.endIndexExclusive
+        }
+    }
 }
 
 /**

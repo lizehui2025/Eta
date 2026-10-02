@@ -59,4 +59,66 @@ class AgentTimelineGroupingTest {
         assertEquals("thinking-x1", block.key)
         assertEquals(listOf("x1", "x2"), block.messages.map { it.id })
     }
+
+    @Test
+    fun completedTurnCollapsesWorkProcessBeforeFinalAnswer() {
+        val entries = listOf(
+            UserMessageUi("u1", "hi"),
+            ThinkingMessageUi("t1", "a", isStreaming = false),
+            ToolActivityMessageUi("x1", "shell", ToolActivityStatusUi.Success, "ls"),
+            AgentMessageUi("m1", "answer"),
+        ).toTimelineEntries()
+
+        val ranges = entries.completedTurnRanges(isStreaming = false)
+        assertEquals(1, ranges.size)
+        assertEquals(2, ranges.first().stepCount)
+
+        val collapsed = entries.withCompletedTurnCollapse(ranges, emptySet())
+        assertEquals(3, collapsed.size)
+        assertEquals("u1", collapsed[0].key)
+        assertTrue(collapsed[1] is AgentTimelineEntry.CompletedSteps)
+        assertEquals("m1", collapsed[2].key)
+
+        val expanded = entries.withCompletedTurnCollapse(ranges, setOf(ranges.first().key))
+        assertEquals(4, expanded.size)
+        assertTrue(expanded[2] is AgentTimelineEntry.ThinkingBlock)
+    }
+
+    @Test
+    fun streamingLastTurnAndSingleStepTurnsAreNotCollapsed() {
+        val streaming = listOf(
+            UserMessageUi("u1", "hi"),
+            ThinkingMessageUi("t1", "a", isStreaming = true),
+            ToolActivityMessageUi("x1", "shell", ToolActivityStatusUi.Running, "ls"),
+        ).toTimelineEntries()
+        assertTrue(streaming.completedTurnRanges(isStreaming = true).isEmpty())
+
+        val singleStep = listOf(
+            UserMessageUi("u1", "hi"),
+            ThinkingMessageUi("t1", "a", isStreaming = false),
+            AgentMessageUi("m1", "answer"),
+        ).toTimelineEntries()
+        assertTrue(singleStep.completedTurnRanges(isStreaming = false).isEmpty())
+    }
+
+    @Test
+    fun truncatedFragmentsAndTurnsWithNoticesAreNotCollapsed() {
+        // 浮窗窗口可能从回合中段截断：不以用户消息开头的片段不折叠（步数会少算）。
+        val windowedFragment = listOf(
+            ThinkingMessageUi("t1", "a", isStreaming = false),
+            ToolActivityMessageUi("x1", "shell", ToolActivityStatusUi.Success, "ls"),
+            AgentMessageUi("m1", "answer"),
+        ).toTimelineEntries()
+        assertTrue(windowedFragment.completedTurnRanges(isStreaming = false).isEmpty())
+
+        // 工作过程中夹系统通知（0 步）时整轮不折叠，保证通知不会被收走。
+        val noticeInsideTurn = listOf(
+            UserMessageUi("u1", "hi"),
+            ThinkingMessageUi("t1", "a", isStreaming = false),
+            SystemNoticeMessageUi("n1", SystemNoticeCode.Stopped),
+            ToolActivityMessageUi("x1", "shell", ToolActivityStatusUi.Success, "ls"),
+            AgentMessageUi("m1", "answer"),
+        ).toTimelineEntries()
+        assertTrue(noticeInsideTurn.completedTurnRanges(isStreaming = false).isEmpty())
+    }
 }
