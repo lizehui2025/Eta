@@ -303,9 +303,12 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
             )
             if (result.messageStop) sawMessageStop = true
             result.finishReason?.let { finishReason = it }
-            result.usage?.let {
-                usage = it
-                onEvent(ProviderEvent.Usage(it, result.contextInputTokens ?: it.inputTokens))
+            result.usage?.let { incoming ->
+                // 用量可能分片到达：message_start 带输入/缓存，message_delta 带最终输出。
+                // 逐字段合并（后到非空覆盖、先到非空保留），避免整体替换丢失输入/缓存信息。
+                val merged = mergeUsage(usage, incoming)
+                usage = merged
+                onEvent(ProviderEvent.Usage(merged, result.contextInputTokens ?: merged.inputTokens))
             }
             !sawMessageStop
         }
@@ -513,14 +516,32 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
 
     private fun parseUsage(usage: JSONObject?): AgentTokenUsage? {
         usage ?: return null
+        // Anthropic 的 input_tokens 不包含缓存读写，总输入需加上 cache_read/cache_creation。
+        val cacheRead = usage.firstInt("cache_read_input_tokens") ?: 0
+        val cacheCreation = usage.firstInt("cache_creation_input_tokens") ?: 0
+        val rawInput = usage.firstInt("input_tokens")
+        val totalInput = rawInput?.let { it + cacheRead + cacheCreation }
         return AgentTokenUsage(
-            contextTokens = null,
-            inputTokens = usage.firstInt("input_tokens"),
+            contextTokens = totalInput,
+            inputTokens = totalInput,
             outputTokens = usage.firstInt("output_tokens"),
             reasoningTokens = usage.firstInt("thinking_output_tokens"),
             cachedTokens = usage.firstInt("cache_read_input_tokens")
         ).takeUnless { it.isEmpty }
     }
+
+    private fun mergeUsage(previous: AgentTokenUsage?, next: AgentTokenUsage): AgentTokenUsage =
+        if (previous == null) {
+            next
+        } else {
+            AgentTokenUsage(
+                contextTokens = next.contextTokens ?: previous.contextTokens,
+                inputTokens = next.inputTokens ?: previous.inputTokens,
+                outputTokens = next.outputTokens ?: previous.outputTokens,
+                reasoningTokens = next.reasoningTokens ?: previous.reasoningTokens,
+                cachedTokens = next.cachedTokens ?: previous.cachedTokens,
+            )
+        }
 
     private fun parseJsonObject(raw: String): JSONObject =
         runCatching { JSONObject(raw.ifBlank { "{}" }) }.getOrDefault(JSONObject())

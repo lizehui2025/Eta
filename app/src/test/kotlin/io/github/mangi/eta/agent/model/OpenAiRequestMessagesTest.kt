@@ -10,7 +10,7 @@ import org.junit.Test
 /** forChatCompletions 的投影只保留 role/content，内部字段（含 output items）必须剥离。 */
 class OpenAiRequestMessagesTest {
     @Test
-    fun completedThoughtsAreRemovedButCurrentToolThoughtAndTranscriptStayIntact() {
+    fun reasoningStaysVerbatimByDefaultSoCachePrefixSurvivesNewUserTurns() {
         val oldThought = JSONObject().put("role", "assistant").put("content", "Previous answer")
             .put("reasoning_content", "Repeated old thought")
         val currentThought = JSONObject().put("role", "assistant").put("content", "")
@@ -25,14 +25,18 @@ class OpenAiRequestMessagesTest {
         val cache = AgentRequestProjectionCache()
         repeat(2) {
             val projected = OpenAiRequestMessages.forChatCompletions(source, cache = cache)
-            assertFalse(projected.getJSONObject(1).has("reasoning_content"))
+            // 默认逐字节原样回传（含历史轮 reasoning）：请求只随对话追加，缓存前缀才能跨轮命中。
+            assertEquals("Repeated old thought", projected.getJSONObject(1).getString("reasoning_content"))
             assertEquals("Previous answer", projected.getJSONObject(1).getString("content"))
             assertEquals("Current tool reasoning", projected.getJSONObject(3).getString("reasoning_content"))
             assertEquals("Evidence", projected.getJSONObject(4).getString("content"))
         }
+        // 投影是顶层浅拷贝，不改写会话消息本身。
         assertTrue(oldThought.has("reasoning_content"))
         assertTrue(currentThought.has("reasoning_content"))
+        // 服务端拒绝该字段时全量剥离重试（历史轮与当前轮一起剥离）。
         val stripped = OpenAiRequestMessages.forChatCompletions(source, stripReasoning = true, cache = cache)
+        assertFalse(stripped.getJSONObject(1).has("reasoning_content"))
         assertFalse(stripped.getJSONObject(3).has("reasoning_content"))
     }
 

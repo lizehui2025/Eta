@@ -27,10 +27,7 @@ internal data class RoleplayRunContext(
 
     /** 世界书与深度提示只投影到当前请求，不写入 transcript 或覆盖历史。 */
     fun projectMessages(source: JSONArray, tools: JSONArray = JSONArray()): JSONArray {
-        val conversationText = (0 until source.length()).mapNotNull { index ->
-            source.optJSONObject(index)?.takeIf(::isDialogue)
-                ?.let(::dialogueText)
-        }
+        val conversationText = dialogueTexts(source)
         val inputBudget = ((contextWindow ?: 128_000) * AgentContextBudget.TRIGGER_RATIO).toInt()
         val extraInstructions = expand(card.depthPrompt?.prompt.orEmpty()) + expand(card.postHistoryInstructions)
         val available = (inputBudget - AgentContextBudget.rawEstimate(source, tools) -
@@ -41,14 +38,20 @@ internal data class RoleplayRunContext(
             inputTokenBudget = available,
             estimateTokens = { AgentContextBudget.textTokens(expand(it)) },
         )
-        val projected = (0 until source.length()).map { index ->
-            JSONObject(source.getJSONObject(index).toString()).apply {
-                if (optBoolean(PERSONA_MARKER)) {
+        val projected = ArrayList<JSONObject>(source.length())
+        for (index in 0 until source.length()) {
+            val message = source.optJSONObject(index) ?: continue
+            if (message.optBoolean(PERSONA_MARKER)) {
+                // 只有人设消息需要改写（注入世界书）；其余消息保留对象身份，
+                // 让下游按对象身份缓存 token 估算与协议投影，跨轮持续命中。
+                projected += JSONObject(message.toString()).apply {
                     put("content", personaPrompt(worldbook.beforeCharacter, worldbook.afterCharacter))
                     remove(PERSONA_MARKER)
                 }
+            } else {
+                projected += message
             }
-        }.toMutableList()
+        }
         card.depthPrompt?.takeIf { it.prompt.isNotBlank() }?.let { depth ->
             val dialogueIndices = projected.indices.filter { isDialogue(projected[it]) }
             val index = if (depth.depth <= 0) projected.size else {
@@ -69,11 +72,46 @@ internal data class RoleplayRunContext(
         original = "以${card.name}的身份、设定和语气与$userName 交流。",
     )
 
-    private fun isDialogue(message: JSONObject): Boolean =
+    /**
+     * 对话文本列表（角色/用户纯文本消息），供世界书匹配。
+     *
+     * 工具轮只追加 assistant(tool_calls) 与 tool 消息，不改变对话集合——按
+     * 「对话条数 + 末条对话消息身份」缓存，长会话下避免每轮重新提取整份对话正文。
+     * 缓存字段只在 run 内的主循环线程读写（RoleplayRunContext 每 run 冻结一份）。
+     */
+    private var dialogueCacheKey: Pair<Int, JSONObject?>? = null
+    private var dialogueCacheText: List<String>? = null
+
+    private fun dialogueTexts(source: JSONArray): List<String> {
+        var count = 0
+        var lastDialogue: JSONObject? = null
+        for (index in 0 until source.length()) {
+            val message = source.optJSONObject(index) ?: continue
+            if (couldBeDialogue(message)) {
+                count++
+                lastDialogue = message
+            }
+        }
+        val key = count to lastDialogue
+        dialogueCacheText?.let { cached ->
+            if (dialogueCacheKey == key) return cached
+        }
+        val text = (0 until source.length()).mapNotNull { index ->
+            source.optJSONObject(index)?.takeIf(::isDialogue)?.let(::dialogueText)
+        }
+        dialogueCacheKey = key
+        dialogueCacheText = text
+        return text
+    }
+
+    /** 廉价预判（role 与 tool_calls），供缓存键统计；不做文本提取。 */
+    private fun couldBeDialogue(message: JSONObject): Boolean =
         message.optString("role") in setOf("user", "assistant") &&
             !message.optBoolean("_eta_observation") && !message.optBoolean("_eta_context_summary") &&
-            message.optJSONArray("tool_calls").let { it == null || it.length() == 0 } &&
-            dialogueText(message).isNotBlank()
+            message.optJSONArray("tool_calls").let { it == null || it.length() == 0 }
+
+    private fun isDialogue(message: JSONObject): Boolean =
+        couldBeDialogue(message) && dialogueText(message).isNotBlank()
 
     private fun dialogueText(message: JSONObject): String {
         val content = message.opt("content")

@@ -481,7 +481,14 @@ internal class AgentSubagentExecutor(
             if (contextMode == SubagentContextMode.SHARED) {
                 // 非纯净：共享主窗口快照作为前缀（只读复制），独立 controller/loop/transcript 运行，
                 // 不回写主 messages，终态只经 fanout 汇总返回。
-                subMessages = runCatching { JSONArray(parentMessagesProvider().toString()) }.getOrElse { JSONArray() }
+                // 浅拷贝即可：子代理只追加新消息、不就地改写父消息对象；保留对象身份还能让子代理
+                // 的估算/投影缓存跨轮命中（深拷贝 toString+parse 在 MB 级父历史下是纯浪费）。
+                subMessages = runCatching {
+                    val parent = parentMessagesProvider()
+                    JSONArray().also { copy ->
+                        for (i in 0 until parent.length()) copy.put(parent.opt(i) ?: JSONObject.NULL)
+                    }
+                }.getOrElse { JSONArray() }
                 if (subMessages.length() == 0) {
                     for (i in 0 until systemMessages.length()) subMessages.put(systemMessages.getJSONObject(i))
                     subSystemCount = systemMessages.length()
@@ -536,7 +543,10 @@ internal class AgentSubagentExecutor(
                 append("\n</subtask>")
             }
             subMessages.put(AgentConversationCodec.userTextMessage(isolatedPrompt))
-            val toolsCopy = JSONArray(subTools.toString())
+            val toolsCopy = JSONArray().also { copy ->
+                // 工具 schema 同样只读：浅拷贝数组、共享 schema 元素，避免逐工具重新解析。
+                for (i in 0 until subTools.length()) copy.put(subTools.opt(i) ?: JSONObject.NULL)
+            }
             val loop = AgentLoop(
                 config = config,
                 messages = subMessages,

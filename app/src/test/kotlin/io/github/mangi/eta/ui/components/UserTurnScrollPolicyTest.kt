@@ -75,6 +75,30 @@ class UserTurnScrollPolicyTest {
     }
 
     @Test
+    fun microDragAtBottomDoesNotResumeFollowing() {
+        val following = UserTurnScrollState(UserTurnScrollPhase.FollowingOverflow, "user-1")
+        // 从未离开底部（轻触/微扫）：松手后仍由用户接管，不重新武装跟底。
+        val controlled = resolveUserTurnScrollTransition(
+            following,
+            UserTurnScrollEvent.UserDragged(atBottom = true),
+        )
+        assertEquals(UserTurnScrollPhase.UserControlled, controlled.phase)
+        assertEquals(
+            UserTurnScrollPhase.UserControlled,
+            resolveUserTurnScrollTransition(controlled, UserTurnScrollEvent.ReturnedToBottom).phase,
+        )
+        // 离开过底部再回来：恢复跟底。
+        val leftBottom = resolveUserTurnScrollTransition(
+            controlled,
+            UserTurnScrollEvent.UserDragged(atBottom = false),
+        )
+        assertEquals(
+            UserTurnScrollPhase.FollowingOverflow,
+            resolveUserTurnScrollTransition(leftBottom, UserTurnScrollEvent.ReturnedToBottom).phase,
+        )
+    }
+
+    @Test
     fun resetReturnsToIdle() {
         assertEquals(
             UserTurnScrollPhase.Idle,

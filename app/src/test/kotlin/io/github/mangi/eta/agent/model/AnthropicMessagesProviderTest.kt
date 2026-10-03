@@ -241,6 +241,42 @@ class AnthropicMessagesProviderTest {
     }
 
     @Test
+    fun mergesUsageAcrossMessageStartAndMessageDelta() {
+        val body = buildString {
+            append(event("message_start", JSONObject().put("message", JSONObject().put("usage", JSONObject()
+                .put("input_tokens", 1000)
+                .put("cache_read_input_tokens", 4000)
+                .put("cache_creation_input_tokens", 1000)
+                .put("output_tokens", 1)))))
+            append(blockStart(0, JSONObject().put("type", "text").put("text", "答案")))
+            append(blockStop(0))
+            append(event("message_delta", JSONObject()
+                .put("delta", JSONObject().put("stop_reason", "end_turn"))
+                .put("usage", JSONObject().put("output_tokens", 50))))
+            append(event("message_stop", JSONObject()))
+        }
+        withAnthropicServer(body) { baseUrl ->
+            val events = mutableListOf<ProviderEvent>()
+            val response = AnthropicMessagesProvider.complete(providerRequest(baseUrl), AgentRunController(), events::add)
+
+            val messageUsage = response.assistantMessage.getJSONObject("usage")
+            assertEquals(6000, messageUsage.getInt("input_tokens"))
+            assertEquals(50, messageUsage.getInt("output_tokens"))
+            assertEquals(4000, messageUsage.getInt("cached_tokens"))
+
+            val usageEvents = events.filterIsInstance<ProviderEvent.Usage>()
+            assertEquals(2, usageEvents.size)
+            assertEquals(1, usageEvents.first().usage.outputTokens)
+            val merged = usageEvents.last()
+            assertEquals(6000, merged.usage.inputTokens)
+            assertEquals(6000, merged.usage.contextTokens)
+            assertEquals(4000, merged.usage.cachedTokens)
+            assertEquals(50, merged.usage.outputTokens)
+            assertEquals(6000, merged.contextInputTokens)
+        }
+    }
+
+    @Test
     fun completeBuildsAdaptiveThinkingRequestWhenEnabled() {
         val body = buildString {
             append(event("message_stop", JSONObject().put("type", "message_stop")))

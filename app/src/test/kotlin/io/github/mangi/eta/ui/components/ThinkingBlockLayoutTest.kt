@@ -18,8 +18,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.ui.model.ThinkingMessageUi
-import io.github.mangi.eta.ui.model.ToolActivityMessageUi
-import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -52,7 +50,7 @@ class ThinkingBlockLayoutTest {
         // 流式期间：没有「正在思考」头部与折叠入口，正文与尾部工作行直接可见。
         compose.onAllNodes(hasClickAction()).assertCountEquals(0)
         compose.onNodeWithText("Evidence").assertExists()
-        compose.onNodeWithText("Reasoning…").assertExists()
+        compose.onNodeWithTag(WorkProcessTailTag).assertExists()
         compose.runOnIdle { thinking.value = thinking.value.copy(isStreaming = false) }
         advanceLayouts()
         // 结束后：出现摘要头部，正文收起；再展开仍可查看。
@@ -177,43 +175,30 @@ class ThinkingBlockLayoutTest {
     }
 
     @Test
-    fun completedWorkProcessContainsToolRowsAndReportsStepCount() {
+    fun completedThinkingBlockPrefersBoldFirstLineTitleAndHidesContent() {
         val messages = listOf(
-            ThinkingMessageUi("thought", "Evidence", false, elapsedSeconds = 3),
-            ToolActivityMessageUi(
-                id = "tool",
-                toolName = "shell",
-                status = ToolActivityStatusUi.Success,
-                argumentsSummary = "echo hi",
-            ),
+            ThinkingMessageUi("thought", "**Analyzed the code**\nEvidence", false, elapsedSeconds = 3),
         )
         compose.setContent {
             MiuixTheme {
-                AgentThinkingBlock(id = "mixed", messages = messages)
+                AgentThinkingBlock(id = "thought-block", messages = messages)
             }
         }
         advanceLayouts()
-        // 结束后折叠为一行：头部显示步骤数，工具行与思考正文默认不可见。
-        compose.onNodeWithText("Completed 1 step").assertExists()
-        compose.onNodeWithText("echo hi", substring = true).assertDoesNotExist()
+        // 结束后折叠为一行：标题取思考首行加粗短句（含耗时尾巴），正文默认不可见。
+        compose.onNodeWithText("Analyzed the code", substring = true).assertExists()
+        compose.onNodeWithText("Evidence", substring = true).assertDoesNotExist()
         compose.onNode(hasClickAction()).performClick()
         advanceLayouts()
-        compose.onNodeWithText("Evidence").assertExists()
-        compose.onNodeWithText("echo hi", substring = true).assertExists()
+        compose.onNodeWithText("Evidence", substring = true).assertExists()
     }
 
     @Test
-    fun activeWorkProcessStaysExpandedAcrossMessageGaps() {
+    fun activeThinkingBlockStaysExpandedUntilRunEnds() {
         val blockActive = mutableStateOf(true)
         compose.mainClock.autoAdvance = false
         val messages = listOf(
             ThinkingMessageUi("thought", "Evidence", false, elapsedSeconds = 3),
-            ToolActivityMessageUi(
-                id = "tool",
-                toolName = "shell",
-                status = ToolActivityStatusUi.Success,
-                argumentsSummary = "echo hi",
-            ),
         )
         compose.setContent {
             MiuixTheme {
@@ -221,14 +206,13 @@ class ThinkingBlockLayoutTest {
             }
         }
         advanceLayouts()
-        // 工作过程进行中：即使没有正在流式的思考/工具，也保持展开。
+        // 思考间隙（已停止流式、但 run 尚未结束）：块保持展开，正文可见。
         compose.onNodeWithText("Evidence").assertExists()
-        compose.onNodeWithText("echo hi", substring = true).assertExists()
         compose.runOnIdle { blockActive.value = false }
         advanceLayouts()
-        // run 结束：收起为一行摘要。
-        compose.onNodeWithText("echo hi", substring = true).assertDoesNotExist()
-        compose.onNodeWithText("Completed 1 step").assertExists()
+        // run 结束：收起为一行摘要（含耗时尾巴）。
+        compose.onNodeWithText("Evidence").assertDoesNotExist()
+        compose.onNodeWithText("Reasoning completed", substring = true).assertExists()
     }
 
     private fun advanceLayouts() {

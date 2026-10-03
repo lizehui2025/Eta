@@ -44,7 +44,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -215,20 +214,32 @@ private const val DATA_URL_BITMAP_CACHE_MAX_BYTES = 16 * 1024 * 1024
 private const val DATA_URL_BITMAP_CACHE_MAX_ENTRIES = 8
 
 private class DataUrlBitmapLruCache {
-    private data class Key(val maxLongEdge: Int, val dataUrl: String)
+    /**
+     * key 只保留 O(1) 采样（长度 + 头/尾片段），不再把整段 dataUrl 放进键——
+     * 旧实现让缓存直到淘汰前钉住最多 8 份原始 base64（每份可达数 MB）；
+     * base64 图片头高度雷同（格式前缀固定），区分度由长度与尾部 64 字符采样提供。
+     */
+    private data class Key(val maxLongEdge: Int, val length: Int, val head: String, val tail: String)
+
+    private fun keyOf(maxLongEdge: Int, dataUrl: String): Key = Key(
+        maxLongEdge = maxLongEdge,
+        length = dataUrl.length,
+        head = dataUrl.substring(0, minOf(16, dataUrl.length)),
+        tail = dataUrl.substring((dataUrl.length - 64).coerceAtLeast(0)),
+    )
 
     private val lock = Any()
     private val entries = LinkedHashMap<Key, ImageBitmap>(16, 0.75f, true)
     private var bytes = 0L
 
     fun get(maxLongEdge: Int, dataUrl: String): ImageBitmap? = synchronized(lock) {
-        entries[Key(maxLongEdge, dataUrl)]
+        entries[keyOf(maxLongEdge, dataUrl)]
     }
 
     fun put(maxLongEdge: Int, dataUrl: String, bitmap: ImageBitmap) {
         val size = bitmap.decodedByteCount()
         synchronized(lock) {
-            entries.put(Key(maxLongEdge, dataUrl), bitmap)?.let { previous ->
+            entries.put(keyOf(maxLongEdge, dataUrl), bitmap)?.let { previous ->
                 bytes -= previous.decodedByteCount()
             }
             bytes += size
@@ -283,7 +294,7 @@ fun AITypingIndicator(modifier: Modifier = Modifier) {
     ) {
         repeat(3) { index ->
             val delay = index * 150
-            val alpha by infiniteTransition.animateFloat(
+            val alpha = infiniteTransition.animateFloat(
                 initialValue = 0.3f,
                 targetValue = 1f,
                 animationSpec = infiniteRepeatable(
@@ -295,7 +306,8 @@ fun AITypingIndicator(modifier: Modifier = Modifier) {
             Box(
                 modifier = Modifier
                     .size(6.dp)
-                    .graphicsLayer(alpha = alpha)
+                    // draw 阶段读取帧值：不因三个点的透明度动画每帧重组这一行。
+                    .graphicsLayer { this.alpha = alpha.value }
                     .background(MiuixTheme.colorScheme.onSurfaceVariantSummary, CircleShape)
             )
         }
@@ -305,15 +317,18 @@ fun AITypingIndicator(modifier: Modifier = Modifier) {
 /**
  * 只有正在执行的状态才持有无限动画。历史思考和工具条目保持静态，避免长会话里
  * 每个已完成节点都持续产生帧时钟与状态更新。
+ *
+ * 返回取值函数而不是裸 Float：动画值只应在 draw 阶段读取；若作为普通值返回，
+ * snapshot 读会归属到调用方 composable 的 restart scope，让整块/整行每帧重组。
  */
 @Composable
 private fun rememberActivePulse(
     active: Boolean,
     label: String,
-): Float {
-    if (!active) return 1f
+): () -> Float {
+    if (!active) return remember { { 1f } }
     val transition = rememberInfiniteTransition(label = label)
-    val alpha by transition.animateFloat(
+    val alpha = transition.animateFloat(
         initialValue = 0.58f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -322,7 +337,7 @@ private fun rememberActivePulse(
         ),
         label = "${label}_alpha",
     )
-    return alpha
+    return remember(alpha) { { alpha.value } }
 }
 
 @Composable
@@ -441,7 +456,10 @@ internal fun ChatMessageItem(
 }
 
 /**
- * 把连续的思考与工具调用收束为一个可展开的工作过程，避免 Agent 事件退化为聊天气泡噪音。
+ * 把连续的思考收束为一个可展开的「思考块」。
+ *
+ * 工具调用不再并入：对齐 VS Code 定型后的 reasoning/items 分组，工具行留在主流逐条显示
+ * （思考归容器、工具行独立成行），避免两者在同一个列表里交错混排。
  */
 @Composable
 internal fun AgentThinkingBlock(
@@ -451,38 +469,35 @@ internal fun AgentThinkingBlock(
     collapseResetKey: Long = 0L,
     onThinkingToggle: () -> Unit = {},
     thinkingViewportHeight: androidx.compose.ui.unit.Dp? = null,
-    currentBrowserMessageId: String? = null,
-    onOpenBrowser: () -> Unit = {},
     /**
-     * 整个工作过程是否仍在进行（当前 run 未结束且本块是时间线最后一项）。
+     * 思考块是否仍在进行（当前 run 未结束且本块是时间线最后一项）。
      *
-     * 有了它，块在「思考结束→工具还没开始」「工具结束→下一轮思考」的间隙不会反复折叠，
-     * 只有后续正文出现或 run 结束时才收起，对齐 VS Code 的 thinking preview 行为。
+     * 有了它，块在「思考结束→工具行还没出现」的间隙不会反复折叠，
+     * 只有后续条目（工具行/正文）出现或 run 结束时才收起，对齐 VS Code 的 thinking preview 行为。
      */
     blockActive: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val thinkingRunning = messages.any { message ->
+    val running = messages.any { message ->
         message is ThinkingMessageUi && message.isStreaming
     }
-    val toolsRunning = messages.any { message ->
-        message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running
-    }
-    val running = thinkingRunning || toolsRunning
     val active = running || blockActive
     val lastThinking = messages.lastOrNull { it is ThinkingMessageUi } as? ThinkingMessageUi
-    val stepCount = messages.count { it is ToolActivityMessageUi }
-    val hasThinkingContent = messages.any { it is ThinkingMessageUi && it.content.isNotBlank() }
-    // 头部文案对齐 VS Code 的工作过程用词：工具执行中显示步骤数，思考中显示思考中，
-    // 结束后优先显示步骤总数，只有思考内容时保留原有的计时文案。
-    val headerText = when {
-        toolsRunning -> pluralStringResource(R.plurals.work_processing_step, stepCount, stepCount)
-        thinkingRunning || blockActive -> stringResource(R.string.reasoning_in_progress)
-        stepCount > 0 -> pluralStringResource(R.plurals.work_completed_steps, stepCount, stepCount)
-        else -> lastThinking?.elapsedSeconds?.takeIf { it > 0 }?.let { seconds ->
+    // 运行中不再显示步骤数头部（VS Code fixedScrolling 由尾部提示行承担状态）：
+    // 短语固定取思考池，并随块内条目数轮换，每 50 步出现一次彩蛋文案。
+    val workingPhrase = rememberWorkingPhrase(
+        category = WorkingPhraseCategory.Thinking,
+        step = messages.size,
+    )
+    // 完成态对齐 VS Code：思考首行加粗短句（含耗时）优先，否则回退计时 / 完成文案。
+    val blockTitle = remember(messages) { workProcessTitle(messages) }
+    val summaryText = blockTitle?.let { workProcessTitleText(it) }
+    val completedHeaderText = summaryText
+        ?.let { it + completedDurationSuffix(lastThinking?.elapsedSeconds) }
+        ?: lastThinking?.elapsedSeconds?.takeIf { it > 0 }?.let { seconds ->
             pluralStringResource(R.plurals.reasoning_completed_seconds, seconds, seconds)
-        } ?: stringResource(R.string.reasoning_completed)
-    }
+        }
+        ?: stringResource(R.string.reasoning_completed)
     // 展开状态只随「工作过程是否进行中」重置：手动收起不会被下一轮消息重新打开。
     var expansionOverride by rememberSaveable(id, active) {
         mutableStateOf<Boolean?>(null)
@@ -522,13 +537,14 @@ internal fun AgentThinkingBlock(
                         .size(6.dp)
                         .clip(CircleShape)
                         .background(MiuixTheme.colorScheme.onSurface)
-                        .graphicsLayer(alpha = if (active) pulseAlpha else 1f),
+                        .graphicsLayer { this.alpha = if (active) pulseAlpha() else 1f },
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = headerText,
+                    text = if (active) workingPhrase else completedHeaderText,
                     style = MiuixTheme.textStyles.body2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.workingShimmer(enabled = active),
                 )
             }
             ThinkingCollapseBody(
@@ -543,8 +559,6 @@ internal fun AgentThinkingBlock(
                     running = active,
                     assistantOverlay = true,
                     onThinkingToggle = onThinkingToggle,
-                    currentBrowserMessageId = currentBrowserMessageId,
-                    onOpenBrowser = onOpenBrowser,
                     windowMaxHeight = thinkingViewportHeight?.takeIf { startedRunning }?.let {
                         thinkingBodyHeightDp(it.value).dp
                     },
@@ -575,21 +589,17 @@ internal fun AgentThinkingBlock(
                     .padding(horizontal = 2.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // 该分支的前提是 !active，头部只以终态呈现（运行中的状态在尾部提示行），
-                // 因此这里的颜色与透明度都是常量，不再保留运行态的脉冲/主色判断。
+                // 该分支的前提是 !active，头部只以终态呈现：完成态统一对勾
+                // （对齐 VS Code checkCompact），颜色不再保留运行态判断。
                 Icon(
-                    imageVector = if (stepCount > 0 && !hasThinkingContent) {
-                        Icons.Rounded.Build
-                    } else {
-                        Icons.Rounded.Lightbulb
-                    },
+                    imageVector = Icons.Rounded.Check,
                     contentDescription = null,
                     modifier = Modifier.size(15.dp),
                     tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = headerText,
+                    text = completedHeaderText,
                     style = MiuixTheme.textStyles.body2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     maxLines = 1,
@@ -599,12 +609,7 @@ internal fun AgentThinkingBlock(
                 ExpandChevron(
                     expanded = expanded,
                     contentDescription = stringResource(
-                        when {
-                            stepCount > 0 ->
-                                if (expanded) R.string.work_collapse else R.string.work_expand
-                            else ->
-                                if (expanded) R.string.reasoning_collapse else R.string.reasoning_expand
-                        },
+                        if (expanded) R.string.reasoning_collapse else R.string.reasoning_expand,
                     ),
                     modifier = Modifier.size(14.dp),
                     tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.7f),
@@ -624,8 +629,6 @@ internal fun AgentThinkingBlock(
                 running = active,
                 assistantOverlay = false,
                 onThinkingToggle = onThinkingToggle,
-                currentBrowserMessageId = currentBrowserMessageId,
-                onOpenBrowser = onOpenBrowser,
                 // 工作窗口：VS Code fixedScrolling 的 200dp 与视口自适应的较小值。
                 windowMaxHeight = if (active) {
                     minOf(
@@ -636,7 +639,7 @@ internal fun AgentThinkingBlock(
                 } else {
                     null
                 },
-                tailLabel = if (active) headerText else null,
+                tailLabel = if (active) workingPhrase else null,
                 tailPulseAlpha = pulseAlpha,
                 modifier = Modifier.padding(top = 2.dp, bottom = 6.dp),
             )
@@ -689,10 +692,17 @@ internal fun AgentCompletedStepsRow(
     }
 }
 
+/** 完成标题的耗时尾巴（` · 12s`）；无有效耗时时为空串，调用方直接拼接。 */
+@Composable
+private fun completedDurationSuffix(seconds: Int?): String =
+    seconds?.takeIf { it > 0 }?.let { value ->
+        " · " + stringResource(R.string.work_duration_seconds, value)
+    }.orEmpty()
+
 /**
- * 工作过程块展开后的内层列表。
+ * 思考块展开后的内层列表。
  *
- * 一个块可能包含多条思考消息与工具调用；这里用限高 LazyColumn 懒组合，
+ * 一个块包含一条或多条思考消息；这里用限高 LazyColumn 懒组合，
  * 只渲染视口附近的条目，并在用户没有上滑时跟随最后一条输出。
  */
 @Composable
@@ -703,11 +713,10 @@ private fun ThinkingMessageList(
     assistantOverlay: Boolean,
     onFollowInterrupted: () -> Unit = {},
     onThinkingToggle: () -> Unit = {},
-    currentBrowserMessageId: String? = null,
-    onOpenBrowser: () -> Unit = {},
     windowMaxHeight: androidx.compose.ui.unit.Dp? = null,
     tailLabel: String? = null,
-    tailPulseAlpha: Float = 1f,
+    /** 尾部圆点透明度：传取值函数，由 draw 阶段读取，避免每帧把脉冲值传成参数。 */
+    tailPulseAlpha: () -> Float = { 1f },
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -822,10 +831,9 @@ private fun ThinkingMessageList(
                 message = message,
                 onSuggestionClick = {},
                 onRunTraceClick = {},
-                onOpenBrowser = onOpenBrowser,
-                showBrowserShortcut = message is ToolActivityMessageUi &&
-                    message.toolName == "browser_use" &&
-                    message.id == currentBrowserMessageId,
+                // 工具调用已拆到主流，思考块内不会再出现工具行；浏览器入口无需再接线。
+                onOpenBrowser = {},
+                showBrowserShortcut = false,
                 compact = true,
                 assistantOverlay = assistantOverlay,
                 onThinkingToggle = onThinkingToggle,
@@ -852,6 +860,7 @@ private fun ThinkingMessageList(
                         .drawBehind {
                             drawWorkProcessRail(
                                 railColor = railColor,
+                                dotColor = railColor.copy(alpha = railColor.alpha * tailPulseAlpha()),
                                 isFirst = messages.isEmpty(),
                                 isLast = true,
                                 glyphCenterY = tailGlyphCenterY,
@@ -871,7 +880,10 @@ private fun ThinkingMessageList(
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.graphicsLayer(alpha = tailPulseAlpha),
+                        // 文本走扫光、圆点走脉冲：与 VS Code 的 shimmering spinner 行一致。
+                        modifier = Modifier
+                            .testTag(WorkProcessTailTag)
+                            .workingShimmer(enabled = running),
                     )
                 }
             }
@@ -885,6 +897,7 @@ private fun ThinkingMessageList(
  */
 private fun DrawScope.drawWorkProcessRail(
     railColor: Color,
+    dotColor: Color = railColor,
     isFirst: Boolean,
     isLast: Boolean,
     glyphCenterY: Float,
@@ -911,7 +924,7 @@ private fun DrawScope.drawWorkProcessRail(
     }
     if (hasDot) {
         drawCircle(
-            color = railColor,
+            color = dotColor,
             radius = 2.5.dp.toPx(),
             center = Offset(railX, glyphCenterY),
         )
@@ -1177,7 +1190,7 @@ private fun UserQuestionCard(
                 contentDescription = null,
                 modifier = Modifier
                     .size(13.dp)
-                    .graphicsLayer(alpha = if (message.running) pulseAlpha else 1f),
+                    .graphicsLayer { this.alpha = if (message.running) pulseAlpha() else 1f },
                 tint = if (message.running) {
                     MiuixTheme.colorScheme.primary
                 } else {
@@ -1258,7 +1271,7 @@ private fun ContextCompactionMarker(
                 contentDescription = null,
                 modifier = Modifier
                     .size(12.dp)
-                    .graphicsLayer(alpha = if (message.running) pulseAlpha else 1f),
+                    .graphicsLayer { this.alpha = if (message.running) pulseAlpha() else 1f },
                 tint = if (message.running) {
                     MiuixTheme.colorScheme.primary
                 } else {
@@ -2882,7 +2895,7 @@ private fun ThinkingRow(
                 contentDescription = null,
                 modifier = Modifier
                     .size(15.dp)
-                    .graphicsLayer(alpha = if (message.isStreaming) pulseAlpha else 1f),
+                    .graphicsLayer { this.alpha = if (message.isStreaming) pulseAlpha() else 1f },
                 tint = if (message.isStreaming) {
                     MiuixTheme.colorScheme.primary
                 } else {
@@ -3012,13 +3025,8 @@ private fun ToolActivityInline(
         label = "tool_pulse",
     )
 
-    val toolLabel = toolDisplayName(message.toolName)
-    val title = message.argumentsSummary
-        .takeIf(String::isNotBlank)
-        ?.let { summary ->
-            if (summary.startsWith(toolLabel)) summary else "$toolLabel · $summary"
-        }
-        ?: toolLabel
+    // 结束态标题用过去式动词（对齐 VS Code 的 pastTenseMessage）；终端以真实命令为目标。
+    val title = toolActionTitle(message)
     val browserSubtitle = browserSnapshot?.let { snapshot ->
         when {
             snapshot.isLoading ->
@@ -3088,9 +3096,9 @@ private fun ToolActivityInline(
                 modifier = Modifier
                     .padding(top = if (compact) 0.dp else 2.dp)
                     .size(if (compact) 14.dp else 15.dp)
-                    .graphicsLayer(
-                        alpha = if (message.status == ToolActivityStatusUi.Running) pulseAlpha else 1f,
-                    ),
+                    .graphicsLayer {
+                        this.alpha = if (message.status == ToolActivityStatusUi.Running) pulseAlpha() else 1f
+                    },
                 tint = if (isSubagentRow) {
                     MiuixTheme.colorScheme.secondary
                 } else {
@@ -3138,6 +3146,13 @@ private fun ToolActivityInline(
                         },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                // 运行中的工具在标题下增加细进度条（对齐 VS Code 的不确定进度）。
+                if (message.status == ToolActivityStatusUi.Running && !isSubagentRow) {
+                    ToolRunProgressBar(
+                        color = MiuixTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 4.dp),
                     )
                 }
             }
@@ -3258,7 +3273,7 @@ private fun ToolActivityInline(
 @Composable
 private fun ToolTimelineMarker(
     message: ToolActivityMessageUi,
-    pulseAlpha: Float,
+    pulseAlpha: () -> Float,
 ) {
     Column(
         modifier = Modifier
@@ -3270,7 +3285,7 @@ private fun ToolTimelineMarker(
             modifier = Modifier
                 .size(17.dp)
                 .graphicsLayer {
-                    alpha = if (message.status == ToolActivityStatusUi.Running) pulseAlpha else 1f
+                    alpha = if (message.status == ToolActivityStatusUi.Running) pulseAlpha() else 1f
                 },
             contentAlignment = Alignment.Center,
         ) {

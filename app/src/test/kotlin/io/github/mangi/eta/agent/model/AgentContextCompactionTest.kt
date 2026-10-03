@@ -308,6 +308,21 @@ class AgentContextCompactionTest {
     }
 
     @Test
+    fun compactionResetsLowCacheHitSample() {
+        val budget = AgentContextBudget(10_000)
+        budget.observe(
+            usage = AgentTokenUsage(inputTokens = 10_000, cachedTokens = 2_000),
+            requestEstimate = 10_000,
+        )
+        assertEquals(AgentContextBudget.LOW_CACHE_TRIGGER_RATIO, budget.triggerRatio(), 0.0001)
+
+        budget.resetCacheHitRate()
+
+        // 压缩后样本已清空，触发比例回到常规阈值，不会因压缩自身的大 miss 而连环提前压缩。
+        assertEquals(AgentContextBudget.TRIGGER_RATIO, budget.triggerRatio(), 0.0001)
+    }
+
+    @Test
     fun overflowClassificationDoesNotTreatEveryBadRequestAsCapacityFailure() {
         assertEquals("CONTEXT_OVERFLOW", AgentModelFailure.http(400,
             """{"error":{"code":"context_length_exceeded","message":"private fixture"}}""").code)

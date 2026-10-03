@@ -50,8 +50,8 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             .build()
 
         var usePromptCacheKey = ProviderPromptCache.openAiPromptCacheKeyAllowed(config.baseUrl)
-        // 本次完成是否剥离历史 reasoning_content。默认 false：默认路径与现状逐字节一致。
-        var stripReasoning = false
+        // 推理链默认原样回传（缓存前缀才稳定）；端点在上次拒绝的 TTL 内直接全量剥离，跳过必败请求。
+        var stripReasoning = ProviderPromptCache.isReasoningContentRejected(config.baseUrl)
         // 降级预算：单次完成最多再发一次请求。prompt_cache_key 与 reasoning_content 两类降级
         // 由同一次失败的一次判定选出（if/else 互斥），加上各自的“已经降过”守卫，
         // 因此最多 2 次 HTTP 尝试，不会叠加、也不会循环。
@@ -115,11 +115,11 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
                             !stripReasoning &&
                             ProviderPromptCache.isReasoningContentRejection(code, errorBody)
                         ) {
-                            // 服务端拒绝历史消息里的 reasoning_content（跨模型会话常见）：剥离后重试一次。
+                            // 服务端拒绝 reasoning_content（跨模型会话、老网关常见）：剥离后重试一次，
+                            // 并把结论记入该地址（TTL 内后续请求直接剥离，避免每个完成都付一次必败请求）。
                             // 判定用字段专用版本 [ProviderPromptCache.isReasoningContentRejection]，
                             // 它覆盖通用“未知/不支持字段”措辞，并额外认中文等更宽的拒绝说法。
-                            // `!stripReasoning` 保证剥离降级在单次完成内只发生一次，且已剥离时
-                            // 重试请求体与失败请求体完全相同，重试没有意义。
+                            // `!stripReasoning` 保证剥离降级在单次完成内只发生一次。
                             ProviderPromptCache.markReasoningContentRejected(config.baseUrl)
                             retryWithoutReasoningContent = true
                         } else {
@@ -462,10 +462,12 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
                 "output_tokens_details",
                 childKey = "reasoning_tokens"
             ),
+            // 缓存命中字段兼容：OpenAI/网关 details、Moonshot 顶层 cached_tokens、Anthropic 中转、DeepSeek prompt_cache_hit_tokens
             cachedTokens = usage.firstNestedInt(
                 "prompt_tokens_details",
+                "input_tokens_details",
                 childKey = "cached_tokens"
-            ) ?: usage.firstInt("cache_read_input_tokens")
+            ) ?: usage.firstInt("cached_tokens", "cache_read_input_tokens", "prompt_cache_hit_tokens")
         ).takeUnless { it.isEmpty }
     }
 

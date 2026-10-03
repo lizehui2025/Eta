@@ -116,6 +116,8 @@ internal class AgentContextSession(
             try {
                 publishSnapshot(candidate)
                 onCompactionCompleted()
+                // 压缩后必然出现一次全量 miss，重置低命中样本，避免“压缩→更早压缩”的震荡。
+                budget.resetCacheHitRate()
             } catch (failure: Exception) {
                 compacted = wasCompacted
                 throw failure

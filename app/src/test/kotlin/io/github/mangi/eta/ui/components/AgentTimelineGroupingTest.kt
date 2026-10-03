@@ -12,11 +12,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 工作过程分组：连续 思考 + 工具调用 收束为同一个块，正文/用户消息/系统通知才中断。
+ * 时间线分组：连续思考收束为「思考块」；工具调用留在主流逐条显示，
+ * 正文/用户消息/系统通知同样独立成条目（对齐 VS Code reasoning/items 分离）。
  */
 class AgentTimelineGroupingTest {
     @Test
-    fun consecutiveThinkingAndToolsShareOneWorkProcessBlock() {
+    fun thinkingCollapsesIntoBlocksWhileToolsStayInMainStream() {
         val entries = listOf(
             ThinkingMessageUi("t1", "a", isStreaming = false),
             ToolActivityMessageUi("x1", "shell", ToolActivityStatusUi.Success, "echo hi"),
@@ -25,14 +26,17 @@ class AgentTimelineGroupingTest {
             AgentMessageUi("m1", "answer"),
         ).toTimelineEntries()
 
-        assertEquals(2, entries.size)
-        val block = entries[0] as AgentTimelineEntry.ThinkingBlock
-        assertEquals(listOf("t1", "x1", "x2", "t2"), block.messages.map { it.id })
+        assertEquals(5, entries.size)
+        assertEquals(listOf("t1"), (entries[0] as AgentTimelineEntry.ThinkingBlock).messages.map { it.id })
         assertTrue(entries[1] is AgentTimelineEntry.Message)
+        assertEquals("x1", entries[1].key)
+        assertTrue(entries[2] is AgentTimelineEntry.Message)
+        assertEquals("x2", entries[2].key)
+        assertEquals(listOf("t2"), (entries[3] as AgentTimelineEntry.ThinkingBlock).messages.map { it.id })
     }
 
     @Test
-    fun userMessageAndNoticesBreakTheBlock() {
+    fun userMessageAndNoticesBreakTheThinkingBlock() {
         val entries = listOf(
             ThinkingMessageUi("t1", "a", isStreaming = false),
             SystemNoticeMessageUi("n1", SystemNoticeCode.ContextCompaction),
@@ -41,23 +45,23 @@ class AgentTimelineGroupingTest {
         ).toTimelineEntries()
 
         assertEquals(4, entries.size)
-        assertTrue((entries[0] as AgentTimelineEntry.ThinkingBlock).messages.map { it.id } == listOf("t1"))
+        assertEquals(listOf("t1"), (entries[0] as AgentTimelineEntry.ThinkingBlock).messages.map { it.id })
         assertTrue(entries[1] is AgentTimelineEntry.Message)
-        assertTrue((entries[2] as AgentTimelineEntry.ThinkingBlock).messages.map { it.id } == listOf("x1"))
+        assertTrue(entries[2] is AgentTimelineEntry.Message)
+        assertEquals("x1", entries[2].key)
         assertTrue(entries[3] is AgentTimelineEntry.Message)
     }
 
     @Test
-    fun toolOnlyRunStillFormsAWorkProcessBlock() {
+    fun toolOnlyRunStaysInMainStream() {
         val entries = listOf(
             ToolActivityMessageUi("x1", "shell", ToolActivityStatusUi.Running, "ls"),
             ToolActivityMessageUi("x2", "shell", ToolActivityStatusUi.Success, "ls"),
         ).toTimelineEntries()
 
-        assertEquals(1, entries.size)
-        val block = entries[0] as AgentTimelineEntry.ThinkingBlock
-        assertEquals("thinking-x1", block.key)
-        assertEquals(listOf("x1", "x2"), block.messages.map { it.id })
+        assertEquals(2, entries.size)
+        assertEquals(listOf("x1", "x2"), entries.map { it.key })
+        assertTrue(entries.all { it is AgentTimelineEntry.Message })
     }
 
     @Test
@@ -80,8 +84,11 @@ class AgentTimelineGroupingTest {
         assertEquals("m1", collapsed[2].key)
 
         val expanded = entries.withCompletedTurnCollapse(ranges, setOf(ranges.first().key))
-        assertEquals(4, expanded.size)
+        // 展开时保留摘要行，区间内容跟在它后面：u1 / 摘要 / 思考块 / 工具行 / m1。
+        assertEquals(5, expanded.size)
+        assertTrue(expanded[1] is AgentTimelineEntry.CompletedSteps)
         assertTrue(expanded[2] is AgentTimelineEntry.ThinkingBlock)
+        assertTrue(expanded[3] is AgentTimelineEntry.Message)
     }
 
     @Test

@@ -106,6 +106,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Icon
@@ -121,6 +122,13 @@ import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
+
+/** 「当前浏览器工具行」定位键：只随影响行匹配的三个字段变化，避免订阅整个快照流。 */
+private data class BrowserRowKey(
+    val available: Boolean,
+    val runId: String?,
+    val toolCallId: String?,
+)
 
 /**
  * 聊天主体：消息流 + 底部输入框。
@@ -173,7 +181,19 @@ internal fun AgentChatBody(
     val density = LocalDensity.current
     val imeBottomPx = WindowInsets.ime.getBottom(density)
     val isKeyboardVisible = imeBottomPx > 0
-    val browserSnapshot by AgentBrowserSession.snapshots.collectAsState()
+    // 只订阅影响「当前浏览器工具行」的三个字段：整个快照流含页面加载进度等高频变化，
+    // 直接 collect 会让每次进度更新都重组整个聊天列表。
+    val browserRowKey by remember {
+        AgentBrowserSession.snapshots
+            .map { snapshot ->
+                BrowserRowKey(snapshot.available, snapshot.lastAgentRunId, snapshot.lastAgentToolCallId)
+            }
+            .distinctUntilChanged()
+    }.collectAsState(
+        initial = AgentBrowserSession.snapshots.value.let { snapshot ->
+            BrowserRowKey(snapshot.available, snapshot.lastAgentRunId, snapshot.lastAgentToolCallId)
+        },
+    )
     val contextUsage = remember(messages, modelPickerState.selectedModel) {
         latestContextUsage(messages, modelPickerState.selectedModel)
     }
@@ -186,15 +206,10 @@ internal fun AgentChatBody(
             message is AgentMessageUi && message.content.isBlank()
         }
     }
-    val currentBrowserMessageId = remember(
-        visibleMessages,
-        browserSnapshot.available,
-        browserSnapshot.lastAgentRunId,
-        browserSnapshot.lastAgentToolCallId,
-    ) {
-        val runId = browserSnapshot.lastAgentRunId
-        val toolCallId = browserSnapshot.lastAgentToolCallId
-        if (!browserSnapshot.available || runId == null || toolCallId == null) {
+    val currentBrowserMessageId = remember(visibleMessages, browserRowKey) {
+        val runId = browserRowKey.runId
+        val toolCallId = browserRowKey.toolCallId
+        if (!browserRowKey.available || runId == null || toolCallId == null) {
             null
         } else {
             visibleMessages.lastOrNull { message ->
@@ -599,8 +614,12 @@ internal fun AgentConversationMessages(
             if (next != userTurnScrollState) onUserTurnScrollStateChanged(next)
             if (!isAtBottom) onBottomAnchorChanged(false)
         } else if (
+            // 只有「拖动期间确实离开过底部」才在松手回底时恢复跟底：
+            // 轻触/微扫不再重新武装跟底，避免一碰就被拉回底部。
             userTurnScrollState.phase == UserTurnScrollPhase.UserControlled &&
-            userTurnScrollState.resumeAfterDrag && isAtBottom
+            userTurnScrollState.resumeAfterDrag &&
+            userTurnScrollState.leftBottomDuringDrag &&
+            isAtBottom
         ) {
             val next = resolveUserTurnScrollTransition(
                 userTurnScrollState,
@@ -703,24 +722,8 @@ internal fun AgentConversationMessages(
         Channel<BottomFollowDecision>(Channel.CONFLATED)
     }
 
-    LaunchedEffect(
-        bottomItemIndex,
-        keepBottomAnchored,
-        isUserDragging,
-        isStreaming,
-        pinLatestUserTurn,
-        userTurnScrollState.phase,
-    ) {
-        if (shouldRequestInitialBottom(
-                isStreaming = isStreaming,
-                keepBottomAnchored = keepBottomAnchored,
-                isUserDragging = isUserDragging,
-                userTurnPhase = userTurnScrollState.phase,
-            )
-        ) {
-            scrollState.requestScrollToItem(bottomItemIndex)
-        }
-    }
+    // 流式期间不硬跳到底部（requestScrollToItem 会瞬间夺走滚动位置，观感像“一碰就跳”）；
+    // 需要回底时统一交给下面的连续跟底循环，它尊重拖动/用户接管状态且是动画过渡。
 
     // 流式输出及渲染收尾期间发布最新的跟底距离。历史消息中的步骤/思考展开同样会改变
     // 列表高度，但那是用户主动查看内容，不能被误判成尾部文字增长。
@@ -915,12 +918,10 @@ internal fun AgentConversationMessages(
                             assistantOverlay = assistantOverlay,
                             collapseResetKey = thinkingCollapseResetKey,
                             thinkingViewportHeight = thinkingViewportHeight,
-                            currentBrowserMessageId = currentBrowserMessageId,
-                            onOpenBrowser = onOpenBrowser,
-                            // 工作过程直到 run 结束或后续正文出现前都保持展开，
-                            // 避免思考/工具交替时整个卡片反复折叠展开。
-                            // 该判定依赖一个不变量：运行中追加到工作块之后的条目只可能
-                            // 是正文或终结性消息（通知/提问会终结当前工作块）；若未来
+                            // 思考块直到 run 结束或后续条目（工具行/正文）出现前都保持展开，
+                            // 避免思考间隙里整个卡片反复折叠展开。
+                            // 该判定依赖一个不变量：运行中追加到思考块之后的条目只可能
+                            // 是工具行、正文或终结性消息（通知/提问会终结当前块）；若未来
                             // 引入时间线末尾的“运行中占位条目”，这里需同步调整。
                             blockActive = isStreaming && entryIndex == displayEntries.lastIndex,
                             onThinkingToggle = {
@@ -1095,9 +1096,9 @@ internal fun List<AgentChatMessageUi>.toTimelineEntries(): List<AgentTimelineEnt
     }
 
     this@toTimelineEntries.forEach { message ->
-        // 连续的思考与工具调用收束为同一个「工作过程」块，只有正文/用户消息等才中断，
-        // 工具行不再散落在正文里（对齐 VS Code 的 thinking + tool chain 呈现）。
-        if (message is ThinkingMessageUi || message is ToolActivityMessageUi) {
+        // 思考收束为「思考块」；工具调用留在主流逐条显示——对齐 VS Code 定型后的
+        // reasoning/items 分组（思考归容器，工具行独立成行，不与推理文本混排）。
+        if (message is ThinkingMessageUi) {
             thinkingMessages += message
         } else {
             flushThinkingBlock()
@@ -1396,16 +1397,6 @@ internal fun resolveBottomFollowEnabled(
     !isUserDragging &&
     !pinLatestUserTurn &&
     (userTurnPhase == null || userTurnPhase == UserTurnScrollPhase.Idle || userTurnPhase == UserTurnScrollPhase.FollowingOverflow)
-
-internal fun shouldRequestInitialBottom(
-    isStreaming: Boolean,
-    keepBottomAnchored: Boolean,
-    isUserDragging: Boolean,
-    userTurnPhase: UserTurnScrollPhase? = null,
-): Boolean = isStreaming &&
-    keepBottomAnchored &&
-    !isUserDragging &&
-    (userTurnPhase == null || userTurnPhase == UserTurnScrollPhase.Idle)
 
 @Composable
 private fun EmptyChatState(

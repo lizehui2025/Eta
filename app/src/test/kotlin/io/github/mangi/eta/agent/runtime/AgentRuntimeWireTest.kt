@@ -172,6 +172,62 @@ class AgentRuntimeWireTest {
     }
 
     @Test
+    fun explicitModelSessionIdTakesPriorityOverExternalHandoff() {
+        val request = AgentRuntimeWire.RunRequest(
+            runId = "run-explicit", prompt = "语音测试",
+            config = AgentModelClient.ModelConfig(
+                baseUrl = "https://example.invalid/v1", apiKey = "test-key",
+                model = "test-model", systemPrompt = "", reasoningEffort = ReasoningEffort.OFF,
+            ),
+            images = emptyList(),
+            modelSessionId = "explicit-session",
+            handoff = AgentRuntimeWire.EntryHandoff(
+                id = "handoff-voice", source = AgentRuntimeWire.ETA_VOICE_HANDOFF_SOURCE,
+                payload = AgentExternalArchivePayload(
+                    userText = "语音输入", conversationKey = "voice-conversation-1", title = "语音浮窗",
+                ).toJson(),
+            ),
+        )
+        assertEquals("explicit-session", request.effectiveModelSessionId)
+    }
+
+    @Test
+    fun externalArchiveHandoffReusesConversationKeyAcrossRuns() {
+        val payload = AgentExternalArchivePayload(
+            userText = "语音输入", conversationKey = "voice-conversation-1", title = "语音浮窗",
+        ).toJson()
+        fun requestFor(runId: String) = AgentRuntimeWire.RunRequest(
+            runId = runId, prompt = "语音输入",
+            config = AgentModelClient.ModelConfig(
+                baseUrl = "https://example.invalid/v1", apiKey = "test-key",
+                model = "test-model", systemPrompt = "", reasoningEffort = ReasoningEffort.OFF,
+            ),
+            images = emptyList(),
+            handoff = AgentRuntimeWire.EntryHandoff(
+                id = "handoff-$runId", source = AgentRuntimeWire.ETA_VOICE_HANDOFF_SOURCE, payload = payload,
+            ),
+        )
+        assertEquals("voice-conversation-1", requestFor("run-1").effectiveModelSessionId)
+        assertEquals("voice-conversation-1", requestFor("run-2").effectiveModelSessionId)
+    }
+
+    @Test
+    fun unparseableExternalHandoffFallsBackToRunId() {
+        fun requestWith(payload: String) = AgentRuntimeWire.RunRequest(
+            runId = "run-fallback", prompt = "测试",
+            config = AgentModelClient.ModelConfig(
+                baseUrl = "https://example.invalid/v1", apiKey = "test-key",
+                model = "test-model", systemPrompt = "", reasoningEffort = ReasoningEffort.OFF,
+            ),
+            images = emptyList(),
+            handoff = AgentRuntimeWire.EntryHandoff(id = "handoff-bad", source = "breeno", payload = payload),
+        )
+        assertEquals("run-fallback", requestWith("not-json").effectiveModelSessionId)
+        assertEquals("run-fallback", requestWith("""{"type":"other"}""").effectiveModelSessionId)
+        assertEquals("run-fallback", requestWith("").effectiveModelSessionId)
+    }
+
+    @Test
     fun retryEventSurvivesIpcAndArchiveJson() {
         val event = AgentEvent.ModelRetryScheduled(7, 2, 3, 4_000, "MODEL_TIMEOUT")
         assertEquals(event, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(event)))

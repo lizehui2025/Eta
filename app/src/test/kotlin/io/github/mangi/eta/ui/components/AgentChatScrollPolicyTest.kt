@@ -12,15 +12,6 @@ import org.junit.Test
 
 class AgentChatScrollPolicyTest {
     @Test
-    fun overflowUsesContinuousFollowingWithoutAnotherBottomJump() {
-        assertFalse(shouldRequestInitialBottom(
-            isStreaming = true,
-            keepBottomAnchored = true,
-            isUserDragging = false,
-            userTurnPhase = UserTurnScrollPhase.FollowingOverflow,
-        ))
-    }
-    @Test
     fun latestUserTurnOutputStartsOnAssistantThinkingOrToolActivity() {
         val user = UserMessageUi("u", "hello")
         assertFalse(latestUserTurnHasOutput(listOf(user)))
@@ -82,28 +73,6 @@ class AgentChatScrollPolicyTest {
     fun streamingTailGrowthFollowsBottom() {
         assertTrue(
             resolveBottomFollowEnabled(
-                isStreaming = true,
-                keepBottomAnchored = true,
-                isUserDragging = false,
-            )
-        )
-    }
-
-    @Test
-    fun completedConversationDoesNotJumpToInitialBottom() {
-        assertFalse(
-            shouldRequestInitialBottom(
-                isStreaming = false,
-                keepBottomAnchored = true,
-                isUserDragging = false,
-            )
-        )
-    }
-
-    @Test
-    fun streamingConversationRequestsInitialBottom() {
-        assertTrue(
-            shouldRequestInitialBottom(
                 isStreaming = true,
                 keepBottomAnchored = true,
                 isUserDragging = false,

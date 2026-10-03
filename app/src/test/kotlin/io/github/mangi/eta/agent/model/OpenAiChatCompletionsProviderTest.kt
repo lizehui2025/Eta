@@ -423,6 +423,57 @@ class OpenAiChatCompletionsProviderTest {
     }
 
     @Test
+    fun completeParsesDeepSeekPromptCacheHitTokens() {
+        val usage = JSONObject()
+            .put("prompt_tokens", 1000)
+            .put("completion_tokens", 20)
+            .put("prompt_cache_hit_tokens", 800)
+            .put("prompt_cache_miss_tokens", 200)
+        val body = buildString {
+            append(sseChunk(JSONObject().put("content", "ok"), finishReason = "stop"))
+            append(usageChunk(usage))
+            append("data: [DONE]\n\n")
+        }
+
+        withSseServer(body) { baseUrl ->
+            val events = mutableListOf<ProviderEvent>()
+            OpenAiChatCompletionsProvider.complete(
+                request = providerRequest(baseUrl),
+                runController = AgentRunController(),
+                onEvent = events::add
+            )
+
+            val parsedUsage = events.filterIsInstance<ProviderEvent.Usage>().single().usage
+            assertEquals(800, parsedUsage.cachedTokens)
+        }
+    }
+
+    @Test
+    fun completeParsesTopLevelCachedTokens() {
+        val usage = JSONObject()
+            .put("prompt_tokens", 1000)
+            .put("completion_tokens", 20)
+            .put("cached_tokens", 600)
+        val body = buildString {
+            append(sseChunk(JSONObject().put("content", "ok"), finishReason = "stop"))
+            append(usageChunk(usage))
+            append("data: [DONE]\n\n")
+        }
+
+        withSseServer(body) { baseUrl ->
+            val events = mutableListOf<ProviderEvent>()
+            OpenAiChatCompletionsProvider.complete(
+                request = providerRequest(baseUrl),
+                runController = AgentRunController(),
+                onEvent = events::add
+            )
+
+            val parsedUsage = events.filterIsInstance<ProviderEvent.Usage>().single().usage
+            assertEquals(600, parsedUsage.cachedTokens)
+        }
+    }
+
+    @Test
     fun completeRejectsStreamThatEndsBeforeDone() {
         val body = sseChunk(JSONObject().put("content", "partial"))
 

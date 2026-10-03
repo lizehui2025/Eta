@@ -140,7 +140,13 @@ internal class AgentRuntimeRunExecutor(
         request: AgentRuntimeWire.RunRequest,
     ): Outcome {
         val runController = session.controller
-        val archivedEvents = mutableListOf<AgentEvent>()
+        // 只有外部归档入口（语音/Breno 等）需要留存整轮事件用于埋档；UI run 的 handoff payload
+        // 不是归档格式，persistArchivedRun 会直接跳过——避免整轮事件（含全部 delta）常驻内存。
+        val archiveRequested = runCatching {
+            request.handoff?.let { AgentExternalArchivePayload.from(it.payload) } != null
+        }.getOrDefault(false)
+        val archivedEvents: MutableList<AgentEvent>? =
+            if (archiveRequested) mutableListOf() else null
         var entrySurfaceGuard: EntrySurfaceGuard? = null
         var toolExecutor: AutoCloseable? = null
         var toolsBinding: AgentRunController.ResourceBinding? = null
@@ -461,7 +467,7 @@ internal class AgentRuntimeRunExecutor(
 
         if (cancelled && session.isTerminal) {
             runCatching {
-                persistArtifacts(snapshotRequest(request), result, archivedEvents)
+                persistArtifacts(snapshotRequest(request), result, archivedEvents.orEmpty())
             }.onFailure { throwable ->
                 AndroidAgentLogger.error(
                     "Agent runtime cancelled result persistence failed: " +
@@ -489,7 +495,7 @@ internal class AgentRuntimeRunExecutor(
                         "Agent runtime checkpoint seal failed: type=${throwable.safeLogType()}"
                     )
                 }
-            runCatching { persistArtifacts(completedRequest, result, archivedEvents) }
+            runCatching { persistArtifacts(completedRequest, result, archivedEvents.orEmpty()) }
                 .onFailure { throwable ->
                     AndroidAgentLogger.error(
                         "Agent runtime artifact persistence failed: type=${throwable.safeLogType()}"
@@ -508,7 +514,7 @@ internal class AgentRuntimeRunExecutor(
     private fun acceptEvent(
         session: AgentRuntimeSession,
         event: AgentEvent,
-        archivedEvents: MutableList<AgentEvent>,
+        archivedEvents: MutableList<AgentEvent>?,
         entrySurfaceGuard: EntrySurfaceGuard?,
         checkpointRecorder: AgentRunCheckpointRecorder?,
     ) {
@@ -553,13 +559,13 @@ internal class AgentRuntimeRunExecutor(
     private fun acceptEventNow(
         session: AgentRuntimeSession,
         event: AgentEvent,
-        archivedEvents: MutableList<AgentEvent>,
+        archivedEvents: MutableList<AgentEvent>?,
         entrySurfaceGuard: EntrySurfaceGuard?,
         checkpointRecorder: AgentRunCheckpointRecorder?,
     ) {
         checkpointRecorder?.accept(event)
         if (!session.emit(event)) return
-        synchronized(archivedEvents) { archivedEvents += event }
+        if (archivedEvents != null) synchronized(archivedEvents) { archivedEvents += event }
         if (event is AgentEvent.ModelRetryScheduled) {
             AndroidAgentLogger.warn("Agent runtime event: ${event.toLogLine()}")
         } else if (event !is AgentEvent.AssistantBlockDelta) {

@@ -15,6 +15,11 @@ internal data class UserTurnScrollState(
     val anchorMessageId: String? = null,
     val resumeAfterDrag: Boolean = false,
     val previousUserMessageId: String? = null,
+    /**
+     * 本次拖动期间是否真的离开过底部。只有离开过再回到底部，松手才恢复跟底；
+     * 轻触/微扫（从未离开底部）不再重新武装跟底，避免“一碰就被拉回底部”。
+     */
+    val leftBottomDuringDrag: Boolean = false,
 )
 
 internal sealed interface UserTurnScrollEvent {
@@ -47,16 +52,23 @@ internal fun resolveUserTurnScrollTransition(
     is UserTurnScrollEvent.UserDragged -> state.copy(
         phase = UserTurnScrollPhase.UserControlled,
         resumeAfterDrag = true,
+        leftBottomDuringDrag = state.leftBottomDuringDrag || !event.atBottom,
     )
 
     UserTurnScrollEvent.PanelToggled -> state.copy(
         phase = UserTurnScrollPhase.UserControlled,
         resumeAfterDrag = false,
+        leftBottomDuringDrag = false,
     )
 
     UserTurnScrollEvent.ReturnedToBottom -> if (
-        state.phase == UserTurnScrollPhase.UserControlled && state.resumeAfterDrag
-    ) state.copy(phase = UserTurnScrollPhase.FollowingOverflow, resumeAfterDrag = false)
+        state.phase == UserTurnScrollPhase.UserControlled && state.resumeAfterDrag &&
+        state.leftBottomDuringDrag
+    ) state.copy(
+        phase = UserTurnScrollPhase.FollowingOverflow,
+        resumeAfterDrag = false,
+        leftBottomDuringDrag = false,
+    )
     else state
 
     UserTurnScrollEvent.Reset -> UserTurnScrollState()

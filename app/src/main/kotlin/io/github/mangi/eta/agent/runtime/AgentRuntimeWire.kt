@@ -171,12 +171,17 @@ internal object AgentRuntimeWire {
         val rewriteTargetMessageId: String? = null,
         val assistantScreenContext: String = "",
     ) {
-        // 旧入口沿用会话 handoff；无持久会话的入口以首个 run 为会话起点。
+        // 旧入口沿用会话 handoff；外部归档入口（语音浮窗、Breno 等）从 handoff payload 取 conversationKey；无持久会话的入口以首个 run 为会话起点。
         val effectiveModelSessionId: String
             get() = modelSessionId.ifBlank {
-                handoff?.takeIf { it.source == AGENT_UI_HANDOFF_SOURCE }
-                    ?.let { AgentUiHandoffPayload.from(it.payload).conversationId }
-                    ?.takeIf { it.isNotBlank() } ?: runId
+                handoff?.let { entry ->
+                    if (entry.source == AGENT_UI_HANDOFF_SOURCE) {
+                        AgentUiHandoffPayload.from(entry.payload).conversationId
+                    } else {
+                        runCatching { AgentExternalArchivePayload.from(entry.payload)?.conversationKey }
+                            .getOrNull()
+                    }
+                }?.takeIf { it.isNotBlank() } ?: runId
             }
     }
 

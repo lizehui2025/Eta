@@ -185,6 +185,14 @@ internal class AgentContextBudget(private val window: Int?) {
 
     fun cacheHitRate(): Double? = cacheHitRate
 
+    /**
+     * 压缩完成后的样本重置：压缩必然伴随一次全量 miss，该样本不能继续压低触发比例，
+     * 否则会在临界窗口附近形成“压缩→命中骤降→更早压缩”的震荡。
+     */
+    fun resetCacheHitRate() {
+        cacheHitRate = null
+    }
+
     companion object {
         const val TRIGGER_RATIO = 0.85
         const val LOW_CACHE_TRIGGER_RATIO = 0.70

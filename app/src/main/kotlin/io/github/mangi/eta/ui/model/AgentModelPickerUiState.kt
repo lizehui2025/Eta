@@ -8,6 +8,7 @@ import io.github.mangi.eta.data.model.Model
 import io.github.mangi.eta.data.model.ProviderSetting
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
 import java.text.NumberFormat
+import java.util.IdentityHashMap
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -187,27 +188,12 @@ internal fun contextUiBreakdown(messages: List<AgentChatMessageUi>): AgentContex
     var codeData = 0
     var images = 0
     messages.forEach { message ->
-        when (message) {
-            is UserMessageUi -> {
-                dialogue += AgentContextBudget.textTokens(message.content)
-                images += message.images.size * 4096
-            }
-            is AgentMessageUi -> dialogue += AgentContextBudget.textTokens(message.content)
-            is ThinkingMessageUi -> thinking += AgentContextBudget.textTokens(message.content)
-            is ToolActivityMessageUi -> {
-                val text = listOfNotNull(
-                    message.argumentsSummary.takeIf { it.isNotBlank() },
-                    message.command?.takeIf { it.isNotBlank() },
-                    message.resultSummary?.takeIf { it.isNotBlank() },
-                    message.detail?.takeIf { it.isNotBlank() },
-                ).joinToString("\n") + message.steps.joinToString("\n") { it.summary + "\n" + it.detail }
-                val tokens = AgentContextBudget.textTokens(text)
-                if (message.toolName in AgentContextBreakdownCounter.CODE_DATA_TOOLS) codeData += tokens
-                else toolCalls += tokens
-                images += message.imageCount * 4096
-            }
-            else -> Unit
-        }
+        val tokens = messageBreakdownTokens(message)
+        dialogue += tokens.dialogue
+        toolCalls += tokens.toolCalls
+        thinking += tokens.thinking
+        codeData += tokens.codeData
+        images += tokens.images
     }
     return AgentContextBreakdown(
         dialogueTokens = dialogue,
@@ -217,6 +203,69 @@ internal fun contextUiBreakdown(messages: List<AgentChatMessageUi>): AgentContex
         imageTokens = images,
     )
 }
+
+/** 单条消息的分类 token 贡献。 */
+private data class MessageBreakdownTokens(
+    val dialogue: Int = 0,
+    val toolCalls: Int = 0,
+    val thinking: Int = 0,
+    val codeData: Int = 0,
+    val images: Int = 0,
+)
+
+/**
+ * 分类估算按消息对象身份缓存。
+ *
+ * 这条路径在流式期间每个 flush 都会对全量消息重跑；正文/工具文本的逐字符估算只依赖
+ * 消息内容，而消息是不可变 data class（内容变化会产生新对象），因此历史消息命中缓存、
+ * 只重算变化中的尾部。缓存只在 UI 主线程访问，有界并按 3/4 水位淘汰。
+ */
+private const val CONTEXT_BREAKDOWN_CACHE_LIMIT = 4096
+private val contextBreakdownCache = IdentityHashMap<AgentChatMessageUi, MessageBreakdownTokens>()
+
+private fun messageBreakdownTokens(message: AgentChatMessageUi): MessageBreakdownTokens {
+    contextBreakdownCache[message]?.let { return it }
+    val computed = computeMessageBreakdownTokens(message)
+    if (contextBreakdownCache.size >= CONTEXT_BREAKDOWN_CACHE_LIMIT) {
+        val targetSize = CONTEXT_BREAKDOWN_CACHE_LIMIT * 3 / 4
+        val entries = contextBreakdownCache.keys.iterator()
+        while (contextBreakdownCache.size > targetSize && entries.hasNext()) {
+            entries.next()
+            entries.remove()
+        }
+    }
+    contextBreakdownCache[message] = computed
+    return computed
+}
+
+private fun computeMessageBreakdownTokens(message: AgentChatMessageUi): MessageBreakdownTokens =
+    when (message) {
+        is UserMessageUi -> MessageBreakdownTokens(
+            dialogue = AgentContextBudget.textTokens(message.content),
+            images = message.images.size * 4096,
+        )
+        is AgentMessageUi -> MessageBreakdownTokens(
+            dialogue = AgentContextBudget.textTokens(message.content),
+        )
+        is ThinkingMessageUi -> MessageBreakdownTokens(
+            thinking = AgentContextBudget.textTokens(message.content),
+        )
+        is ToolActivityMessageUi -> {
+            val text = listOfNotNull(
+                message.argumentsSummary.takeIf { it.isNotBlank() },
+                message.command?.takeIf { it.isNotBlank() },
+                message.resultSummary?.takeIf { it.isNotBlank() },
+                message.detail?.takeIf { it.isNotBlank() },
+            ).joinToString("\n") + message.steps.joinToString("\n") { it.summary + "\n" + it.detail }
+            val tokens = AgentContextBudget.textTokens(text)
+            if (message.toolName in AgentContextBreakdownCounter.CODE_DATA_TOOLS) {
+                MessageBreakdownTokens(codeData = tokens, images = message.imageCount * 4096)
+            } else {
+                MessageBreakdownTokens(toolCalls = tokens, images = message.imageCount * 4096)
+            }
+        }
+        else -> MessageBreakdownTokens()
+    }
 
 /** 分类明细行：只列非零项，数字按 K/M 紧凑格式，便于用量提示展示。 */
 internal fun formatContextBreakdown(

@@ -138,6 +138,7 @@ internal class AgentLoop(
             // 避免每轮把上百 KB 的 tool 结果重新 toString 一遍。旧实现用无缓存的静态 rawEstimate。
             var requestEstimate = context.budget.rawEstimateCached(requestMessages, roundTools)
             var roundInputTokens: Int? = null
+            var roundCachedTokens: Int? = null
             var overflowAttempts = 0
             val reasoningLengthBeforeRound = accumulatedReasoning.length
             var completedResponse: AgentModelRetry.Result? = null
@@ -166,6 +167,7 @@ internal class AgentLoop(
                                 }
                                 if (providerEvent is ProviderEvent.Usage) {
                                 roundInputTokens = providerEvent.contextInputTokens ?: roundInputTokens
+                                roundCachedTokens = providerEvent.usage.cachedTokens ?: roundCachedTokens
                             }
                                 if (providerEvent is ProviderEvent.BlockDelta &&
                                     providerEvent.kind == AssistantBlockKind.THINKING
@@ -189,6 +191,7 @@ internal class AgentLoop(
                         )
                         requestEstimate = context.budget.rawEstimateCached(requestMessages, roundTools)
                         roundInputTokens = null
+                        roundCachedTokens = null
                         round++
                     }
                 }
@@ -197,8 +200,9 @@ internal class AgentLoop(
                 // 同一回合的重试仍需原始观察；整个回合结束后才移除截图。
                 discardPendingToolImageMessage()
             }
+            // 缓存命中率用于低命中时提前压缩；cached 是总输入的子集（Anthropic 已在 provider 侧加总，OpenAI prompt_tokens 本身含 cached）。
             context.budget.observe(
-                roundInputTokens?.let { AgentTokenUsage(inputTokens = it) },
+                roundInputTokens?.let { AgentTokenUsage(inputTokens = it, cachedTokens = roundCachedTokens) },
                 requestEstimate,
             )
             round = completedRound.round

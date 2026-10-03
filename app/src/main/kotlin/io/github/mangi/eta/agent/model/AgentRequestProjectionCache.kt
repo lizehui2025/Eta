@@ -28,7 +28,7 @@ internal class AgentRequestProjectionCache(
         val target = if (stripReasoning) chatMessagesWithoutReasoning else chatMessages
         target[source]?.let { return it }
         return project(source).also { projected ->
-            if (target.size >= limit) target.clear()
+            evictOverflow(target)
             target[source] = projected
         }
     }
@@ -39,7 +39,7 @@ internal class AgentRequestProjectionCache(
     ): JSONArray {
         responsesInputs[source]?.let { return it }
         return project(source).also { projected ->
-            if (responsesInputs.size >= limit) responsesInputs.clear()
+            evictOverflow(responsesInputs)
             responsesInputs[source] = projected
         }
     }
@@ -52,8 +52,22 @@ internal class AgentRequestProjectionCache(
         val target = if (cacheControl) anthropicMessages else anthropicMessagesWithoutCacheControl
         target[source]?.let { return it }
         return project(source).also { projected ->
-            if (target.size >= limit) target.clear()
+            evictOverflow(target)
             target[source] = projected
+        }
+    }
+
+    /**
+     * 溢出淘汰降到 3/4 水位（与 AgentContextBudget 同策略）：整表清空会让越界后的
+     * 下一轮把整份历史重新投影，长 run 上呈现周期性全量重算。
+     */
+    private fun <V> evictOverflow(cache: IdentityHashMap<JSONObject, V>) {
+        if (cache.size < limit) return
+        val targetSize = limit * 3 / 4
+        val entries = cache.keys.iterator()
+        while (cache.size > targetSize && entries.hasNext()) {
+            entries.next()
+            entries.remove()
         }
     }
 

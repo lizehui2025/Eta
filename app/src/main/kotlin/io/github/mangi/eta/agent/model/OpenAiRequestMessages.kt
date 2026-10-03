@@ -6,9 +6,10 @@ import org.json.JSONObject
 /** 将 Eta 会话消息投影为 OpenAI-compatible 请求所需的系统指令结构。 */
 internal object OpenAiRequestMessages {
     /**
-     * Completed user turns keep their answers and tool results, but not internal reasoning.
-     * Current-turn reasoning is retained for providers that require it across tool calls.
-     * [stripReasoning] also removes current-turn reasoning after a provider rejects the field.
+     * 推理链默认原样回传（历史轮与当前轮一致）：请求体只随对话追加，服务端 prompt 缓存的
+     * 前缀才能跨轮稳定命中。曾按“历史轮剥离、当前轮保留”投影，每来一条新用户消息，
+     * 上一轮都会从“保留”翻转为“剥离”，在上一轮的位置一次性打断整个缓存前缀。
+     * [stripReasoning] 仅在服务端拒绝该字段时，把当次请求全量剥离后重试。
      */
     fun forChatCompletions(
         source: JSONArray,
@@ -16,10 +17,6 @@ internal object OpenAiRequestMessages {
         cache: AgentRequestProjectionCache? = null,
     ): JSONArray {
         val system = collectInstructions(source, SYSTEM_ROLES)
-        val latestUserIndex = (source.length() - 1 downTo 0).firstOrNull { index ->
-            val message = source.optJSONObject(index)
-            message?.optString("role") == "user" && !message.optBoolean("_eta_observation", false)
-        } ?: -1
         return JSONArray().also { messages ->
             if (system.isNotBlank()) {
                 messages.put(JSONObject().put("role", "system").put("content", system))
@@ -27,10 +24,9 @@ internal object OpenAiRequestMessages {
             for (index in 0 until source.length()) {
                 val message = source.optJSONObject(index) ?: continue
                 if (message.optString("role") !in SYSTEM_ROLES) {
-                    val removeReasoning = stripReasoning || index < latestUserIndex
-                    val projected = cache?.chatMessage(message, removeReasoning) {
-                        projectChatMessage(it, removeReasoning)
-                    } ?: projectChatMessage(message, removeReasoning)
+                    val projected = cache?.chatMessage(message, stripReasoning) {
+                        projectChatMessage(it, stripReasoning)
+                    } ?: projectChatMessage(message, stripReasoning)
                     messages.put(projected)
                 }
             }
