@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.overlay.toolDisplayName
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
+import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import io.github.mangi.eta.ui.model.ToolStepUi
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
@@ -65,12 +66,21 @@ internal fun SubagentDetailDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(message.status.statusColor()),
-                    )
+                    if (message.status == ToolActivityStatusUi.Running) {
+                        // 运行中：状态点换成像素方块 spinner（与对话流中的运行指示一致）。
+                        PixelSpinner(
+                            active = true,
+                            color = message.status.statusColor(),
+                            size = 12.dp,
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(message.status.statusColor()),
+                        )
+                    }
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = message.status.statusLabel(),

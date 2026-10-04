@@ -527,6 +527,70 @@ class AgentModelClientLoopTest {
     }
 
     @Test
+    fun invalidToolArgumentsCarryFixHintAndStructuredMetadata() {
+        val provider = ScriptedProvider(
+            assistant(
+                finishReason = "tool_calls",
+                toolCalls = listOf(toolCall("bad-1", "terminal", "{\"action\":\"open\"}")),
+            ),
+            assistant(content = "已修正", finishReason = "stop"),
+        )
+        var executed = false
+
+        AgentModelClient.complete(
+            config = modelConfig(),
+            prompt = "打开终端",
+            toolExecutor = AgentModelClient.ToolExecutor {
+                executed = true
+                AgentModelClient.ToolResult("{\"ok\":true}")
+            },
+            provider = provider,
+        )
+
+        assertFalse(executed)
+        val failure = provider.requests[1].getJSONObjectFromEnd(1).getString("content")
+        assertTrue(failure.contains("INVALID_TOOL_ARGUMENTS"))
+        assertTrue(failure.contains("\"retry_hint\":\"fix_arguments\""))
+        assertTrue(failure.contains("\"retry_hint_text\""))
+        assertTrue(failure.contains("\"example\""))
+    }
+
+    @Test
+    fun consistentNoProgressRejectionCarriesChangeStrategyHint() {
+        val provider = ScriptedProvider(
+            assistant(
+                finishReason = "tool_calls",
+                toolCalls = listOf(toolCall("dup-1", "terminal", "{\"action\":\"open\",\"identity\":\"user\"}")),
+            ),
+            assistant(
+                finishReason = "tool_calls",
+                toolCalls = listOf(toolCall("dup-2", "terminal", "{\"action\":\"open\",\"identity\":\"user\"}")),
+            ),
+            assistant(
+                finishReason = "tool_calls",
+                toolCalls = listOf(toolCall("dup-3", "terminal", "{\"action\":\"open\",\"identity\":\"user\"}")),
+            ),
+            assistant(content = "已停止重复", finishReason = "stop"),
+        )
+        var executions = 0
+
+        AgentModelClient.complete(
+            config = modelConfig().copy(terminalTools = true),
+            prompt = "打开终端",
+            toolExecutor = AgentModelClient.ToolExecutor {
+                executions++
+                AgentModelClient.ToolResult("{\"ok\":true}")
+            },
+            provider = provider,
+        )
+
+        assertEquals(2, executions)
+        val blocked = provider.requests[3].getJSONObjectFromEnd(1).getString("content")
+        assertTrue(blocked.contains("NO_PROGRESS_LOOP"))
+        assertTrue(blocked.contains("\"retry_hint\":\"change_strategy\""))
+    }
+
+    @Test
     fun normalToolStopAliasesExecuteValidatedCalls() {
         listOf("tool_calls", "tool_use").forEach { finishReason ->
             val provider = ScriptedProvider(

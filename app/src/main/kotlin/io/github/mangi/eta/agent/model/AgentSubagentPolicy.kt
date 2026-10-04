@@ -96,7 +96,7 @@ internal object AgentSubagentPolicy {
         "device_status", "network_info", "top_memory_apps", "top_storage_apps",
         "memory_get", "skills_list", "skills_read", "skills_read_resource",
         "skills_list_curated", "skills_inspect_github",
-        "search_apps", "get_current_context", "read_image",
+        "search_apps", "get_current_context",
     )
 
     private val mainOnlyBoundedTools: Set<String> = setOf(
@@ -245,6 +245,8 @@ internal object AgentSubagentPolicy {
                 .put("ok", false)
                 .put("code", code)
                 .put("message", message)
+                .put("retry_hint", AgentToolRetryHints.forCode(code))
+                .put("retry_hint_text", AgentToolRetryHints.instruction(code))
                 .toString(),
         )
 }

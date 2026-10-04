@@ -332,26 +332,31 @@ internal class AgentLoop(
         toolCall: AgentModelClient.ToolCall,
     ): ToolOutcome {
         runController.throwIfCancelled()
-        noProgressGuard.before(toolCall).takeIf { it.reject }?.let { decision ->
+        val guardDecision = noProgressGuard.before(toolCall)
+        if (guardDecision.reject) {
             return rejectedToolOutcome(
                 round = round,
                 toolCall = toolCall,
                 code = "NO_PROGRESS_LOOP",
-                message = decision.message,
+                message = guardDecision.message,
+                retryHint = AgentToolRetryHints.CHANGE_STRATEGY,
             )
         }
+        val softHint = guardDecision.softHint
         // Unified schema validation must precede every execution dispatch. spawn_agents and
         // todo_write have their own business checks (write-range conflicts, list entry validity,
         // ...), but the JSON Schema actually sent this round is the single source of truth for the
         // model's call contract; validating after the dedicated handlers lets those two bypass it and
         // grow a second contract.
-        toolCallValidator.validate(toolCall)?.let { validationError ->
+        val validation = toolCallValidator.validateDetailed(toolCall)
+        if (validation.message.isNotBlank()) {
             return rejectedToolOutcome(
                 round = round,
                 toolCall = toolCall,
                 code = "INVALID_TOOL_ARGUMENTS",
-                message = validationError,
-                metadata = invalidToolArgumentMetadata(toolCall),
+                message = validation.message,
+                metadata = invalidToolArgumentMetadata(toolCall, validation),
+                retryHint = AgentToolRetryHints.FIX_ARGUMENTS,
             )
         }
         if (toolApprovalHandler?.invoke(round, toolCall) == false) {
@@ -360,6 +365,7 @@ internal class AgentLoop(
                 toolCall = toolCall,
                 code = "TOOL_REVIEW_REJECTED",
                 message = "用户或自动审核拒绝了本次工具调用；不要通过改名、拆分或换工具绕过该决定。",
+                retryHint = AgentToolRetryHints.RETRY_OR_REPORT,
             )
         }
         if (toolCall.name == AgentSubagentPolicy.TOOL_NAME && subagentHandler != null) {
@@ -463,15 +469,39 @@ internal class AgentLoop(
                     .put("ok", false)
                     .put("code", "TOOL_ERROR")
                     .put("message", throwable.message ?: throwable.javaClass.simpleName)
+                    .put("retry_hint", AgentToolRetryHints.RETRY_OR_REPORT)
+                    .put("retry_hint_text", AgentToolRetryHints.instruction("TOOL_ERROR"))
                     .toString(),
             )
         }
-        if (result.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
+        val finalResult = if (softHint.isNotBlank()) {
+            withRetryHint(
+                result,
+                AgentToolRetryHints.CHANGE_STRATEGY,
+                softHint,
+            )
+        } else {
+            result
+        }
+        if (finalResult.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
             sensitiveToolCallIds += toolCall.id
         }
 
-        emitToolFinished(round, toolCall, result)
-        return ToolOutcome(toolCall, result)
+        emitToolFinished(round, toolCall, finalResult)
+        return ToolOutcome(toolCall, finalResult)
+    }
+
+    /** 只给成功的 tool result 追加软提示；失败结果已在 rejectedToolOutcome 里带上 hint。 */
+    private fun withRetryHint(
+        result: AgentModelClient.ToolResult,
+        hint: String,
+        hintText: String,
+    ): AgentModelClient.ToolResult {
+        val parsed = runCatching { JSONObject(result.content) }.getOrNull() ?: return result
+        if (!parsed.optBoolean("ok", true)) return result
+        if (parsed.has("retry_hint")) return result
+        parsed.put("retry_hint", hint).put("retry_hint_text", hintText)
+        return result.copy(content = parsed.toString())
     }
 
     private fun rejectedToolOutcome(
@@ -480,6 +510,7 @@ internal class AgentLoop(
         code: String,
         message: String,
         metadata: JSONObject = JSONObject(),
+        retryHint: String? = null,
     ): ToolOutcome {
         publishEvent(
             AgentEvent.ToolStarted(
@@ -497,6 +528,8 @@ internal class AgentLoop(
                 .put("message", message)
                 .put("tool", toolCall.name)
                 .put("retryable", code == "INVALID_TOOL_ARGUMENTS")
+                .put("retry_hint", retryHint ?: AgentToolRetryHints.forCode(code))
+                .put("retry_hint_text", AgentToolRetryHints.instruction(code))
                 .also { payload ->
                     metadata.keys().forEach { key -> payload.put(key, metadata.opt(key)) }
                 }
@@ -508,30 +541,63 @@ internal class AgentLoop(
         return ToolOutcome(toolCall, result)
     }
 
-    private fun invalidToolArgumentMetadata(toolCall: AgentModelClient.ToolCall): JSONObject {
+    /**
+     * 结构化校验元数据直接来自同一次校验结果（[validation]），不再对错误文案做正则解析，
+     * 保证 message 与 metadata 同源且逐字段一致。
+     */
+    private fun invalidToolArgumentMetadata(
+        toolCall: AgentModelClient.ToolCall,
+        validation: ValidationOutcome,
+    ): JSONObject {
         val args = toolCall.parsedArgsOrNull() ?: JSONObject()
         val operation = args.optString("action").ifBlank { args.optString("operation") }
         val metadata = JSONObject().put("operation", operation)
-        val missing = Regex("缺少必填字段 ([^;]+)").find(toolCallValidator.validate(toolCall).orEmpty())
-            ?.groupValues?.getOrNull(1)
-            ?.split(',')
-            ?.map(String::trim)
-            ?.filter(String::isNotBlank)
-        if (!missing.isNullOrEmpty()) metadata.put("missing", org.json.JSONArray(missing))
-        metadata.put("example", minimalToolExample(toolCall.name, operation))
+        if (validation.missing.isNotEmpty()) metadata.put("missing", org.json.JSONArray(validation.missing))
+        if (validation.expected.isNotBlank()) metadata.put("expected", validation.expected)
+        if (validation.received.isNotBlank()) metadata.put("received", validation.received)
+        metadata.put("example", minimalToolExample(toolCall.name, operation, validation))
         return metadata
     }
 
-    private fun minimalToolExample(name: String, operation: String): JSONObject = when (name) {
-        "ui_action" -> JSONObject().put("action", operation.ifBlank { "tap" }).also { example ->
-            if (operation == "swipe") example.put("x1", 100).put("y1", 500).put("x2", 100).put("y2", 200)
-            else if (operation == "key") example.put("button", "BACK")
-            else example.put("x", 100).put("y", 100)
+    private fun minimalToolExample(
+        name: String,
+        operation: String,
+        validation: ValidationOutcome,
+    ): JSONObject {
+        // operation 缺失时优先给 schema 推导的必填字段示例，避免产出空壳 operation。
+        val fallback = validation.example.takeIf { it.length() > 0 }
+            ?: toolCallValidator.minimalExample(name)
+        if (operation.isBlank()) return fallback
+        val matched = when (name) {
+            "ui_action" -> JSONObject().put("action", operation).also { example ->
+                when (operation) {
+                    "swipe" -> example.put("x1", 100).put("y1", 500).put("x2", 100).put("y2", 200)
+                    "key" -> example.put("button", "BACK")
+                    "wait" -> example.put("timeout_ms", 3_000)
+                    "open_system_panel" -> example.put("panel", "notification")
+                    else -> example.put("x", 100).put("y", 100)
+                }
+            }
+            "app_action" -> JSONObject().put("action", operation).also { example ->
+                when (operation) {
+                    "launch" -> example.put("app_name", "相机")
+                    "open_uri" -> example.put("uri", "https://example.com")
+                    else -> example.put("query", "应用名")
+                }
+            }
+            "file_ops" -> JSONObject().put("operation", operation).also { example ->
+                when (operation) {
+                    "write" -> example.put("path", "/workspace/file.txt").put("content", "内容")
+                    "edit" -> example.put("path", "/workspace/file.txt")
+                        .put("old_string", "旧内容").put("new_string", "新内容")
+                    "search" -> example.put("path", "/workspace").put("query", "关键词")
+                    else -> example.put("path", "/workspace/file.txt")
+                }
+            }
+            "read_image" -> JSONObject().put("path", "/workspace/image.png")
+            else -> null
         }
-        "app_action" -> JSONObject().put("action", operation.ifBlank { "search" }).put("query", "应用名")
-        "file_ops" -> JSONObject().put("operation", operation.ifBlank { "read" }).put("path", "/workspace/file")
-        "read_image" -> JSONObject().put("path", "/workspace/image.png")
-        else -> JSONObject().put(if (operation.isBlank()) "operation" else "operation", operation.ifBlank { "get" })
+        return if (matched == null || matched.length() == 0) fallback else matched
     }
 
     private fun emitToolFinished(

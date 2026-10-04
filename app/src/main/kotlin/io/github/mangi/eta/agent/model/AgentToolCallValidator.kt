@@ -20,26 +20,82 @@ internal class AgentToolCallValidator(tools: JSONArray) {
         }
     }
 
-    fun validate(call: AgentModelClient.ToolCall): String? {
+    /**
+     * 同一 (validator 实例, 调用 id) 只完整校验一次：拒绝路径用同一结果产出
+     * error message 与结构化 metadata，避免重复遍历 schema，也不会出现两份互相矛盾的提示。
+     * 调用 id 为空（旧调用方）时不缓存。
+     */
+    private val cache = HashMap<String, ValidationOutcome>()
+    private val instanceKey = System.identityHashCode(this)
+
+    fun validate(call: AgentModelClient.ToolCall): String? =
+        validateDetailed(call).message.ifBlank { null }
+
+    fun validateDetailed(call: AgentModelClient.ToolCall): ValidationOutcome {
+        // 键里必须包含参数：回放/测试会复用同一调用 id 探测不同参数，只看 id 会错误复用旧结论。
+        val key = if (call.id.isBlank()) {
+            null
+        } else {
+            "$instanceKey:${call.id}:${call.name}:${call.argumentsJson.hashCode()}"
+        }
+        key?.let { cache[it] }?.let { return it }
+        val outcome = computeValidation(call)
+        key?.let { cache[it] = outcome }
+        return outcome
+    }
+
+    /** 测试用：已缓存（即已实际完成校验）的调用数。 */
+    internal fun cachedValidationCount(): Int = cache.size
+
+    /** 同一份 schema 推导出的最小合法示例；operation 目前只用于兼容调用点。 */
+    fun minimalExample(name: String, operation: String = ""): JSONObject =
+        minimalExampleFor(schemasByName[name]?.parameters)
+
+    private fun computeValidation(call: AgentModelClient.ToolCall): ValidationOutcome {
+        val example = minimalExample(
+            call.name,
+            call.parsedArgsOrNull()?.let { args ->
+                args.optString("action").ifBlank { args.optString("operation") }
+            }.orEmpty(),
+        )
         val toolSchema = schemasByName[call.name]
-            ?: if (call.name in LEGACY_TRANSCRIPT_TOOLS) return validateLegacy(call)
-            else return "工具未在本次运行的能力目录中声明"
+        if (toolSchema == null) {
+            if (call.name !in LEGACY_TRANSCRIPT_TOOLS) {
+                return ValidationFailure.of("工具未在本次运行的能力目录中声明").toOutcome(example)
+            }
+            val legacyFailure = validateLegacy(call)
+            return legacyFailure?.toOutcome(example) ?: ValidationOutcome.OK
+        }
         val arguments = call.parsedArgs().getOrNull()
-            ?: return "参数不是有效的 JSON object"
+            ?: return ValidationFailure.of(
+                message = "参数不是有效的 JSON object",
+                expectedSchema = JSONObject().put("type", "object"),
+                received = call.argumentsJson.take(200),
+            ).toOutcome(example)
         validateValue(
             value = arguments,
             schema = toolSchema.parameters,
             root = toolSchema.root,
             path = "arguments",
             depth = 0,
-        )?.let { return it }
-        return validateCanonicalOperation(call.name, arguments)
+        )?.let { return it.toOutcome(example) }
+        validateCanonicalOperation(call.name, arguments)?.let { return it.toOutcome(example) }
+        return ValidationOutcome.OK.copy(example = example)
     }
 
-    private fun validateLegacy(call: AgentModelClient.ToolCall): String? {
-        val args = call.parsedArgs().getOrNull() ?: return "参数不是有效的 JSON object"
-        fun missing(vararg fields: String): String? = fields.filter { !args.has(it) || args.isNull(it) || (args.opt(it) is String && args.optString(it).isBlank()) }
-            .takeIf { it.isNotEmpty() }?.let { "${call.name} 缺少必填字段 ${it.joinToString(", ")}" }
+    private fun validateLegacy(call: AgentModelClient.ToolCall): ValidationFailure? {
+        val args = call.parsedArgs().getOrNull() ?: return ValidationFailure.of("参数不是有效的 JSON object")
+        fun missing(vararg fields: String): ValidationFailure? {
+            val absent = fields.filter {
+                !args.has(it) || args.isNull(it) || (args.opt(it) is String && args.optString(it).isBlank())
+            }
+            return absent.takeIf { it.isNotEmpty() }?.let {
+                ValidationFailure.of(
+                    message = "${call.name} 缺少必填字段 ${it.joinToString(", ")}",
+                    missing = it,
+                )
+            }
+        }
         return when (call.name) {
             "tap", "long_press" -> if (args.has("index")) missing("index", "observation_id") else missing("x", "y")
             "tap_element", "long_press_element" -> missing("index", "observation_id")
@@ -55,35 +111,41 @@ internal class AgentToolCallValidator(tools: JSONArray) {
      * between an operation and the fields it makes meaningful. Keeping this check here means old
      * transcript adapters cannot accidentally dispatch a canonical call with a legacy default.
      */
-    private fun validateCanonicalOperation(name: String, args: JSONObject): String? {
-        fun missing(vararg fields: String): String? {
+    private fun validateCanonicalOperation(name: String, args: JSONObject): ValidationFailure? {
+        fun missing(vararg fields: String): ValidationFailure? {
             val absent = fields.filter { field ->
                 !args.has(field) || args.isNull(field) ||
                     (args.opt(field) is String && args.optString(field).isBlank())
             }
             return absent.takeIf { it.isNotEmpty() }?.let {
-                "${name} operation=${args.optString("action", args.optString("operation"))} 缺少必填字段 ${it.joinToString(", ")}; 请先提供完整参数"
+                ValidationFailure.of(
+                    message = "$name operation=${args.optString("action", args.optString("operation"))} " +
+                        "缺少必填字段 ${it.joinToString(", ")}; 请先提供完整参数",
+                    missing = it,
+                )
             }
         }
-        fun anyOf(vararg fields: String): String? =
+        fun anyOf(vararg fields: String): ValidationFailure? =
             if (fields.any { field ->
                     args.has(field) && !args.isNull(field) &&
                         !(args.opt(field) is String && args.optString(field).isBlank())
                 }
             ) null else missing(*fields)
-        fun observationIfIndexed(): String? =
+        fun observationIfIndexed(): ValidationFailure? =
             if (args.has("index")) missing("index", "observation_id") else null
 
         return when (name) {
             "web_search" -> when (args.optString("operation")) {
                 "search" -> missing("query")
                 "read" -> missing("url")
-                else -> "web_search 的 operation 无效"
+                else -> ValidationFailure.of("web_search 的 operation 无效")
             }
             "ui_action" -> when (val action = args.optString("action")) {
-                "tap", "long_press" -> observationIfIndexed() ?: if (args.has("index")) null else missing("x", "y")
+                "tap", "long_press" ->
+                    observationIfIndexed() ?: if (args.has("index")) null else missing("x", "y")
                 "swipe" -> missing("x1", "y1", "x2", "y2")
-                "scroll" -> observationIfIndexed() ?: if (args.has("index")) missing("direction") else missing("direction")
+                "scroll" ->
+                    observationIfIndexed() ?: if (args.has("index")) missing("direction") else missing("direction")
                 "input" -> missing("text") ?: observationIfIndexed()
                 "clear" -> observationIfIndexed()
                 "key" -> missing("button")
@@ -91,47 +153,47 @@ internal class AgentToolCallValidator(tools: JSONArray) {
                     "duration" -> missing("timeout_ms")
                     "text" -> missing("text", "timeout_ms")
                     "package" -> missing("package_name", "timeout_ms")
-                    else -> "ui_action operation=wait 的 condition 不受支持"
+                    else -> ValidationFailure.of("ui_action operation=wait 的 condition 不受支持")
                 }
                 "open_system_panel" -> missing("panel")
-                else -> "ui_action 的 action 无效：$action"
+                else -> ValidationFailure.of("ui_action 的 action 无效：$action")
             }
             "app_action" -> when (args.optString("action")) {
                 "search" -> missing("query")
                 "launch" -> anyOf("package_name", "app_name")
                 "open_uri" -> missing("uri")
-                else -> "app_action 的 action 无效"
+                else -> ValidationFailure.of("app_action 的 action 无效")
             }
             "device_control" -> when (args.optString("operation")) {
                 "alarm" -> missing("hour", "minute")
                 "timer" -> missing("duration_seconds")
                 "media" -> missing("media_action")
                 "volume" -> missing("stream", "percent")
-                else -> "device_control 的 operation 无效"
+                else -> ValidationFailure.of("device_control 的 operation 无效")
             }
             "clipboard" -> when (args.optString("operation")) {
                 "get" -> null
                 "set", "paste" -> missing("text")
-                else -> "clipboard 的 operation 无效"
+                else -> ValidationFailure.of("clipboard 的 operation 无效")
             }
             "file_ops" -> when (args.optString("operation")) {
                 "read", "list" -> missing("path")
                 "write" -> missing("path", "content")
                 "edit" -> missing("path", "old_string", "new_string")
                 "search" -> missing("path") ?: anyOf("query", "pattern")
-                else -> "file_ops 的 operation 无效"
+                else -> ValidationFailure.of("file_ops 的 operation 无效")
             }
             "read_image" -> missing("path")
             "skill" -> when (args.optString("operation")) {
                 "list", "curated" -> null
                 "read" -> missing("skill_id")
                 "resource" -> missing("skill_id", "relative_path")
-                else -> "skill 的 operation 无效"
+                else -> ValidationFailure.of("skill 的 operation 无效")
             }
             "skill_github" -> when (args.optString("operation")) {
                 "inspect" -> missing("repository")
                 "install" -> missing("repository") ?: anyOf("path", "paths")
-                else -> "skill_github 的 operation 无效"
+                else -> ValidationFailure.of("skill_github 的 operation 无效")
             }
             "memory" -> when (args.optString("operation")) {
                 "get" -> null
@@ -139,11 +201,38 @@ internal class AgentToolCallValidator(tools: JSONArray) {
                     "replace_range" -> missing("revision", "start_line", "end_line", "content")
                     "append" -> missing("revision", "content")
                     "clear" -> missing("revision")
-                    else -> "memory operation=write 缺少有效 mode"
+                    else -> ValidationFailure.of("memory operation=write 缺少有效 mode")
                 }
-                else -> "memory 的 operation 无效"
+                else -> ValidationFailure.of("memory 的 operation 无效")
             }
             else -> null
+        }
+    }
+
+    /** 用 schema 的 required 字段与 enum 候选生成最小合法示例，避免再手写每个工具的分支。 */
+    private fun minimalExampleFor(schema: JSONObject?): JSONObject {
+        val required = schema?.optJSONArray("required") ?: return JSONObject()
+        val properties = schema.optJSONObject("properties")
+        val example = JSONObject()
+        for (index in 0 until required.length()) {
+            val name = required.optString(index)
+            if (name.isBlank()) continue
+            example.put(name, exampleValue(properties?.optJSONObject(name) ?: JSONObject()))
+        }
+        return example
+    }
+
+    private fun exampleValue(schema: JSONObject): Any {
+        schema.optJSONArray("enum")?.let { values ->
+            if (values.length() > 0) return values.opt(0) ?: ""
+        }
+        return when (schema.optString("type")) {
+            "boolean" -> true
+            "integer" -> 1
+            "number" -> 1
+            "array" -> JSONArray()
+            "object" -> JSONObject()
+            else -> "示例"
         }
     }
 
@@ -153,12 +242,12 @@ internal class AgentToolCallValidator(tools: JSONArray) {
         root: JSONObject,
         path: String,
         depth: Int,
-    ): String? {
-        if (depth > MAX_SCHEMA_DEPTH) return "$path 的 Schema 引用层级过深"
+    ): ValidationFailure? {
+        if (depth > MAX_SCHEMA_DEPTH) return ValidationFailure.of("$path 的 Schema 引用层级过深")
 
         schema.optString("${'$'}ref").takeIf { it.isNotBlank() }?.let { reference ->
             val referenced = resolveReference(root, reference)
-                ?: return "$path 的 Schema 引用无法解析：$reference"
+                ?: return ValidationFailure.of("$path 的 Schema 引用无法解析：$reference")
             validateSchema(value, referenced, root, path, depth + 1)?.let { return it }
         }
 
@@ -167,15 +256,27 @@ internal class AgentToolCallValidator(tools: JSONArray) {
         if (schema.optBoolean("nullable", false) && isJsonNull(value)) return null
         val type = schema.opt("type")
         if (type != null && type != JSONObject.NULL && !matchesType(value, type)) {
-            return "$path 类型应为 ${describeType(type)}"
+            return ValidationFailure.of(
+                message = "$path 类型应为 ${describeType(type)}",
+                expectedSchema = type,
+                received = value,
+            )
         }
 
         if (schema.has("const") && !jsonEquals(schema.opt("const"), value)) {
-            return "$path 必须等于 Schema 声明的固定值"
+            return ValidationFailure.of(
+                message = "$path 必须等于 Schema 声明的固定值",
+                expectedSchema = schema.opt("const"),
+                received = value,
+            )
         }
         val enum = schema.optJSONArray("enum")
         if (enum != null && (0 until enum.length()).none { jsonEquals(enum.opt(it), value) }) {
-            return "$path 不在允许值集合中"
+            return ValidationFailure.of(
+                message = "$path 不在允许值集合中",
+                expectedSchema = enum,
+                received = value,
+            )
         }
 
         return when (value) {
@@ -193,7 +294,7 @@ internal class AgentToolCallValidator(tools: JSONArray) {
         root: JSONObject,
         path: String,
         depth: Int,
-    ): String? {
+    ): ValidationFailure? {
         schema.optJSONArray("allOf")?.let { branches ->
             for (index in 0 until branches.length()) {
                 validateSchema(value, branches.opt(index), root, path, depth + 1)?.let { return it }
@@ -201,17 +302,25 @@ internal class AgentToolCallValidator(tools: JSONArray) {
         }
         schema.optJSONArray("anyOf")?.let { branches ->
             if (!matchesBranchCount(value, branches, root, path, depth, minimum = 1)) {
-                return "$path 不符合 anyOf 中的任何 Schema"
+                return ValidationFailure.of(
+                    message = "$path 不符合 anyOf 中的任何 Schema",
+                    expectedSchema = branches,
+                    received = value,
+                )
             }
         }
         schema.optJSONArray("oneOf")?.let { branches ->
             if (!matchesBranchCount(value, branches, root, path, depth, minimum = 1, maximum = 1)) {
-                return "$path 必须且只能符合 oneOf 中的一个 Schema"
+                return ValidationFailure.of(
+                    message = "$path 必须且只能符合 oneOf 中的一个 Schema",
+                    expectedSchema = branches,
+                    received = value,
+                )
             }
         }
         schema.opt("not").takeUnless { it == null || it == JSONObject.NULL }?.let { rejected ->
             if (validateSchema(value, rejected, root, path, depth + 1) == null) {
-                return "$path 符合了 not 禁止的 Schema"
+                return ValidationFailure.of("$path 符合了 not 禁止的 Schema")
             }
         }
         schema.opt("if").takeUnless { it == null || it == JSONObject.NULL }?.let { condition ->
@@ -250,15 +359,22 @@ internal class AgentToolCallValidator(tools: JSONArray) {
         root: JSONObject,
         path: String,
         depth: Int,
-    ): String? {
+    ): ValidationFailure? {
         val size = value.length()
-        schema.optInteger("minProperties")?.let { if (size < it) return "$path 的字段数不能少于 $it" }
-        schema.optInteger("maxProperties")?.let { if (size > it) return "$path 的字段数不能超过 $it" }
+        schema.optInteger("minProperties")?.let { if (size < it) return ValidationFailure.of("$path 的字段数不能少于 $it") }
+        schema.optInteger("maxProperties")?.let { if (size > it) return ValidationFailure.of("$path 的字段数不能超过 $it") }
 
         schema.optJSONArray("required")?.let { required ->
-            for (index in 0 until required.length()) {
-                val key = required.optString(index)
-                if (!value.has(key)) return "$path 缺少必填字段 $key"
+            val absent = (0 until required.length())
+                .map { required.optString(it) }
+                .filter { it.isNotBlank() && !value.has(it) }
+            if (absent.isNotEmpty()) {
+                return ValidationFailure.of(
+                    message = "$path 缺少必填字段 ${absent.joinToString(", ")}",
+                    missing = absent,
+                    expectedSchema = schema,
+                    received = value,
+                )
             }
         }
 
@@ -268,7 +384,12 @@ internal class AgentToolCallValidator(tools: JSONArray) {
                 val required = dependencies.optJSONArray(key) ?: continue
                 for (index in 0 until required.length()) {
                     val dependent = required.optString(index)
-                    if (!value.has(dependent)) return "$path.$key 要求同时提供字段 $dependent"
+                    if (!value.has(dependent)) {
+                        return ValidationFailure.of(
+                            message = "$path.$key 要求同时提供字段 $dependent",
+                            missing = listOf(dependent),
+                        )
+                    }
                 }
             }
         }
@@ -295,7 +416,11 @@ internal class AgentToolCallValidator(tools: JSONArray) {
             }
             if (!matched) {
                 when (additionalProperties) {
-                    false -> return "$path 不允许额外字段 $key"
+                    false -> return ValidationFailure.of(
+                        message = "$path 不允许额外字段 $key",
+                        expectedSchema = properties,
+                        received = key,
+                    )
                     is JSONObject, is Boolean ->
                         validateSchema(childValue, additionalProperties, root, childPath, depth + 1)?.let { return it }
                 }
@@ -316,13 +441,19 @@ internal class AgentToolCallValidator(tools: JSONArray) {
         root: JSONObject,
         path: String,
         depth: Int,
-    ): String? {
-        schema.optInteger("minItems")?.let { if (value.length() < it) return "$path 项目数不能少于 $it" }
-        schema.optInteger("maxItems")?.let { if (value.length() > it) return "$path 项目数不能超过 $it" }
+    ): ValidationFailure? {
+        schema.optInteger("minItems")?.let {
+            if (value.length() < it) return ValidationFailure.of("$path 项目数不能少于 $it")
+        }
+        schema.optInteger("maxItems")?.let {
+            if (value.length() > it) return ValidationFailure.of("$path 项目数不能超过 $it")
+        }
         if (schema.optBoolean("uniqueItems", false)) {
             for (left in 0 until value.length()) {
                 for (right in left + 1 until value.length()) {
-                    if (jsonEquals(value.opt(left), value.opt(right))) return "$path 不允许重复项目"
+                    if (jsonEquals(value.opt(left), value.opt(right))) {
+                        return ValidationFailure.of("$path 不允许重复项目")
+                    }
                 }
             }
         }
@@ -347,7 +478,9 @@ internal class AgentToolCallValidator(tools: JSONArray) {
                         ?.let { return it }
                 }
             }
-            false -> if (value.length() > (prefixItems?.length() ?: 0)) return "$path 不允许更多项目"
+            false -> if (value.length() > (prefixItems?.length() ?: 0)) {
+                return ValidationFailure.of("$path 不允许更多项目")
+            }
         }
 
         schema.opt("contains").takeUnless { it == null || it == JSONObject.NULL }?.let { contains ->
@@ -356,30 +489,79 @@ internal class AgentToolCallValidator(tools: JSONArray) {
             }
             val minimum = schema.optInteger("minContains") ?: 1
             val maximum = schema.optInteger("maxContains") ?: Int.MAX_VALUE
-            if (matches !in minimum..maximum) return "$path 中符合 contains 的项目数必须在 $minimum..$maximum 之间"
+            if (matches !in minimum..maximum) {
+                return ValidationFailure.of("$path 中符合 contains 的项目数必须在 $minimum..$maximum 之间")
+            }
         }
         return null
     }
 
-    private fun validateString(value: String, schema: JSONObject, path: String): String? {
-        schema.optInteger("minLength")?.let { if (value.codePointCount(0, value.length) < it) return "$path 长度不能少于 $it" }
-        schema.optInteger("maxLength")?.let { if (value.codePointCount(0, value.length) > it) return "$path 长度不能超过 $it" }
+    private fun validateString(value: String, schema: JSONObject, path: String): ValidationFailure? {
+        schema.optInteger("minLength")?.let {
+            if (value.codePointCount(0, value.length) < it) {
+                return ValidationFailure.of(
+                    message = "$path 长度不能少于 $it",
+                    expectedSchema = schema,
+                    received = value,
+                )
+            }
+        }
+        schema.optInteger("maxLength")?.let {
+            if (value.codePointCount(0, value.length) > it) {
+                return ValidationFailure.of(
+                    message = "$path 长度不能超过 $it",
+                    expectedSchema = schema,
+                    received = value,
+                )
+            }
+        }
         schema.optString("pattern").takeIf { it.isNotBlank() }?.let { pattern ->
             val regex = runCatching { Regex(pattern) }.getOrNull()
-                ?: return "$path 的 Schema pattern 无效"
-            if (!regex.containsMatchIn(value)) return "$path 不符合 pattern $pattern"
+                ?: return ValidationFailure.of("$path 的 Schema pattern 无效")
+            if (!regex.containsMatchIn(value)) {
+                return ValidationFailure.of(
+                    message = "$path 不符合 pattern $pattern",
+                    expectedSchema = schema,
+                    received = value,
+                )
+            }
         }
         return null
     }
 
-    private fun validateNumber(value: Number, schema: JSONObject, path: String): String? {
-        val number = value.toBigDecimal() ?: return "$path 不是有效数字"
-        schema.optBigDecimal("minimum")?.let { if (number < it) return "$path 不能小于 $it" }
-        schema.optBigDecimal("maximum")?.let { if (number > it) return "$path 不能大于 $it" }
-        schema.optBigDecimal("exclusiveMinimum")?.let { if (number <= it) return "$path 必须大于 $it" }
-        schema.optBigDecimal("exclusiveMaximum")?.let { if (number >= it) return "$path 必须小于 $it" }
+    private fun validateNumber(value: Number, schema: JSONObject, path: String): ValidationFailure? {
+        val number = value.toBigDecimal() ?: return ValidationFailure.of("$path 不是有效数字")
+        schema.optBigDecimal("minimum")?.let {
+            if (number < it) return ValidationFailure.of("$path 不能小于 $it").copy(
+                expectedSchema = schema,
+                received = value,
+            )
+        }
+        schema.optBigDecimal("maximum")?.let {
+            if (number > it) return ValidationFailure.of("$path 不能大于 $it").copy(
+                expectedSchema = schema,
+                received = value,
+            )
+        }
+        schema.optBigDecimal("exclusiveMinimum")?.let {
+            if (number <= it) return ValidationFailure.of("$path 必须大于 $it").copy(
+                expectedSchema = schema,
+                received = value,
+            )
+        }
+        schema.optBigDecimal("exclusiveMaximum")?.let {
+            if (number >= it) return ValidationFailure.of("$path 必须小于 $it").copy(
+                expectedSchema = schema,
+                received = value,
+            )
+        }
         schema.optBigDecimal("multipleOf")?.takeIf { it.signum() != 0 }?.let { divisor ->
-            if (number.remainder(divisor).compareTo(BigDecimal.ZERO) != 0) return "$path 必须是 $divisor 的倍数"
+            if (number.remainder(divisor).compareTo(BigDecimal.ZERO) != 0) {
+                return ValidationFailure.of("$path 必须是 $divisor 的倍数").copy(
+                    expectedSchema = schema,
+                    received = value,
+                )
+            }
         }
         return null
     }
@@ -407,11 +589,11 @@ internal class AgentToolCallValidator(tools: JSONArray) {
         root: JSONObject,
         path: String,
         depth: Int,
-    ): String? = when (schema) {
+    ): ValidationFailure? = when (schema) {
         true -> null
-        false -> "$path 被 false Schema 拒绝"
+        false -> ValidationFailure.of("$path 被 false Schema 拒绝")
         is JSONObject -> validateValue(value, schema, root, path, depth)
-        else -> "$path 的 Schema 节点无效"
+        else -> ValidationFailure.of("$path 的 Schema 节点无效")
     }
 
     private fun resolveReference(root: JSONObject, reference: String): Any? {
@@ -447,11 +629,6 @@ internal class AgentToolCallValidator(tools: JSONArray) {
 
     private fun JSONObject.optBigDecimal(name: String): BigDecimal? =
         (opt(name) as? Number)?.toBigDecimal()
-
-    private fun describeType(type: Any): String = when (type) {
-        is JSONArray -> (0 until type.length()).joinToString(" 或 ") { type.optString(it) }
-        else -> type.toString()
-    }
 
     private fun isJsonNull(value: Any?): Boolean = value == null || value == JSONObject.NULL
 

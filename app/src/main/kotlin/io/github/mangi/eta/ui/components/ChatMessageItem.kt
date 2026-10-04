@@ -3090,21 +3090,30 @@ private fun ToolActivityInline(
                 Spacer(modifier = Modifier.width(8.dp))
             }
 
-            Icon(
-                imageVector = iconForTool(message.toolName),
-                contentDescription = null,
-                modifier = Modifier
-                    .padding(top = if (compact) 0.dp else 2.dp)
-                    .size(if (compact) 14.dp else 15.dp)
-                    .graphicsLayer {
-                        this.alpha = if (message.status == ToolActivityStatusUi.Running) pulseAlpha() else 1f
-                    },
-                tint = if (isSubagentRow) {
-                    MiuixTheme.colorScheme.secondary
-                } else {
-                    message.status.statusColor()
-                },
-            )
+            val toolIconTint = if (isSubagentRow) {
+                MiuixTheme.colorScheme.secondary
+            } else {
+                message.status.statusColor()
+            }
+            if (message.status == ToolActivityStatusUi.Running) {
+                // 运行中：图标位换成像素方块 spinner（对齐 Copilot 的 monaco-pixel-spinner），
+                // 普通工具行与子代理行统一使用；完成后恢复静态工具图标。
+                PixelSpinner(
+                    active = true,
+                    color = toolIconTint,
+                    size = if (compact) 14.dp else 15.dp,
+                    modifier = Modifier.padding(top = if (compact) 0.dp else 2.dp),
+                )
+            } else {
+                Icon(
+                    imageVector = iconForTool(message.toolName),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .padding(top = if (compact) 0.dp else 2.dp)
+                        .size(if (compact) 14.dp else 15.dp),
+                    tint = toolIconTint,
+                )
+            }
 
             Spacer(modifier = Modifier.width(if (compact) 6.dp else 7.dp))
 
