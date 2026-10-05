@@ -301,6 +301,7 @@
   <string name="tool_write_file">Write file</string>
   <string name="tool_spawn_agents">Parallel subagents</string>
   <string name="tool_todo_write">Task list</string>
+  <string name="todo_in_progress">In progress</string>
   <string name="tool_subagent">Subagent</string>
   <string name="tool_list_directory">List directory</string>
   <string name="tool_edit_file">Edit file</string>
@@ -381,6 +382,9 @@
   <string name="ui_enable_terminal_file_tools_18bb43">Enable terminal/file tools</string>
   <string name="settings_always_on_keep_alive_title">Always keep Agent Runtime alive</string>
   <string name="settings_always_on_keep_alive_summary">Off by default: keep alive only while a task is running or a result is pending. Enabling this keeps the entry ready at the cost of periodic background wakeups.</string>
+  <string name="settings_root_keep_alive_title">Root background retention</string>
+  <string name="settings_root_keep_alive_summary">Uses Root to protect the process (oom protection, system whitelist, watchdog restart). Requires Root; keeps an ongoing notification.</string>
+  <string name="settings_root_keep_alive_requires_root">Requires Root: granting it before enabling makes this effective.</string>
   <string name="ui_enable_web_browsing_tools_8b6b03">Enable web browsing tools</string>
   <string name="ui_enable_memory_4b69b7">Enable memory</string>
   <string name="ui_enable_device_direct_tools_e2d595">Enable device direct tools</string>
@@ -1290,6 +1294,10 @@
   <string name="execution_title">Eta is running</string>
   <string name="execution_summary">%1$d tasks are running; return to Eta to check progress</string>
   <string name="execution_stop">Stop running tasks</string>
+  <string name="keepalive_channel">Background retention</string>
+  <string name="keepalive_title">Eta stays in background</string>
+  <string name="keepalive_summary">Root retention is on; the watchdog restores Eta after system cleanup</string>
+  <string name="keepalive_stop">Turn off retention</string>
   <string name="linux_environment_configuration">Environment configuration</string>
   <string name="linux_environment_files">Files and directories</string>
   <string name="linux_environment_base_ready">Base environment is ready; install the base tools next</string>

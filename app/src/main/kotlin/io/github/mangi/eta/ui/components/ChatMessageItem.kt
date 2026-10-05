@@ -147,6 +147,7 @@ import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.browser.AgentBrowserSession
 import io.github.mangi.eta.agent.browser.BrowserSessionSnapshot
 import io.github.mangi.eta.agent.model.AgentFileReferencePromptCodec
+import io.github.mangi.eta.agent.model.AgentTodoList
 import io.github.mangi.eta.agent.overlay.toolDisplayName
 import io.github.mangi.eta.ui.app.SUBAGENT_TOOL_NAME
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
@@ -804,88 +805,90 @@ private fun ThinkingMessageList(
     val toolGlyphCenterY = with(railDensity) { 11.dp.toPx() }
     val canScrollUp by remember(listState) { derivedStateOf { listState.canScrollBackward } }
     val canScrollDown by remember(listState) { derivedStateOf { listState.canScrollForward } }
-    LazyColumn(
-        state = listState,
-        // 窗口内不做拉伸回弹，保持与 VS Code 一致的平滚动体验。
-        overscrollEffect = null,
-        modifier = modifier
-            .fillMaxWidth()
-            .then(
-                if (windowMaxHeight != null) Modifier.heightIn(max = windowMaxHeight)
-                else Modifier.heightIn(max = if (assistantOverlay) 360.dp else 420.dp)
-            )
-            // 工作窗口的上下渐隐：只在还有内容可滚动的方向淡出（对齐 VS Code fixedScrolling）。
-            .workProcessWindowFade(
-                enabled = running,
-                fadeTop = canScrollUp,
-                fadeBottom = canScrollDown,
-            ),
-    ) {
-        itemsIndexed(
-            items = messages,
-            key = { _, message -> message.id },
-            contentType = { _, message -> message::class },
-        ) { index, message ->
-            val isToolRow = message is ToolActivityMessageUi
-            ChatMessageItem(
-                message = message,
-                onSuggestionClick = {},
-                onRunTraceClick = {},
-                // 工具调用已拆到主流，思考块内不会再出现工具行；浏览器入口无需再接线。
-                onOpenBrowser = {},
-                showBrowserShortcut = false,
-                compact = true,
-                assistantOverlay = assistantOverlay,
-                onThinkingToggle = onThinkingToggle,
-                // 工作过程链线：每行画自己那段并在节点处留空，首行从节点起、
-                // 末行到节点止（有尾部工作行时继续连到它）；思考文本行额外画小圆点。
-                modifier = Modifier.drawBehind {
-                    drawWorkProcessRail(
-                        railColor = railColor,
-                        isFirst = index == 0,
-                        isLast = index == messages.lastIndex && tailLabel == null,
-                        glyphCenterY = if (isToolRow) toolGlyphCenterY else thinkingGlyphCenterY,
-                        hasDot = !isToolRow &&
-                            (message as? ThinkingMessageUi)?.content?.isNotBlank() == true,
-                    )
-                },
-            )
+    Column(modifier = modifier.fillMaxWidth()) {
+        LazyColumn(
+            state = listState,
+            // 窗口内不做拉伸回弹，保持与 VS Code 一致的平滚动体验。
+            overscrollEffect = null,
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (windowMaxHeight != null) Modifier.heightIn(max = windowMaxHeight)
+                    else Modifier.heightIn(max = if (assistantOverlay) 360.dp else 420.dp)
+                )
+                // 工作窗口的上下渐隐：只在还有内容可滚动的方向淡出（对齐 VS Code fixedScrolling）。
+                .workProcessWindowFade(
+                    enabled = running,
+                    fadeTop = canScrollUp,
+                    fadeBottom = canScrollDown,
+                ),
+        ) {
+            itemsIndexed(
+                items = messages,
+                key = { _, message -> message.id },
+                contentType = { _, message -> message::class },
+            ) { index, message ->
+                val isToolRow = message is ToolActivityMessageUi
+                ChatMessageItem(
+                    message = message,
+                    onSuggestionClick = {},
+                    onRunTraceClick = {},
+                    // 工具调用已拆到主流，思考块内不会再出现工具行；浏览器入口无需再接线。
+                    onOpenBrowser = {},
+                    showBrowserShortcut = false,
+                    compact = true,
+                    assistantOverlay = assistantOverlay,
+                    onThinkingToggle = onThinkingToggle,
+                    // 工作过程链线：每行画自己那段并在节点处留空，首行从节点起、
+                    // 末行到节点止（有尾部工作行时继续连到它）；思考文本行额外画小圆点。
+                    modifier = Modifier.drawBehind {
+                        drawWorkProcessRail(
+                            railColor = railColor,
+                            isFirst = index == 0,
+                            isLast = index == messages.lastIndex && tailLabel == null,
+                            glyphCenterY = if (isToolRow) toolGlyphCenterY else thinkingGlyphCenterY,
+                            hasDot = !isToolRow &&
+                                (message as? ThinkingMessageUi)?.content?.isNotBlank() == true,
+                        )
+                    },
+                )
+            }
         }
         if (tailLabel != null) {
-            item(key = "work-tail-$id", contentType = "work-tail") {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
+            // 「推理中」等尾部提示刻意放在滚动窗口之外：内容再长、再滚动也常驻可见，
+            // 不被限高窗口裁掉；链线节点与滚动内容底部在视觉上保持连续。
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .drawBehind {
+                        drawWorkProcessRail(
+                            railColor = railColor,
+                            dotColor = railColor.copy(alpha = railColor.alpha * tailPulseAlpha()),
+                            isFirst = messages.isEmpty(),
+                            isLast = true,
+                            glyphCenterY = tailGlyphCenterY,
+                            hasDot = true,
+                        )
+                    }
+                    .padding(
+                        start = 20.dp,
+                        end = 0.dp,
+                        top = WorkProcessTextTopPadding,
+                        bottom = 6.dp,
+                    ),
+            ) {
+                Text(
+                    text = tailLabel,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    // 文本走扫光、圆点走脉冲：与 VS Code 的 shimmering spinner 行一致。
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .drawBehind {
-                            drawWorkProcessRail(
-                                railColor = railColor,
-                                dotColor = railColor.copy(alpha = railColor.alpha * tailPulseAlpha()),
-                                isFirst = messages.isEmpty(),
-                                isLast = true,
-                                glyphCenterY = tailGlyphCenterY,
-                                hasDot = true,
-                            )
-                        }
-                        .padding(
-                            start = 20.dp,
-                            end = 0.dp,
-                            top = WorkProcessTextTopPadding,
-                            bottom = 6.dp,
-                        ),
-                ) {
-                    Text(
-                        text = tailLabel,
-                        style = MiuixTheme.textStyles.footnote1,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        // 文本走扫光、圆点走脉冲：与 VS Code 的 shimmering spinner 行一致。
-                        modifier = Modifier
-                            .testTag(WorkProcessTailTag)
-                            .workingShimmer(enabled = running),
-                    )
-                }
+                        .testTag(WorkProcessTailTag)
+                        .workingShimmer(enabled = running),
+                )
             }
         }
     }
@@ -2999,6 +3002,18 @@ private fun ToolActivityInline(
     modifier: Modifier = Modifier,
     compact: Boolean = false,
 ) {
+    // 任务清单更新：用专用卡片渲染（进度条 + 逐项状态），比普通工具行更直观；
+    // 清单文本在工具结果摘要（resultSummary，summarizeResult 输出）中，detail 仅作兼容回退；
+    // 解析失败（旧格式/异常结果）时不 return，落回普通工具行渲染，天然降级。
+    if (message.toolName == AgentTodoList.TOOL_NAME) {
+        val todo = remember(message.id, message.resultSummary, message.detail) {
+            parseTodoListDetail(message.resultSummary) ?: parseTodoListDetail(message.detail)
+        }
+        if (todo != null) {
+            TodoCard(message = message, todo = todo, modifier = modifier, compact = compact)
+            return
+        }
+    }
     var isExpanded by rememberSaveable(message.id) { mutableStateOf(false) }
     var previousStatus by remember(message.id) { mutableStateOf(message.status) }
     LaunchedEffect(message.status) {
@@ -3101,7 +3116,7 @@ private fun ToolActivityInline(
                 PixelSpinner(
                     active = true,
                     color = toolIconTint,
-                    size = if (compact) 14.dp else 15.dp,
+                    size = if (compact) 15.dp else 16.dp,
                     modifier = Modifier.padding(top = if (compact) 0.dp else 2.dp),
                 )
             } else {

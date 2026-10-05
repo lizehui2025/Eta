@@ -71,7 +71,7 @@ internal fun SubagentDetailDialog(
                         PixelSpinner(
                             active = true,
                             color = message.status.statusColor(),
-                            size = 12.dp,
+                            size = 14.dp,
                         )
                     } else {
                         Box(

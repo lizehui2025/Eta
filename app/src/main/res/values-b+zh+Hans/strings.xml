@@ -279,6 +279,7 @@
   <string name="tool_write_file">写入文件</string>
   <string name="tool_spawn_agents">并行子代理</string>
   <string name="tool_todo_write">任务清单</string>
+  <string name="todo_in_progress">进行中</string>
   <string name="tool_subagent">子代理</string>
   <string name="tool_list_directory">列出目录</string>
   <string name="tool_edit_file">编辑文件</string>
@@ -369,6 +370,9 @@
   <string name="ui_enable_terminal_file_tools_18bb43">启用终端/文件工具</string>
   <string name="settings_always_on_keep_alive_title">始终保活 Agent Runtime</string>
   <string name="settings_always_on_keep_alive_summary">默认关闭：仅在任务运行或等待结果期间保活。开启后入口更易随时可用，但会增加后台周期唤醒与电量消耗。</string>
+  <string name="settings_root_keep_alive_title">Root 后台留存</string>
+  <string name="settings_root_keep_alive_summary">调用 Root 保护进程（oom 防清理、系统白名单、守护自动拉起）；需要 Root 授权，会常驻一条通知。</string>
+  <string name="settings_root_keep_alive_requires_root">需要 Root 授权：授予后开启才会生效。</string>
   <string name="ui_enable_web_browsing_tools_8b6b03">启用网页浏览工具</string>
   <string name="ui_enable_memory_4b69b7">启用记忆</string>
   <string name="ui_enable_device_direct_tools_e2d595">启用设备直达工具</string>
@@ -1273,6 +1277,10 @@
   <string name="execution_title">Eta 正在运行</string>
   <string name="execution_summary">%1$d 项任务正在运行，可返回 Eta 查看进度</string>
   <string name="execution_stop">停止运行任务</string>
+  <string name="keepalive_channel">后台留存</string>
+  <string name="keepalive_title">Eta 后台留存中</string>
+  <string name="keepalive_summary">Root 留存已开启，系统清理后会由守护进程自动恢复</string>
+  <string name="keepalive_stop">停止后台留存</string>
   <string name="linux_environment_configuration">环境配置</string>
   <string name="linux_environment_files">文件与目录</string>
   <string name="linux_environment_base_ready">基础环境已就绪，下一步安装基础工具</string>

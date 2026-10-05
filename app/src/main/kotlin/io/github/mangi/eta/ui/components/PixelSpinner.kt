@@ -127,6 +127,8 @@ private fun positiveFraction(value: Float): Float {
  *
  * @param active 为 false 时不做动画（静态全亮网格），适合已完成但仍需占位的场景。
  * @param color 点颜色；默认取次要前景色，可传工具状态色保持既有配色语义。
+ *   颜色会按 [ensureReadableTint] 对表面色保障最低对比度：白色（浅色主题）背景下
+ *   pastel 强调色的 2dp 方块几乎不可见，这里只加深/提亮、不换色相。
  * @param size 容器边长；点尺寸按 `size / 8` 等比（16dp 容器 → 2dp 点，与参考实现一致）。
  */
 @Composable
@@ -136,11 +138,12 @@ internal fun PixelSpinner(
     color: Color = Color.Unspecified,
     size: Dp = 16.dp,
 ) {
-    val resolvedColor = if (color == Color.Unspecified) {
+    val baseColor = if (color == Color.Unspecified) {
         MiuixTheme.colorScheme.onSurfaceVariantSummary
     } else {
         color
     }
+    val resolvedColor = ensureReadableTint(baseColor, MiuixTheme.colorScheme.surface)
     val animating = active && rememberAnimationsEnabled()
     val phase: () -> Float = if (animating) {
         val transition = rememberInfiniteTransition(label = "pixel_spinner")
