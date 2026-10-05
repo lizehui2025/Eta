@@ -26,13 +26,31 @@ internal object UserFileAccess {
             else -> File(workspace, raw)
         }.canonicalFile
         val roots = listOf(workspace, File(workspace.parentFile, "proot"), File("/storage/emulated/0"))
-        require(roots.any { root -> file.toPath().startsWith(root.canonicalFile.toPath()) }) { "路径不在普通终端可访问范围内" }
+        require(roots.any { root -> file.toPath().startsWith(root.canonicalFile.toPath()) }) {
+            "路径不在普通终端的可访问范围内（无 Root 时只能访问终端工作区与 /storage/emulated/0）：$path"
+        }
         return file
     }
 
     fun read(path: String, offsetBytes: Int, maxBytes: Int): String = operation {
         val file = resolve(path)
-        require(file.isFile && file.canRead()) { "文件不可读取" }
+        // 与 Root 侧同一口径：目录/不存在/无权限分别给结论，避免模型只拿到笼统的失败。
+        if (!file.exists()) return@operation failure("NOT_FOUND", missingPathMessage(file))
+        if (file.isDirectory) {
+            return@operation failure(
+                "IS_DIRECTORY",
+                "路径是目录：${file.absolutePath}；请改用 list_directory 浏览目录，或提供具体文件路径",
+            )
+        }
+        if (!file.isFile) {
+            return@operation failure(
+                "NOT_REGULAR_FILE",
+                "路径不是普通文件：${file.absolutePath}（可能是设备、管道或损坏的符号链接）",
+            )
+        }
+        if (!file.canRead()) {
+            return@operation failure("READ_FAILED", "文件不可读取（无读取权限）：${file.absolutePath}")
+        }
         val offset = offsetBytes.coerceAtLeast(0)
         val limit = maxBytes.coerceIn(1, 16_000)
         // 文件不存在或读到 EOF/短读统一映射 READ_FAILED；其余 IOException 保持 FILE_ACCESS_DENIED。
@@ -57,9 +75,15 @@ internal object UserFileAccess {
     fun write(path: String, content: String, append: Boolean): String = operation {
         val file = resolve(path)
         val bytes = content.toByteArray()
-        require(bytes.size <= 512 * 1024) { "写入内容过大" }
-        require(file.parentFile!!.mkdirs() || file.parentFile!!.isDirectory) { "目录不可创建" }
-        require(!file.exists() || file.isFile) { "目标不是普通文件" }
+        if (bytes.size > 512 * 1024) {
+            return@operation failure("FILE_TOO_LARGE", "写入内容过大（${bytes.size} 字节，上限 512KB）")
+        }
+        if (file.isDirectory) {
+            return@operation failure("IS_DIRECTORY", "目标路径是目录：${file.absolutePath}；请提供文件路径")
+        }
+        if (!file.parentFile!!.mkdirs() && !file.parentFile!!.isDirectory) {
+            return@operation failure("WRITE_FAILED", "目录不可创建（权限不足）：${file.parentFile!!.absolutePath}")
+        }
         // 覆盖已存在的文本文件前先读取旧内容，供 UI 展示具体的变更摘要。
         val previousText = if (!append && file.isFile && file.length() in 1..(512L * 1024)) {
             runCatching { file.readText() }.getOrNull()
@@ -103,12 +127,18 @@ internal object UserFileAccess {
             return@operation mountsListing(limit, offset)
         }
         val directory = resolve(path)
+        if (!directory.isDirectory) {
+            return@operation failure(
+                "MISSING_DIRECTORY",
+                "目录不存在或不是目录：${directory.absolutePath}" + missingPathSuggestion(directory),
+            )
+        }
         val globs = AgentCodeSearch.compileGlobs(glob)
         val skip = offset.coerceAtLeast(0)
         val max = limit.coerceIn(1, 200)
         // 与 Root 实现同一口径：按名排序、一行一个、“d /- ”前缀、total/count/offset/truncated。
         val collected = if (!recursive) {
-            (directory.listFiles() ?: throw IllegalArgumentException("目录不可读取"))
+            (directory.listFiles() ?: return@operation failure("LIST_FAILED", "目录不可读取（权限不足）：${directory.absolutePath}"))
                 .sortedBy { it.name }
                 .map { file -> (if (file.isDirectory) "d " else "- ") + file.name to file.name }
         } else {
@@ -151,7 +181,16 @@ internal object UserFileAccess {
 
     fun edit(path: String, oldText: String, newText: String, replaceAll: Boolean): String = operation {
         val file = resolve(path)
-        require(file.isFile && file.canRead()) { "文件不可读取" }
+        if (!file.exists()) return@operation failure("NOT_FOUND", missingPathMessage(file))
+        if (file.isDirectory) {
+            return@operation failure(
+                "IS_DIRECTORY",
+                "路径是目录：${file.absolutePath}；请改用 list_directory 浏览目录，或提供具体文件路径",
+            )
+        }
+        if (!file.isFile || !file.canRead()) {
+            return@operation failure("READ_FAILED", "文件不可读取：${file.absolutePath}")
+        }
         // 大文件错误码与 root 路径对齐：恰 512KB 允许，超过才报 FILE_TOO_LARGE，避免经 require 落到 INVALID_PATH。
         if (file.length() > 512 * 1024) {
             return@operation failure("FILE_TOO_LARGE", "文件超过 512KB，请改用终端命令处理")
@@ -161,6 +200,7 @@ internal object UserFileAccess {
             is AgentFileEdit.Outcome.Rejected ->
                 JSONObject().put("ok", false).put("tool", "edit_file").put("code", outcome.code)
                     .put("message", outcome.message)
+                    .also { json -> outcome.context?.let { json.put("context", it) } }
             is AgentFileEdit.Outcome.Applied -> {
                 val bytes = outcome.content.toByteArray()
                 if (bytes.size > 512 * 1024) {
@@ -196,7 +236,15 @@ internal object UserFileAccess {
             return@operation failure("INVALID_PATTERN", "pattern 不是合法正则")
         }
         val root = resolve(rootPath)
-        require(root.isDirectory) { "目录不可读取" }
+        if (!root.exists()) {
+            return@operation failure(
+                "MISSING_DIRECTORY",
+                "搜索目录不存在：${root.absolutePath}" + missingPathSuggestion(root),
+            )
+        }
+        if (!root.isDirectory) {
+            return@operation failure("NOT_A_DIRECTORY", "搜索根路径不是目录：${root.absolutePath}；请提供目录路径")
+        }
         val globs = AgentCodeSearch.compileGlobs(glob)
         val max = maxResults.coerceIn(1, AgentCodeSearch.MAX_RESULTS)
         val entries = collectMatches(root, regex, globs, max)
@@ -304,8 +352,9 @@ internal object UserFileAccess {
         error("FILE_ACCESS_DENIED", "文件不可访问，请检查路径和文件授权")
     } catch (_: SecurityException) {
         error("FILE_ACCESS_DENIED", "文件访问未授权")
-    } catch (_: IllegalArgumentException) {
-        error("INVALID_PATH", "路径或文件参数不在允许范围内")
+    } catch (invalid: IllegalArgumentException) {
+        // resolve() 的范围说明本身就可操作（含可访问范围），保留原文而不是替换成笼统提示。
+        error("INVALID_PATH", invalid.message ?: "路径或文件参数不在允许范围内")
     }
 
     /** 统一错误 JSON 构造；operation 内的提前返回复用它，保证字段与统一错误出口一致。 */
@@ -313,4 +362,27 @@ internal object UserFileAccess {
         JSONObject().put("ok", false).put("code", code).put("message", message)
 
     private fun error(code: String, message: String): String = failure(code, message).toString()
+
+    /** 缺失文件的恢复提示（与 Root 侧同一口径）：给出父目录现有条目，便于一次修正路径。 */
+    private fun missingPathMessage(file: File): String =
+        "文件不存在：${file.absolutePath}" + missingPathSuggestion(file)
+
+    private fun missingPathSuggestion(file: File): String {
+        val parent = file.parentFile
+        if (parent == null || !parent.isDirectory) {
+            return "；父目录不存在，请先用 list_directory 从工作区根目录逐层确认"
+        }
+        val names = parent.listFiles()
+            ?.sortedBy { it.name }
+            ?.take(MISSING_SUGGESTION_LIMIT)
+            ?.joinToString(", ") { it.name }
+            .orEmpty()
+        if (names.isBlank()) {
+            return "；请先用 list_directory 确认工作区中的真实路径"
+        }
+        return "。父目录 ${parent.absolutePath} 下的条目：$names。" +
+            "请核对文件名大小写与后缀，或先用 list_directory 浏览目录"
+    }
+
+    private const val MISSING_SUGGESTION_LIMIT = 24
 }

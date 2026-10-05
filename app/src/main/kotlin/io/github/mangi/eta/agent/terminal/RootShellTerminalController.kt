@@ -40,6 +40,20 @@ internal class RootShellTerminalController(
         const val MAX_ASYNC_OUTPUT_CHARS = 64_000
 
         /**
+         * 路径状态退出码：文件类命令用它们把「目录 / 不存在 / 非普通文件」与执行失败区分开，
+         * 调用方据此返回精确错误码与恢复建议，而不是笼统的 exit=N。
+         */
+        const val PATH_EXIT_DIRECTORY = 3
+        const val PATH_EXIT_MISSING = 4
+        const val PATH_EXIT_NOT_FILE = 5
+
+        /** 缺失路径提示里父目录不存在时的标记（ls 分支输出）。 */
+        const val NO_PARENT_MARKER = "__ETA_NO_PARENT__"
+
+        /** 缺失路径提示中列出的父目录条目上限。 */
+        const val MISSING_SUGGESTION_ENTRIES = 24
+
+        /**
          * 常驻会话的输出上限（读取线程持续排空、只保留前 N 字节）。
          * 会话命令靠 stdout 里的状态标记判定结束：超出上限时标记会丢失，命令按超时收场而不是打爆内存。
          */
@@ -797,16 +811,22 @@ internal class RootShellTerminalController(
         val safePath = normalizePath(path)
         val offset = offsetBytes.coerceAtLeast(0)
         val limit = maxBytes.coerceIn(1, MAX_READ_BYTES)
-        // 性能：用 tail/head 大块读取替代 dd bs=1；管道退出码来自 head，
-        // 以 test -f 兜底文件不存在，并用“无输出但 stderr 非空”识别读取失败。
-        val command = "test -f ${shellQuote(safePath)} && " +
-            "tail -c +${offset + 1} ${shellQuote(safePath)} | head -c $limit"
+        // 性能：用 tail/head 大块读取替代 dd bs=1；管道退出码来自 head。
+        // 目录/不存在/非普通文件分别用退出码 3/4/5 区分：模型拿不到具体原因时
+        // 只能盲目重试同一路径，失败率居高不下；这里直接给出可修正的结论。
+        val quoted = shellQuote(safePath)
+        val command = "if [ -d $quoted ]; then exit $PATH_EXIT_DIRECTORY; " +
+            "elif [ ! -e $quoted ]; then exit $PATH_EXIT_MISSING; " +
+            "elif [ ! -f $quoted ]; then exit $PATH_EXIT_NOT_FILE; " +
+            "else tail -c +${offset + 1} $quoted | head -c $limit; fi"
         val result = runSuBytes(command, timeoutSeconds = 20)
+        pathStatusFailure(result.exitCode, safePath, "read_file")?.let { return it }
         val readFailed = result.exitCode != 0 || (result.output.isEmpty() && result.stderr.isNotBlank())
         if (readFailed) {
             logger.warn(
                 "Agent terminal action=read_file outcome=failed offsetBytes=$offset " +
-                    "maxBytes=$limit exitCode=${result.exitCode} errorChars=${result.stderr.length}"
+                    "maxBytes=$limit exitCode=${result.exitCode} errorChars=${result.stderr.length} " +
+                    "error=${stderrExcerpt(result.stderr)}"
             )
             return errorJson("READ_FAILED", result.stderr.ifBlank { "exit=${result.exitCode}" })
         }
@@ -832,7 +852,9 @@ internal class RootShellTerminalController(
         if (!rootAvailable()) return UserFileAccess.write(path, content, append)
         val safePath = normalizePath(path)
         val bytes = content.toByteArray(Charsets.UTF_8)
-        require(bytes.size <= MAX_WRITE_BYTES) { "写入内容过大：${bytes.size} bytes" }
+        if (bytes.size > MAX_WRITE_BYTES) {
+            return errorJson("FILE_TOO_LARGE", "写入内容过大（${bytes.size} 字节，上限 $MAX_WRITE_BYTES）")
+        }
         // 覆盖已存在的文本文件前先读取旧内容，供 UI 展示具体的变更摘要。
         // 超过 MAX_WRITE_BYTES 的文件按截断处理并跳过差异计算。
         val previousBytes = if (!append) {
@@ -856,14 +878,18 @@ internal class RootShellTerminalController(
                 }.getOrNull()
             }
         val parent = shellQuote(File(safePath).parent ?: "/")
+        val quotedPath = shellQuote(safePath)
+        // 目标是目录时给出 IS_DIRECTORY，而不是让 mv/cat 的原始报错透给模型。
         val command = if (append) {
-            "mkdir -p $parent && cat >> ${shellQuote(safePath)}"
+            "[ -d $quotedPath ] && exit $PATH_EXIT_DIRECTORY; mkdir -p $parent && cat >> $quotedPath"
         } else {
             // 临时文件名带随机后缀，避免并发写入相互覆盖；失败时清理残留临时文件。
             val temp = shellQuote("$safePath.eta-write-tmp-${UUID.randomUUID().toString().take(8)}")
-            "mkdir -p $parent && cat > $temp && mv -f $temp ${shellQuote(safePath)} || { rm -f $temp; false; }"
+            "[ -d $quotedPath ] && exit $PATH_EXIT_DIRECTORY; " +
+                "mkdir -p $parent && cat > $temp && mv -f $temp $quotedPath || { rm -f $temp; false; }"
         }
         val result = runSuTextWithStdin(command, bytes, timeoutSeconds = 20)
+        pathStatusFailure(result.exitCode, safePath, "write_file")?.let { return it }
         return if (result.exitCode == 0) {
             logger.info(
                 "Agent terminal action=write_file outcome=succeeded append=$append " +
@@ -916,7 +942,8 @@ internal class RootShellTerminalController(
         } else {
             ""
         }
-        val command = "cd ${shellQuote(safePath)} && find . -mindepth 1 ${depth}${prune}-print 2>/dev/null" +
+        val command = "[ -d ${shellQuote(safePath)} ] || exit $PATH_EXIT_DIRECTORY; " +
+            "cd ${shellQuote(safePath)} && find . -mindepth 1 ${depth}${prune}-print 2>/dev/null" +
             " | sort | head -n $MAX_LIST_SCAN" +
             " | while IFS= read -r n; do name=\"\${n#./}\";" +
             " if [ -d \"\$n\" ]; then printf 'd %s\\n' \"\$name\";" +
@@ -931,14 +958,25 @@ internal class RootShellTerminalController(
         if (result.exitCode == 0) {
             logger.info(logMessage)
         } else {
-            logger.warn(logMessage)
+            logger.warn("$logMessage error=${stderrExcerpt(result.stderr)}")
         }
         if (result.exitCode != 0) {
+            // 目录不存在（退出码 3）与执行失败区分开：前者给父目录建议，后者透出 stderr。
+            val missing = result.exitCode == PATH_EXIT_DIRECTORY
             return JSONObject()
                 .put("ok", false)
                 .put("tool", "list_directory")
                 .put("path", safePath)
                 .put("exit_code", result.exitCode)
+                .put("code", if (missing) "MISSING_DIRECTORY" else "LIST_FAILED")
+                .put(
+                    "message",
+                    if (missing) {
+                        "目录不存在或不是目录：$safePath" + missingPathSuggestion(safePath)
+                    } else {
+                        result.stderr.ifBlank { "exit=${result.exitCode}" }
+                    },
+                )
                 .put("entries_text", "")
                 .put("stderr", result.stderr.truncateForJson())
                 .toString()
@@ -973,13 +1011,20 @@ internal class RootShellTerminalController(
     fun editFile(path: String, oldText: String, newText: String, replaceAll: Boolean): String {
         if (!rootAvailable()) return UserFileAccess.edit(path, oldText, newText, replaceAll)
         val safePath = normalizePath(path)
-        // 性能：用 head 大块读取替代 dd bs=1，并多读 1 字节以区分“恰好 512KB”与“超过 512KB”。
-        val read = runSuBytes(
-            "test -f ${shellQuote(safePath)} && head -c ${MAX_WRITE_BYTES + 1} ${shellQuote(safePath)}",
-            timeoutSeconds = 20,
-        )
+        // 性能：用 head 大块读取替代 dd bs=1，并多读 1 字节以区分“恰好 512KB”与“超过 512KB”；
+        // 目录/不存在/非普通文件用退出码 3/4/5 区分，避免编辑失败时只看到 exit=1 无从修正。
+        val quoted = shellQuote(safePath)
+        val command = "if [ -d $quoted ]; then exit $PATH_EXIT_DIRECTORY; " +
+            "elif [ ! -e $quoted ]; then exit $PATH_EXIT_MISSING; " +
+            "elif [ ! -f $quoted ]; then exit $PATH_EXIT_NOT_FILE; " +
+            "else head -c ${MAX_WRITE_BYTES + 1} $quoted; fi"
+        val read = runSuBytes(command, timeoutSeconds = 20)
+        pathStatusFailure(read.exitCode, safePath, "edit_file")?.let { return it }
         if (read.exitCode != 0) {
-            logger.warn("Agent terminal action=edit_file outcome=read_failed exitCode=${read.exitCode}")
+            logger.warn(
+                "Agent terminal action=edit_file outcome=read_failed exitCode=${read.exitCode} " +
+                    "error=${stderrExcerpt(read.stderr)}"
+            )
             return errorJson("READ_FAILED", read.stderr.ifBlank { "exit=${read.exitCode}" })
         }
         if (read.output.size > MAX_WRITE_BYTES) {
@@ -994,6 +1039,7 @@ internal class RootShellTerminalController(
                     .put("tool", "edit_file")
                     .put("code", outcome.code)
                     .put("message", outcome.message)
+                    .also { json -> outcome.context?.let { json.put("context", it) } }
                     .toString()
             }
             is AgentFileEdit.Outcome.Applied -> {
@@ -1063,8 +1109,12 @@ internal class RootShellTerminalController(
         // 直接套 GNU 参数会静默失败并被 `| head` 掩盖成“0 结果”。这里按运行期探测选择可用的
         // grep（优先 /system/bin/toybox grep），按真实能力拼接参数，错误不再吞掉。
         val includeExpr = globTokens.joinToString(" ") { "--include=${shellQuote(it)}" }
+        val quotedRoot = shellQuote(safeRoot)
         fun buildSearchCommand(tool: GrepTool): String =
-            "cd ${shellQuote(safeRoot)} && ${tool.prefix} -rInHE " + tool.flagArgs(includeExpr) +
+            // 目录不存在时用退出码 4 返回 MISSING_DIRECTORY：cd 失败的错误文本里
+            // 既有 shell 前缀又有路径，模型难以利用，且与逐文件扫描警告混杂。
+            "[ -d $quotedRoot ] || exit $PATH_EXIT_MISSING; " +
+                "cd $quotedRoot && ${tool.prefix} -rInHE " + tool.flagArgs(includeExpr) +
                 "-e ${shellQuote(trimmedPattern)} . | head -n $max"
         var result = runSuText(buildSearchCommand(grepTool()), timeoutSeconds = 30)
         if (looksLikeGrepOptionError(result.stderr)) {
@@ -1074,9 +1124,40 @@ internal class RootShellTerminalController(
         }
         val rawLines = result.output.lineSequence().filter { it.isNotBlank() }.toList()
         if (rawLines.isEmpty() && (result.exitCode != 0 || result.stderr.isNotBlank())) {
+            if (result.exitCode == PATH_EXIT_MISSING) {
+                logger.warn(
+                    "Agent terminal action=search_code outcome=failed code=MISSING_DIRECTORY " +
+                        "patternChars=${trimmedPattern.length}"
+                )
+                return errorJson("MISSING_DIRECTORY", "搜索目录不存在：$safeRoot" + missingPathSuggestion(safeRoot))
+            }
+            val warningLines = GrepScanWarnings.lines(result.stderr)
+            // 逐文件的权限/IO 警告（Permission denied / Bad file descriptor 等）会让 grep
+            // 以退出码 2 收场，但搜索实际已执行：无匹配就是“确实没有匹配”，
+            // 应按成功返回并如实报告被跳过的文件数，而不是让模型把有效搜索当失败重试。
+            if (result.exitCode != 0 && GrepScanWarnings.isScanWarningOnly(result.stderr)) {
+                logger.info(
+                    "Agent terminal action=search_code outcome=succeeded_with_skips " +
+                        "patternChars=${trimmedPattern.length} skippedFiles=${warningLines.size} " +
+                        "exitCode=${result.exitCode}"
+                )
+                return JSONObject()
+                    .put("ok", true)
+                    .put("tool", "search_code")
+                    .put("path", safeRoot)
+                    .put("pattern", trimmedPattern)
+                    .put("glob", glob.orEmpty())
+                    .put("count", 0)
+                    .put("truncated", false)
+                    .put("skipped_files", warningLines.size)
+                    .put("warning", "有 ${warningLines.size} 个文件因权限或 IO 错误被跳过，搜索结果可能不完整")
+                    .put("results", JSONArray())
+                    .toString()
+            }
             logger.warn(
                 "Agent terminal action=search_code outcome=failed patternChars=${trimmedPattern.length} " +
-                    "exitCode=${result.exitCode} errorChars=${result.stderr.length}"
+                    "exitCode=${result.exitCode} errorChars=${result.stderr.length} " +
+                    "error=${stderrExcerpt(result.stderr)}"
             )
             // grep ERE 与本机正则存在方言差异：本机能编译但 grep 拒绝（如前瞻断言）时，
             // 报 INVALID_PATTERN 而不是 SEARCH_FAILED，方便模型修正 pattern。
@@ -1238,6 +1319,63 @@ internal class RootShellTerminalController(
         }
         return null
     }
+
+    /**
+     * 路径状态退出码 → 结构化错误：目录 / 不存在 / 非普通文件分别给出可修正的结论与建议。
+     * 返回 null 表示不是路径状态问题，调用方按原有执行失败路径处理。
+     */
+    private fun pathStatusFailure(exitCode: Int, safePath: String, tool: String): String? {
+        val code = when (exitCode) {
+            PATH_EXIT_DIRECTORY -> "IS_DIRECTORY"
+            PATH_EXIT_MISSING -> "NOT_FOUND"
+            PATH_EXIT_NOT_FILE -> "NOT_REGULAR_FILE"
+            else -> return null
+        }
+        val message = when (exitCode) {
+            PATH_EXIT_DIRECTORY ->
+                "路径是目录：$safePath；请改用 list_directory 浏览目录，或提供具体文件路径"
+            PATH_EXIT_MISSING -> missingPathMessage(safePath)
+            else ->
+                "路径不是普通文件：$safePath（可能是设备、管道或损坏的符号链接）"
+        }
+        logger.warn("Agent terminal action=$tool outcome=failed code=$code pathChars=${safePath.length}")
+        return errorJson(code, message)
+    }
+
+    /**
+     * 缺失文件的恢复提示：列出父目录现有条目，帮助模型一次修正路径拼写，
+     * 而不是拿着 exit=1 反复重试同一路径。仅在失败路径调用（额外一次短 su 调用）。
+     */
+    private fun missingPathMessage(safePath: String): String =
+        "文件不存在：$safePath" + missingPathSuggestion(safePath)
+
+    /** 缺失路径的父目录建议正文（含前缀标点），供 read/edit/search 共用。 */
+    private fun missingPathSuggestion(safePath: String): String {
+        val parent = File(safePath).parent ?: "/"
+        val quotedParent = shellQuote(parent)
+        val listing = runCatching {
+            runSuText(
+                "[ -d $quotedParent ] && ls -1A $quotedParent 2>/dev/null | head -n $MISSING_SUGGESTION_ENTRIES " +
+                    "|| printf '$NO_PARENT_MARKER\\n'",
+                timeoutSeconds = 15,
+            )
+        }.getOrNull()
+        val text = listing?.output?.trim().orEmpty()
+        if (listing == null || text.isBlank()) {
+            return "；请先用 list_directory 确认工作区中的真实路径"
+        }
+        if (text.contains(NO_PARENT_MARKER)) {
+            return "；父目录 $parent 也不存在，请先用 list_directory 从工作区根目录逐层确认"
+        }
+        val names = text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }
+            .take(MISSING_SUGGESTION_ENTRIES).toList()
+        return "。父目录 $parent 下的条目：${names.joinToString(", ")}。" +
+            "请核对文件名大小写与后缀，或先用 list_directory 浏览目录"
+    }
+
+    /** 日志用的 stderr 摘要：去换行、截断，避免单条日志被多行错误撑爆。 */
+    private fun stderrExcerpt(stderr: String): String =
+        stderr.replace('\n', ' ').replace('\r', ' ').trim().take(200).ifBlank { "-" }
 
     private fun mountNamesHint(): String {
         val names = linuxMountPairs().map { it.first }
