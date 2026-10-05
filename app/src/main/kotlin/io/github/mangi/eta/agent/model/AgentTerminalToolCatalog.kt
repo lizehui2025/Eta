@@ -171,6 +171,8 @@ internal object AgentTerminalToolCatalog {
                                         .put("type", "integer")
                                         .put("description", "最多读取字节数，默认 65536；有 Root 时上限 262144，无 Root 时上限 16000。")
                                 )
+                                .put("find", autoFindSchemaDescription())
+                                .put("no_fail", autoFindNoFailSchemaDescription())
                         )
                         .put("required", JSONArray().put("path"))
                 )
@@ -192,6 +194,8 @@ internal object AgentTerminalToolCatalog {
                                         .put("type", "boolean")
                                         .put("description", "true 追加，false 覆盖，默认 false。")
                                 )
+                                .put("find", autoFindSchemaDescription())
+                                .put("no_fail", autoFindNoFailSchemaDescription())
                         )
                         .put("required", JSONArray().put("path").put("content"))
                 )
@@ -259,6 +263,8 @@ internal object AgentTerminalToolCatalog {
                                     JSONObject().put("type", "boolean")
                                         .put("description", "true 时替换全部匹配，默认 false 且要求唯一匹配。")
                                 )
+                                .put("find", autoFindSchemaDescription())
+                                .put("no_fail", autoFindNoFailSchemaDescription())
                         )
                         .put("required", JSONArray().put("path").put("old_string").put("new_string"))
                 )
@@ -299,3 +305,23 @@ internal object AgentTerminalToolCatalog {
     }
 
 }
+
+/** 读写工具共用的 `find` 参数声明（默认关闭的自动查找，不是 search 工具）。 */
+private fun autoFindSchemaDescription(): JSONObject =
+    JSONObject()
+        .put("type", "boolean")
+        .put(
+            "description",
+            "可选、默认关闭：目标文件不存在时在工作区按文件名自动查找；唯一匹配直接采用，" +
+                "多个匹配返回候选列表（不自动采用）。"
+        )
+
+/** 读写工具共用的 `no_fail` 参数声明：只返回候选、不自动采用，优先级高于 find。 */
+private fun autoFindNoFailSchemaDescription(): JSONObject =
+    JSONObject()
+        .put("type", "boolean")
+        .put(
+            "description",
+            "可选、默认关闭：目标不存在时只返回候选列表供下一步选择，不自动采用任何候选；" +
+                "优先级高于 find。"
+        )

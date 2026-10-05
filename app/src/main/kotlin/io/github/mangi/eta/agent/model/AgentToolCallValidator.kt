@@ -51,6 +51,9 @@ internal class AgentToolCallValidator(tools: JSONArray) {
     fun minimalExample(name: String, operation: String = ""): JSONObject =
         minimalExampleFor(schemasByName[name]?.parameters)
 
+    /** 工具参数的 JSON Schema；供参数宽容化（[ToolCallArgumentSanitizer]）使用。 */
+    fun schemaFor(name: String): JSONObject? = schemasByName[name]?.parameters
+
     private fun computeValidation(call: AgentModelClient.ToolCall): ValidationOutcome {
         val example = minimalExample(
             call.name,
@@ -365,9 +368,11 @@ internal class AgentToolCallValidator(tools: JSONArray) {
         schema.optInteger("maxProperties")?.let { if (size > it) return ValidationFailure.of("$path 的字段数不能超过 $it") }
 
         schema.optJSONArray("required")?.let { required ->
+            // 键缺失与显式 null 都算缺失（与 operation 契约的 missing 语义一致）；
+            // 空白串不在此拦截——部分字段（如写文件的 content=""）合法，交给 enum/契约层裁决。
             val absent = (0 until required.length())
                 .map { required.optString(it) }
-                .filter { it.isNotBlank() && !value.has(it) }
+                .filter { it.isNotBlank() && (!value.has(it) || value.isNull(it)) }
             if (absent.isNotEmpty()) {
                 return ValidationFailure.of(
                     message = "$path 缺少必填字段 ${absent.joinToString(", ")}",
@@ -416,11 +421,9 @@ internal class AgentToolCallValidator(tools: JSONArray) {
             }
             if (!matched) {
                 when (additionalProperties) {
-                    false -> return ValidationFailure.of(
-                        message = "$path 不允许额外字段 $key",
-                        expectedSchema = properties,
-                        received = key,
-                    )
+                    // 额外字段不再整单拒绝：参数宽容化（ToolCallArgumentSanitizer）会剔除并向模型
+                    // 说明被忽略的字段；校验层只对显式声明的形状负责。
+                    false -> Unit
                     is JSONObject, is Boolean ->
                         validateSchema(childValue, additionalProperties, root, childPath, depth + 1)?.let { return it }
                 }

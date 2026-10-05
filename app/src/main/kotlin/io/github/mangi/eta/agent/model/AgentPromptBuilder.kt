@@ -135,7 +135,13 @@ internal object AgentPromptBuilder {
                     "用 device_control 控制闹钟、计时器、媒体和音量；用 clipboard 处理剪贴板；" +
                     "用 file_ops 进行文件读写、编辑、搜索和列目录；用 skill/skill_github 处理技能；" +
                     "用 memory 处理长期记忆。不要调用未出现在本轮工具目录中的旧别名。" +
-                    "ui_action 的节点操作必须携带同一次 observe_screen 的 observation_id；file_ops、memory 和 device_info 的 operation 决定具体子动作。"
+                    "ui_action 的节点操作必须携带同一次 observe_screen 的 observation_id；" +
+                    "file_ops 的 operation（read/write/edit/search/list）与 memory、device_info 的 operation 均为必填字段，" +
+                    "每次调用必须显式给出，缺少会被直接拒绝；" +
+                    "edit 采用精确文本替换：先用 read 确认原文，old_string 必须与文件实际内容一致（含空白与缩进）；" +
+                    "返回 NO_MATCH/MULTI_MATCH 时按附带的行号或近似位置修正 old_string，不要原样重试；" +
+                    "读写工具还支持默认关闭的路径自动查找：不确定文件路径时传 find=true（唯一匹配直接采用、多个匹配返回候选），" +
+                    "只想要候选列表时传 no_fail=true，不要把这两者当作搜索工具使用。"
             )
         )
         if (config.terminalTools) {

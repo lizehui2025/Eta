@@ -169,16 +169,30 @@ internal object AgentCanonicalToolCatalog {
         "file_ops",
         "在当前授权范围内读取、写入、编辑、搜索文件或列出目录。使用 Linux/Android 终端时仍遵循运行环境说明。",
         objectSchema(
-            "operation" to enum("文件操作", "read", "write", "edit", "search", "list"),
+            "operation" to enum(
+                "文件操作类型（必填，每次调用必须显式提供）：read=读取 / write=写入 / edit=编辑 / search=搜索 / list=列目录",
+                "read", "write", "edit", "search", "list",
+            ),
             "path" to string("文件或目录路径", 4_000),
             "query" to string("搜索文本或正则", 2_000),
             "pattern" to string("代码搜索正则（兼容底层搜索器）", 2_000),
             "max_results" to integer("最多搜索结果", 1, 500),
             "content" to string("写入内容", 500_000),
-            "old_string" to string("要替换的原文", 100_000),
+            "old_string" to string(
+                "要替换的原文：必须与文件实际内容逐字符一致（含空白与缩进），先用 read 确认；匹配失败会返回近似位置",
+                100_000,
+            ),
             "new_string" to string("替换后的文本", 100_000),
             "append" to bool("写入时是否追加"),
-            "replace_all" to bool("编辑时是否替换全部匹配"),
+            "replace_all" to bool("编辑时是否替换全部匹配（old_string 匹配到多处且未设置时为报错）"),
+            "find" to bool(
+                "可选、默认关闭，仅 read/write/edit：目标文件不存在时在工作区按文件名自动查找；" +
+                    "唯一匹配直接采用（结果会带 resolved_from），多个匹配返回候选列表。",
+            ),
+            "no_fail" to bool(
+                "可选、默认关闭，仅 read/write/edit：目标不存在时只返回候选列表供下一步选择，" +
+                    "不自动采用任何候选；优先级高于 find。",
+            ),
             "offset_bytes" to integerValue("读取偏移字节数"),
             "max_bytes" to integerValue("最多读取字节数"),
             "limit" to integer("每页最大条目数", 1, 200),

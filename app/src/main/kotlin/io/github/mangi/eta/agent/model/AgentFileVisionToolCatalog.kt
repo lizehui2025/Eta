@@ -14,13 +14,33 @@ internal object AgentFileVisionToolCatalog {
                     .put("type", "object")
                     .put(
                         "properties",
-                        JSONObject().put(
-                            "path",
-                            JSONObject()
-                                .put("type", "string")
-                                .put("maxLength", 1_024)
-                                .put("description", "任意绝对图片路径、file URI 或系统相册 content URI；本机路径由 Root 读取"),
-                        ),
+                        JSONObject()
+                            .put(
+                                "path",
+                                JSONObject()
+                                    .put("type", "string")
+                                    .put("maxLength", 1_024)
+                                    .put("description", "任意绝对图片路径、file URI 或系统相册 content URI；本机路径由 Root 读取"),
+                            )
+                            .put(
+                                "find",
+                                JSONObject()
+                                    .put("type", "boolean")
+                                    .put(
+                                        "description",
+                                        "可选、默认关闭：图片路径不存在时在工作区按文件名自动查找；" +
+                                            "唯一匹配直接采用，多个匹配返回候选列表（不自动采用）。",
+                                    ),
+                            )
+                            .put(
+                                "no_fail",
+                                JSONObject()
+                                    .put("type", "boolean")
+                                    .put(
+                                        "description",
+                                        "可选、默认关闭：路径不存在时只返回候选列表供下一步选择，不自动采用；优先级高于 find。",
+                                    ),
+                            ),
                     )
                     .put("required", JSONArray(listOf("path"))),
             ),

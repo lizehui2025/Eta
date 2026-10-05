@@ -329,9 +329,24 @@ internal class AgentLoop(
 
     private fun executeTool(
         round: Int,
-        toolCall: AgentModelClient.ToolCall,
+        originalCall: AgentModelClient.ToolCall,
     ): ToolOutcome {
         runController.throwIfCancelled()
+        // 参数宽容化：规范化 JSON、剔除未识别字段、可无损转换的类型自动转换；
+        // 调整说明随结果回给模型（必填字段仍由下面的校验层严格把关）。
+        val sanitized = ToolCallArgumentSanitizer.sanitize(
+            originalCall,
+            toolCallValidator.schemaFor(originalCall.name),
+        )
+        val outcome = executeSanitizedTool(round, sanitized.call)
+        if (sanitized.adjusted.isEmpty()) return outcome
+        return ToolOutcome(outcome.call, withArgumentAdjustment(outcome.result, sanitized.adjusted))
+    }
+
+    private fun executeSanitizedTool(
+        round: Int,
+        toolCall: AgentModelClient.ToolCall,
+    ): ToolOutcome {
         val guardDecision = noProgressGuard.before(toolCall)
         if (guardDecision.reject) {
             return rejectedToolOutcome(
@@ -502,6 +517,22 @@ internal class AgentLoop(
         if (parsed.has("retry_hint")) return result
         parsed.put("retry_hint", hint).put("retry_hint_text", hintText)
         return result.copy(content = parsed.toString())
+    }
+
+    /**
+     * 参数宽容化的说明：被忽略/自动修正的字段必须让模型知道，
+     * 否则它会继续按错误格式调用；内容不是 JSON 时退化为追加一行文本。
+     */
+    private fun withArgumentAdjustment(
+        result: AgentModelClient.ToolResult,
+        adjusted: List<String>,
+    ): AgentModelClient.ToolResult {
+        val message = "参数说明：以下内容被自动忽略或修正——" + adjusted.joinToString("；") +
+            "。请按工具参数说明核对后继续。"
+        val content = runCatching {
+            JSONObject(result.content).put("argument_adjustment", message).toString()
+        }.getOrElse { result.content + "\n" + message }
+        return result.copy(content = content)
     }
 
     private fun rejectedToolOutcome(

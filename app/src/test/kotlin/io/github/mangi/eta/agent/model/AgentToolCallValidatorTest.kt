@@ -83,7 +83,8 @@ class AgentToolCallValidatorTest {
         assertNull(validator.validate(call("""{"mode":"count","value":2}""")))
         assertNull(validator.validate(call("""{"mode":"text","value":"two"}""")))
         assertNotNull(validator.validate(call("""{"mode":"count","value":"2"}""")))
-        assertNotNull(validator.validate(call("""{"mode":"text","value":"two","extra":true}""")))
+        // 额外字段不再整单拒绝：由参数宽容化（ToolCallArgumentSanitizer）剔除并告知模型。
+        assertNull(validator.validate(call("""{"mode":"text","value":"two","extra":true}""")))
     }
 
     @Test
@@ -153,6 +154,60 @@ class AgentToolCallValidatorTest {
         assertTrue(typeMismatch.message.contains("类型应为"))
         assertEquals("整数", typeMismatch.expected)
         assertEquals("\"one\"", typeMismatch.received)
+    }
+
+    @Test
+    fun fileOpsMissingOrNullOperationIsRejectedAsMissingRequiredField() {
+        val validator = validatorFor(
+            name = "file_ops",
+            parameters = JSONObject()
+                .put("type", "object")
+                .put("properties", JSONObject()
+                    .put("operation", JSONObject().put("type", "string")
+                        .put("enum", JSONArray().put("read").put("write")))
+                    .put("path", JSONObject().put("type", "string"))
+                )
+                .put("additionalProperties", false)
+                .put("required", JSONArray().put("operation")),
+        )
+        fun fileOps(arguments: String) = AgentModelClient.ToolCall(
+            id = "file-ops-$arguments",
+            name = "file_ops",
+            argumentsJson = arguments,
+        )
+
+        // 缺键与显式 null 都按“缺少必填字段 operation”拒绝，并回传结构化 missing。
+        listOf("{}", """{"operation":null}""").forEach { arguments ->
+            val outcome = validator.validateDetailed(fileOps(arguments))
+            assertTrue("arguments=$arguments → ${outcome.message}", outcome.message.contains("缺少必填字段 operation"))
+            assertEquals(listOf("operation"), outcome.missing)
+        }
+        // 空白串由枚举约束拒绝（不在允许值集合中），同样不会进入执行。
+        val blank = validator.validateDetailed(fileOps("""{"operation":""}"""))
+        assertTrue("空白 operation 必须被拒：${blank.message}", blank.message.contains("operation"))
+        // 合法调用不受影响。
+        assertNull(validator.validate(fileOps("""{"operation":"read","path":"a.txt"}""")))
+    }
+
+    @Test
+    fun realCatalogFileOpsRejectsMissingOperationBeforeDispatch() {
+        // 真实工具表链路：即使模型漏发整个 operation 键，也在执行分发前被同一套 schema 拦截。
+        val tools = AgentToolCatalog.build(terminalTools = true, browserTools = false)
+        val hasFileOps = (0 until tools.length()).any { index ->
+            tools.optJSONObject(index)?.optJSONObject("function")?.optString("name") == "file_ops"
+        }
+        assertTrue("真实目录应包含 file_ops", hasFileOps)
+        val validator = AgentToolCallValidator(tools)
+        val outcome = validator.validateDetailed(
+            AgentModelClient.ToolCall(
+                id = "real-file-ops",
+                name = "file_ops",
+                argumentsJson = """{"path":"/workspace/a.txt"}""",
+            ),
+        )
+        assertTrue("真实 schema 应报缺少 operation：${outcome.message}", outcome.message.contains("缺少必填字段 operation"))
+        assertEquals(listOf("operation"), outcome.missing)
+        assertTrue("示例必须带 operation 供模型修复", outcome.example.has("operation"))
     }
 
     @Test

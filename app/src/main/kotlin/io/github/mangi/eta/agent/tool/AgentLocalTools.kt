@@ -180,9 +180,20 @@ internal class AgentLocalTools(
 
     override fun execute(toolCall: AgentModelClient.ToolCall): AgentModelClient.ToolResult {
         val dispatchCall = canonicalDispatch(toolCall)
+        var autoResolvedFrom: String? = null
+        var autoResolvedPath: String? = null
         return runCatching {
             val args = toolCall.parsedArgs().getOrThrow()
-            val dispatchArgs = dispatchCall.parsedArgs().getOrThrow()
+            var dispatchArgs = dispatchCall.parsedArgs().getOrThrow()
+            // 自动查找（find/no_fail）：仅读写类工具、仅显式开关时生效；默认关闭，不影响既有行为。
+            when (val lookup = resolvePathWithAutoFind(dispatchCall.name, dispatchArgs)) {
+                is AutoFindLookup.Candidates -> return@runCatching textResult(lookup.json)
+                is AutoFindLookup.Proceed -> {
+                    dispatchArgs = lookup.args
+                    autoResolvedFrom = lookup.resolvedFrom
+                    autoResolvedPath = lookup.resolvedPath
+                }
+            }
             if (AgentToolRequirements.find(dispatchCall.name) != null &&
                 AgentToolRequirements.rootDenied(dispatchCall.name, dispatchArgs, rootAvailable())
             ) {
@@ -269,8 +280,11 @@ internal class AgentLocalTools(
                 )
             )
         }.let { result ->
-            result.copy(
-                sensitive = result.sensitive ||
+            val annotated = autoResolvedFrom?.let { original ->
+                annotateAutoResolved(result, original, autoResolvedPath)
+            } ?: result
+            annotated.copy(
+                sensitive = annotated.sensitive ||
                     AgentSensitiveToolPolicy.isSensitive(toolCall.name) ||
                     AgentSensitiveToolPolicy.isSensitive(dispatchCall.name),
             )
@@ -944,6 +958,157 @@ internal class AgentLocalTools(
             glob = args.optString("glob"),
             maxResults = args.optInt("max_results", AgentCodeSearch.MAX_RESULTS),
         )
+
+    // ── 读写工具的自动查找（find / no_fail，默认关闭） ──────────────────────
+
+    /** 支持自动查找的工具：只覆盖读写路径的工具，不触碰 search_code/list_directory 等检索工具。 */
+    private val autoFindTools = setOf("read_file", "write_file", "edit_file", "read_image")
+
+    private sealed interface AutoFindLookup {
+        /** 继续执行；[resolvedFrom] 非空表示路径由自动查找改写而来。 */
+        data class Proceed(
+            val args: JSONObject,
+            val resolvedFrom: String? = null,
+            val resolvedPath: String? = null,
+        ) : AutoFindLookup
+
+        /** 不执行本次读写，直接返回候选列表。 */
+        data class Candidates(val json: String) : AutoFindLookup
+    }
+
+    /**
+     * `find` / `no_fail` 的路径解析：目标文件不存在时按名在工作区查找。
+     *
+     * - `find=true`：唯一命中（读类到档位 2、写/编辑只到档位 1）直接采用；其余返回候选；
+     * - `no_fail=true`：只返回候选、不自动采用（优先级高于 find）；
+     * - 目标已存在、URI、工具不在 [autoFindTools]、查找不可用时一律保持原参数走既有流程。
+     */
+    private fun resolvePathWithAutoFind(toolName: String, args: JSONObject): AutoFindLookup {
+        if (toolName !in autoFindTools) return AutoFindLookup.Proceed(args)
+        val find = args.optBoolean("find", false)
+        val noFail = args.optBoolean("no_fail", false)
+        if (!find && !noFail) return AutoFindLookup.Proceed(args)
+        val rawPath = args.optString("path").trim()
+        if (rawPath.isEmpty() || rawPath.startsWith("content://") || rawPath.startsWith("file://")) {
+            return AutoFindLookup.Proceed(args)
+        }
+        val requestedName = rawPath.substringAfterLast('/')
+        if (requestedName.isEmpty()) return AutoFindLookup.Proceed(args)
+        val showHidden = requestedName.startsWith('.')
+        val workspaceRoot = listingOf("", recursive = false, glob = "", showHidden = false, limit = 1)
+            ?.takeIf { it.ok }
+            ?.root
+            ?.takeIf { it.isNotBlank() }
+            ?: return AutoFindLookup.Proceed(args)
+        val parent = rawPath.substringBeforeLast('/', "").ifBlank { workspaceRoot }
+        // 目标已存在（含同名目录）时不介入：既有流程会正常读取或给出 IS_DIRECTORY。
+        val parentListing = listingOf(parent, recursive = false, glob = requestedName, showHidden = showHidden, limit = 50)
+        if (parentListing?.ok == true &&
+            parentListing.entriesText.lineSequence().any { line ->
+                val trimmed = line.trim()
+                trimmed.length > 2 && trimmed.substring(2).trim() == requestedName
+            }
+        ) {
+            return AutoFindLookup.Proceed(args)
+        }
+        // 目标缺失：父目录可能整体不存在，向上找最近存在的目录作为扫描根（找不到退回工作区根）。
+        val scanRoot = WorkspaceAutoFind.nearestExistingAncestor(
+            path = parent,
+            dirExists = { candidate ->
+                listingOf(candidate, recursive = false, glob = "", showHidden = false, limit = 1)?.ok == true
+            },
+        ) ?: workspaceRoot
+        val outcome = WorkspaceAutoFind.findIn(scanRoot, requestedName) { root, glob ->
+            listingOf(root, recursive = true, glob = glob, showHidden = showHidden, limit = 200)
+        } ?: return AutoFindLookup.Proceed(args)
+        val candidates = outcome.candidates.take(WorkspaceAutoFind.MAX_CANDIDATES)
+        if (find && !noFail) {
+            val adoptTier = when (toolName) {
+                "write_file", "edit_file" -> WorkspaceAutoFind.WRITE_ADOPT_TIER
+                else -> WorkspaceAutoFind.READ_ADOPT_TIER
+            }
+            WorkspaceAutoFind.chooseAdoption(candidates, requestedName, adoptTier)?.let { adopted ->
+                return AutoFindLookup.Proceed(
+                    args = JSONObject(args.toString()).apply { put("path", adopted) },
+                    resolvedFrom = rawPath,
+                    resolvedPath = adopted,
+                )
+            }
+        }
+        if (candidates.isEmpty()) return AutoFindLookup.Proceed(args)
+        return AutoFindLookup.Candidates(
+            autoFindCandidatesJson(toolName, rawPath, outcome.scanRoot, outcome.truncated, candidates, noFail),
+        )
+    }
+
+    /** 复用 list_directory（两种身份同一口径）作为自动查找的枚举后端。 */
+    private fun listingOf(
+        path: String,
+        recursive: Boolean,
+        glob: String,
+        showHidden: Boolean,
+        limit: Int,
+    ): WorkspaceAutoFind.Listing? = runCatching {
+        JSONObject(terminalController.listDirectory(path, showHidden, limit, 0, glob, recursive))
+    }.getOrNull()?.let { json ->
+        WorkspaceAutoFind.Listing(
+            ok = json.optBoolean("ok", false),
+            root = json.optString("path"),
+            entriesText = json.optString("entries_text"),
+            truncated = json.optBoolean("truncated", false),
+        )
+    }
+
+    private fun autoFindCandidatesJson(
+        toolName: String,
+        requestedPath: String,
+        scanRoot: String,
+        truncated: Boolean,
+        candidates: List<String>,
+        noFail: Boolean,
+    ): String = JSONObject()
+        .put("ok", false)
+        .put("tool", toolName)
+        .put("code", "FILE_CANDIDATES")
+        .put("requested_path", requestedPath)
+        .put("scan_root", scanRoot)
+        .put("count", candidates.size)
+        .put("candidates", JSONArray(candidates))
+        .put("truncated", truncated)
+        .put(
+            "message",
+            buildString {
+                append("目标不存在：").append(requestedPath).append("。")
+                append(
+                    if (noFail) {
+                        "已按 no_fail 返回工作区候选（不自动采用）："
+                    } else {
+                        "自动查找命中候选但无法唯一确定（未自动采用）："
+                    },
+                )
+                append(candidates.joinToString("；"))
+                append("。请选择正确路径后重新调用。")
+                if (truncated) append("枚举达到上限，候选可能不完整。")
+            },
+        )
+        .toString()
+
+    /** 自动采用后把"原路径 → 实际采用路径"回填进结果，避免模型继续按错误路径理解。 */
+    private fun annotateAutoResolved(
+        result: AgentModelClient.ToolResult,
+        originalPath: String,
+        resolvedPath: String?,
+    ): AgentModelClient.ToolResult {
+        val note = "目标路径不存在，已按 find 自动解析：" + originalPath +
+            (resolvedPath?.let { " → $it" } ?: "")
+        val content = runCatching {
+            JSONObject(result.content)
+                .put("resolved_from", originalPath)
+                .put("resolved_note", note)
+                .toString()
+        }.getOrElse { result.content + "\n" + note }
+        return result.copy(content = content)
+    }
 
     private fun findAppByPackage(packageName: String): AppInfo? =
         installedLauncherApps().firstOrNull { it.packageName == packageName }
