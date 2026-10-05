@@ -25,6 +25,7 @@ class PrefsDefaultsTest {
                 Prefs.Keys.AGENT_DEVICE_SENSITIVE_ACTION_TOOLS to true,
                 Prefs.Keys.AGENT_THINKING_ENABLED to true,
                 Prefs.Keys.AGENT_ALWAYS_ON_KEEP_ALIVE to false,
+                Prefs.Keys.AGENT_ROOT_KEEP_ALIVE to false,
             ),
             Prefs.Keys.BOOLEAN_DEFAULTS,
         )
@@ -44,6 +45,7 @@ class PrefsDefaultsTest {
                 Prefs.Keys.AGENT_DEVICE_SENSITIVE_ACTION_TOOLS,
                 Prefs.Keys.AGENT_THINKING_ENABLED,
                 Prefs.Keys.AGENT_ALWAYS_ON_KEEP_ALIVE,
+                Prefs.Keys.AGENT_ROOT_KEEP_ALIVE,
             ),
             Prefs.Keys.LOCAL_AGENT_KEYS,
         )

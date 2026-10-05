@@ -797,12 +797,14 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
 
     /**
      * 保活只覆盖必要场景：活跃 run、尚待确认的结果，或用户显式开启常驻。
+     * Root 留存同样要求周期脉冲（它是留存链的最后一道网），一并视为常驻。
      * 待处理结果查询放到后台，避免 Service 主线程查 Room。
      */
     private fun refreshKeepAlive() {
         Prefs.initLocal(this)
         val alwaysOn = runCatching {
-            Prefs.isEnabled(Prefs.Keys.AGENT_ALWAYS_ON_KEEP_ALIVE)
+            Prefs.isEnabled(Prefs.Keys.AGENT_ALWAYS_ON_KEEP_ALIVE) ||
+                Prefs.isEnabled(Prefs.Keys.AGENT_ROOT_KEEP_ALIVE)
         }.getOrDefault(false)
         val activeRun = activeSession != null
         if (alwaysOn || activeRun) {

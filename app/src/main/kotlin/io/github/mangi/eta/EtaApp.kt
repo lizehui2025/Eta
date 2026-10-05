@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import io.github.mangi.eta.agent.skill.SkillRuntime
 import io.github.mangi.eta.agent.device.RootAccess
+import io.github.mangi.eta.agent.runtime.RootKeepAlive
 import io.github.mangi.eta.agent.terminal.TerminalRuntime
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.core.AndroidAgentLogger
@@ -49,6 +50,8 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
         TerminalRuntime.initialize(this)
         RootAccess.initialize(this)
         SettingsDataStore.init(this)
+        // 留存开启且已授权 Root 时，进程启动即补配前台服务与 Root 守护（后台启动受限时静默降级）。
+        runCatching { RootKeepAlive.ensureServiceRunning(this) }
         // 启动不阻塞：先用默认值应用，DataStore 回来后再纠正，避免 IO 慢时 ANR。
         applicationScope.launch {
             runCatching { AppearanceSettingsRepository.settings().predictiveBackEnabled }

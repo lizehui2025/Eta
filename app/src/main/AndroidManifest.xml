@@ -146,6 +146,15 @@
         </service>
 
         <service
+            android:name=".agent.runtime.AgentKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled Root background retention for agent tasks" />
+        </service>
+
+        <service
             android:name=".agent.accessibility.AgentAccessibilityService"
             android:exported="true"
             android:label="@string/agent_accessibility_label"

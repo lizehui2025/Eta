@@ -18,6 +18,8 @@ class KeepAliveJobService : JobService() {
         } catch (failure: RuntimeException) {
             AndroidAgentLogger.warn("KeepAlive failed to restart runtime: type=${failure.javaClass.simpleName}")
         }
+        // 周期脉冲同样用于补配 Root 留存：留存服务/守护进程丢一个都能在这里恢复。
+        RootKeepAlive.ensureServiceRunning(this)
         return false
     }
 

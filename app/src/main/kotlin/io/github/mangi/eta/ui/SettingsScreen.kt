@@ -54,6 +54,7 @@ import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.accessibility.AccessibilityProtectionClient
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityService
+import io.github.mangi.eta.agent.runtime.RootKeepAlive
 import io.github.mangi.eta.config.PowerAssistantTarget
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.repository.ProviderRepository
@@ -356,6 +357,22 @@ private fun SettingsPageContent(
                         key = Prefs.Keys.AGENT_ALWAYS_ON_KEEP_ALIVE,
                         icon = Icons.Rounded.PowerSettingsNew,
                         iconTint = EtaPreferenceColors.Orange,
+                    )
+
+                    EtaPreferenceDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_root_keep_alive_title),
+                        summary = if (capabilities.root.isGranted) {
+                            stringResource(R.string.settings_root_keep_alive_summary)
+                        } else {
+                            stringResource(R.string.settings_root_keep_alive_requires_root)
+                        },
+                        key = Prefs.Keys.AGENT_ROOT_KEEP_ALIVE,
+                        icon = Icons.Rounded.VerifiedUser,
+                        iconTint = EtaPreferenceColors.Blue,
+                        onChanged = { enabled -> RootKeepAlive.onPreferenceChanged(context, enabled) },
                     )
 
                     EtaPreferenceDivider()
@@ -823,6 +840,7 @@ private fun SwitchPref(
     key: String,
     icon: ImageVector,
     iconTint: Color,
+    onChanged: ((Boolean) -> Unit)? = null,
 ) {
     val enabled = prefs != null
     val history = remember(context.applicationContext) { EnhancementSettingsHistory(context) }
@@ -854,6 +872,7 @@ private fun SwitchPref(
                 if (key in Prefs.Keys.LOCAL_AGENT_KEYS) {
                     Prefs.reconcileAgentPreferences(EtaApp.serviceInstance)
                 }
+                onChanged?.invoke(value)
             } else {
                 Toast.makeText(
                     context.applicationContext,

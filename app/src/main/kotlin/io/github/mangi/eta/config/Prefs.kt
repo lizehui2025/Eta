@@ -51,6 +51,7 @@ internal object Prefs {
         const val AGENT_THINKING_ENABLED = "agent_thinking_enabled"
         const val AGENT_RUNTIME_CONFIG_JSON = "agent_runtime_config_json"
         const val AGENT_ALWAYS_ON_KEEP_ALIVE = "agent_always_on_keep_alive"
+        const val AGENT_ROOT_KEEP_ALIVE = "agent_root_keep_alive"
 
         /** Agent 交互模式：chat（聊天，正常保存记忆）/ coding（编码，不主动保存记忆）。 */
         const val AGENT_MODE = "agent_mode"
@@ -72,7 +73,8 @@ internal object Prefs {
             AGENT_DEVICE_SENSITIVE_READ_TOOLS to true,
             AGENT_DEVICE_SENSITIVE_ACTION_TOOLS to true,
             AGENT_THINKING_ENABLED to true,
-            AGENT_ALWAYS_ON_KEEP_ALIVE to false
+            AGENT_ALWAYS_ON_KEEP_ALIVE to false,
+            AGENT_ROOT_KEEP_ALIVE to false
         )
 
         /** 由 Eta Runtime 最终裁决、不要求 Xposed 框架在线的开关。 */
@@ -84,6 +86,7 @@ internal object Prefs {
             AGENT_DEVICE_SENSITIVE_ACTION_TOOLS,
             AGENT_THINKING_ENABLED,
             AGENT_ALWAYS_ON_KEEP_ALIVE,
+            AGENT_ROOT_KEEP_ALIVE,
         )
     }
 
