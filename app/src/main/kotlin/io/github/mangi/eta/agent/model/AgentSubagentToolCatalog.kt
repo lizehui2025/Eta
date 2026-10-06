@@ -6,8 +6,13 @@ import org.json.JSONObject
 internal object AgentSubagentToolCatalog {
     fun appendTo(tools: JSONArray) {
         val taskProps = JSONObject()
-            .put("label", JSONObject().put("type", "string").put("maxLength", 64))
-            .put("prompt", JSONObject().put("type", "string").put("maxLength", 4000))
+            .put("label", JSONObject().put("type", "string").put("maxLength", AgentSubagentPolicy.MAX_LABEL_CHARS))
+            .put(
+                "prompt",
+                JSONObject()
+                    .put("type", "string")
+                    .put("maxLength", AgentSubagentPolicy.MAX_PROMPT_CHARS),
+            )
             .put(
                 "write_paths",
                 JSONObject()

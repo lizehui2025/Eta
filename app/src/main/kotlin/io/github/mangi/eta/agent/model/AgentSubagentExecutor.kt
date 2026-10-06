@@ -78,7 +78,7 @@ internal class AgentSubagentExecutor(
             val prompt = o.optString("prompt").trim()
             if (prompt.isBlank()) return err("INVALID_ARGUMENT", "tasks[$i].prompt 不能为空")
             if (prompt.length > AgentSubagentPolicy.MAX_PROMPT_CHARS) {
-                return err("INVALID_ARGUMENT", "tasks[$i].prompt 超过 4000 字符")
+                return err("INVALID_ARGUMENT", "tasks[$i].prompt 超过 ${AgentSubagentPolicy.MAX_PROMPT_CHARS} 字符")
             }
             val label = o.optString("label").trim().take(AgentSubagentPolicy.MAX_LABEL_CHARS)
                 .ifBlank { "task-${i + 1}" }

@@ -52,7 +52,10 @@ internal object AgentSubagentPolicy {
     // 让主代理拿到残缺结果、再派一次，反而更贵。子代理只被两件事终止——父运行取消，
     // 或它自己自然结束。唯一保留的并发护栏是同时运行的子代理数量上限。
     const val MAX_PARALLEL_TASKS = 4
-    const val MAX_PROMPT_CHARS = 4000
+
+    // 任务 prompt 会携带主代理整理的任务简报（可含代码片段与路径清单），4000 字符在
+    // 真实使用中频繁触发假失败；上限保留防失控护栏即可，不充当截断手段。
+    const val MAX_PROMPT_CHARS = 100_000
     const val MAX_LABEL_CHARS = 64
     const val MAX_WRITE_PATH_CHARS = 1024
 
