@@ -9,7 +9,7 @@ internal object AgentTerminalToolCatalog {
             .put(
                 AgentToolSchema.function(
                     name = "terminal",
-                    description = "Manage terminal sessions on the current device. environment=android runs Android system commands and root operations; environment=linux runs the Alpine or Debian environment selected by the user. Apktool build is unavailable until an ARM64 AAPT2 runtime is installed. Use open_and_exec for one-shot commands. Use open to create a persistent shell session and exec with session_id for multi-step work. Use async=true without session_id for long-running independent commands, then read_async_result with job_id to stream output chunks. Use daemon_start for services that must keep running after the Agent run (listening ports, web panels, watchers): the process detaches from any command shell, logs to a file, and survives until daemon_stop or device reboot. Manage daemons with daemon_list, daemon_logs and daemon_stop by task_id. Use close to stop jobs or close sessions.",
+                    description = "Manage terminal sessions on the current device. environment=android runs Android system commands and root operations; environment=linux runs the Alpine or Debian environment selected by the user. Apktool build is unavailable until an ARM64 AAPT2 runtime is installed. Use open_and_exec for one-shot commands. Use open to create a persistent shell session and exec with session_id for multi-step work. Use async=true without session_id for long-running independent commands, then read_async_result with job_id to stream output chunks. Use daemon_start for services that must keep running after the Agent run (listening ports, web panels, watchers): the process detaches from any command shell, logs to a file, and survives until daemon_stop or device reboot. Manage daemons with daemon_list, daemon_logs and daemon_stop by task_id; daemon_list defaults to 10 entries (max 50), lists running tasks first and truncates command text to 120 chars. Use close to stop jobs or close sessions.",
                     parameters = JSONObject()
                         .put("type", "object")
                         .put(
@@ -32,7 +32,7 @@ internal object AgentTerminalToolCatalog {
                                                 .put("daemon_logs")
                                                 .put("daemon_stop")
                                         )
-                                        .put("description", "open creates a session. exec runs command in a session or cwd. open_and_exec runs a one-shot command. read_async_result reads async output by job_id. close closes a session_id or job_id. daemon_start launches a detached long-lived service and returns task_id. daemon_list lists daemon tasks with liveness. daemon_logs tails a task log. daemon_stop terminates and removes a task.")
+                                        .put("description", "open creates a session. exec runs command in a session or cwd. open_and_exec runs a one-shot command. read_async_result reads async output by job_id. close closes a session_id or job_id. daemon_start launches a detached long-lived service and returns task_id. daemon_list lists daemon tasks with liveness: running tasks first, commands truncated to 120 chars, default limit 10 (max 50); filter with running_only or state; exited records stay listed (stale_count) until daemon_stop removes them. daemon_logs tails a task log. daemon_stop terminates and removes a task.")
                                 )
                                 .put(
                                     "identity",
@@ -89,6 +89,25 @@ internal object AgentTerminalToolCatalog {
                                     JSONObject()
                                         .put("type", "string")
                                         .put("description", "Daemon task id returned by daemon_start. Use with daemon_logs or daemon_stop.")
+                                )
+                                .put(
+                                    "limit",
+                                    JSONObject()
+                                        .put("type", "integer")
+                                        .put("description", "For daemon_list only: maximum tasks to return. Default 10, max 50. Running tasks are shown first.")
+                                )
+                                .put(
+                                    "running_only",
+                                    JSONObject()
+                                        .put("type", "boolean")
+                                        .put("description", "For daemon_list only: return only running tasks. Default false.")
+                                )
+                                .put(
+                                    "state",
+                                    JSONObject()
+                                        .put("type", "string")
+                                        .put("enum", JSONArray().put("running").put("exited").put("all"))
+                                        .put("description", "For daemon_list only: filter tasks by state (running/exited/all). Default all; takes precedence over running_only.")
                                 )
                                 .put(
                                     "async",

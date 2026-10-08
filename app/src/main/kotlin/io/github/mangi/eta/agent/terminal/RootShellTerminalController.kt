@@ -39,6 +39,17 @@ internal class RootShellTerminalController(
         const val MAX_LIST_SCAN = 5_000
         const val MAX_ASYNC_OUTPUT_CHARS = 64_000
 
+        /** daemon_list 的默认/最大条数与命令摘要长度：默认只回 10 条，命令不再整段吐出（实测 P1-1）。 */
+        const val DAEMON_LIST_DEFAULT_LIMIT = 10
+        const val DAEMON_LIST_MAX_LIMIT = 50
+        const val DAEMON_COMMAND_SUMMARY_CHARS = 120
+
+        /** daemon_list 的 state 过滤取值（空串表示未指定）。 */
+        val DAEMON_LIST_STATES = setOf("", "running", "exited", "all")
+
+        /** 命令摘要用：把内联脚本等多行文本折叠成单行再截断。 */
+        val WHITESPACE_RUN = Regex("\\s+")
+
         /**
          * 路径状态退出码：文件类命令用它们把「目录 / 不存在 / 非普通文件」与执行失败区分开，
          * 调用方据此返回精确错误码与恢复建议，而不是笼统的 exit=N。
@@ -123,6 +134,9 @@ internal class RootShellTerminalController(
         closeIfDone: Boolean,
         environment: String = TerminalEnvironment.ANDROID.wireName,
         taskId: String? = null,
+        daemonLimit: Int = DAEMON_LIST_DEFAULT_LIMIT,
+        daemonRunningOnly: Boolean = false,
+        daemonState: String? = null,
     ): String {
         return when (action.lowercase()) {
             "open" -> openSession(identity = identity, cwd = cwd, environment = environment)
@@ -159,7 +173,11 @@ internal class RootShellTerminalController(
                 identity = identity,
                 environment = environment,
             )
-            "daemon_list" -> daemonList()
+            "daemon_list" -> daemonList(
+                limit = daemonLimit,
+                runningOnly = daemonRunningOnly,
+                state = daemonState,
+            )
             "daemon_logs" -> daemonLogs(taskId = taskId.orEmpty())
             "daemon_stop" -> daemonStop(taskId = taskId.orEmpty())
             else -> errorJson(
@@ -452,33 +470,93 @@ internal class RootShellTerminalController(
         }
     }
 
-    private fun daemonList(): String {
+    /**
+     * 守护任务列表：默认只回 10 条（上限 50），running 排前；命令文本改为单行截断摘要，
+     * 不再把 keepalive 之类的内联脚本整段吐出（实测 P1-1）。已退出的陈旧记录显式计入
+     * stale_count 并提示用 daemon_stop 清理，不静默吞。
+     */
+    private fun daemonList(limit: Int, runningOnly: Boolean, state: String?): String {
         val supervisor = detachedSupervisor
             ?: return errorJson("DAEMON_UNAVAILABLE", "守护任务宿主不可用")
+        val normalizedState = state?.trim()?.lowercase().orEmpty()
+        if (normalizedState !in DAEMON_LIST_STATES) {
+            return errorJson("INVALID_ARGUMENT", "state 仅支持 running/exited/all")
+        }
         val statuses = supervisor.list()
+        val runningCount = statuses.count { it.running }
+        // state 显式指定时优先；未指定再看 running_only 便捷开关。
+        val runningFilter = when {
+            normalizedState == "running" -> true
+            normalizedState == "exited" -> false
+            runningOnly -> true
+            else -> null
+        }
+        val matched = statuses
+            .filter { runningFilter == null || it.running == runningFilter }
+            .sortedWith(compareByDescending<DetachedTaskStatus> { it.running }.thenByDescending { it.task.startedAt })
+        val max = limit.coerceIn(1, DAEMON_LIST_MAX_LIMIT)
+        val page = matched.take(max)
         val tasks = JSONArray()
-        statuses.forEach { status ->
+        page.forEach { status ->
+            val summary = daemonCommandSummary(status.task.command)
             tasks.put(
                 JSONObject()
                     .put("task_id", status.task.id)
                     .put("pid", status.task.pid)
                     .put("running", status.running)
-                    .put("command", status.task.command)
+                    .put("command", summary.text)
+                    .put("command_chars", status.task.command.length)
+                    .put("command_truncated", summary.truncated)
                     .put("cwd", status.task.cwd)
                     .put("identity", status.task.identity)
                     .put("environment", status.task.environment.wireName)
                     .put("started_at", status.task.startedAt)
             )
         }
+        val exitedCount = statuses.size - runningCount
+        val hiddenCount = matched.size - page.size
         return JSONObject()
             .put("ok", true)
             .put("tool", "terminal")
             .put("action", "daemon_list")
-            .put("task_count", statuses.size)
-            .put("running_count", statuses.count { it.running })
+            .put("total", statuses.size)
+            .put("running", runningCount)
+            .put("exited", exitedCount)
+            .put("shown", page.size)
+            .put("matched", matched.size)
+            .put("hidden", hiddenCount)
+            .put("limit", max)
+            .put("filter", when (runningFilter) { true -> "running"; false -> "exited"; null -> "all" })
+            .put("truncated", hiddenCount > 0)
+            .put("stale_count", exitedCount)
+            .put("stale_visible_count", page.count { !it.running })
             .put("tasks", tasks)
+            .put(
+                "message",
+                buildString {
+                    append("共 ").append(statuses.size).append(" 个守护任务，运行中 ").append(runningCount).append(" 个")
+                    append("；本次显示 ").append(page.size).append(" 个")
+                    if (hiddenCount > 0) append("（还有 ").append(hiddenCount).append(" 个未显示，可提高 limit 或改用过滤）")
+                    append("。")
+                    if (exitedCount > 0) {
+                        append("有 ").append(exitedCount).append(" 个已退出的陈旧记录，可用 daemon_stop task_id=<id> 清理记录。")
+                    }
+                },
+            )
             .toString()
     }
+
+    /** 命令摘要：多行折叠为单行后截断（≤120 字符加省略号），避免脚本原文随列表泄漏观感。 */
+    private fun daemonCommandSummary(command: String): CommandSummary {
+        val singleLine = command.replace(WHITESPACE_RUN, " ").trim()
+        return if (singleLine.length <= DAEMON_COMMAND_SUMMARY_CHARS) {
+            CommandSummary(singleLine, false)
+        } else {
+            CommandSummary(singleLine.take(DAEMON_COMMAND_SUMMARY_CHARS) + "…", true)
+        }
+    }
+
+    private data class CommandSummary(val text: String, val truncated: Boolean)
 
     private fun daemonLogs(taskId: String): String {
         val supervisor = detachedSupervisor
@@ -1078,6 +1156,193 @@ internal class RootShellTerminalController(
         }
     }
 
+    /**
+     * 删除文件 / 空目录（P2-8）：
+     * - 非空目录必须显式 `recursive=true`，否则拒绝并回报直接子项数；
+     * - 工作区根、外部存储根与系统关键目录一律拒绝（[TerminalDeletePolicy] 保护判定）；
+     * - 结果带 resolved_path / kind / recursive / deleted_entries，便于调用方核对影响面；
+     * - 符号链接按文件删除（rm -f / File.delete），不跟随链接删除目标内容。
+     */
+    fun deletePath(path: String, recursive: Boolean): String {
+        if (!rootAvailable()) return deletePathWithoutRoot(path, recursive)
+        val raw = path.trim()
+        if (raw.isBlank()) return errorJson("INVALID_ARGUMENT", "path 不能为空")
+        val safePath = normalizePath(raw)
+        val workspaceRoots = protectedWorkspaceRoots()
+        val probe = runSuText(deleteProbeCommand(safePath), timeoutSeconds = 15)
+        if (probe.exitCode == PATH_EXIT_MISSING) {
+            return errorJson("NOT_FOUND", missingPathMessage(safePath), path = safePath)
+        }
+        if (probe.exitCode != 0) {
+            logger.warn(
+                "Agent terminal action=delete_path outcome=probe_failed exitCode=${probe.exitCode} " +
+                    "error=${stderrExcerpt(probe.stderr)}"
+            )
+            return errorJson("DELETE_PROBE_FAILED", probe.stderr.ifBlank { "exit=${probe.exitCode}" }, path = safePath)
+        }
+        val probeText = probe.output.trim()
+        val kind = when {
+            probeText.startsWith("file") -> TerminalEntryKind.FILE
+            probeText.startsWith("directory") -> TerminalEntryKind.DIRECTORY
+            else -> TerminalEntryKind.OTHER
+        }
+        val counts = probeText.split(' ').mapNotNull { it.trim().toIntOrNull() }
+        val directEntries = counts.getOrElse(0) { 0 }
+        val totalEntries = counts.getOrElse(1) { directEntries }
+        return when (val decision = TerminalDeletePolicy.decide(
+            kind = kind,
+            directEntries = directEntries,
+            totalEntries = totalEntries,
+            recursive = recursive,
+            normalizedPath = safePath,
+            workspaceRoots = workspaceRoots,
+        )) {
+            is TerminalDeletePolicy.Decision.Reject -> errorJson(decision.code, decision.message, path = safePath)
+            is TerminalDeletePolicy.Decision.Delete -> {
+                val remove = runSuText(deleteExecCommand(safePath, decision), timeoutSeconds = 20)
+                if (remove.exitCode != 0) {
+                    logger.warn(
+                        "Agent terminal action=delete_path outcome=failed kind=${decision.kind.wireName} " +
+                            "recursive=${decision.recursive} exitCode=${remove.exitCode} error=${stderrExcerpt(remove.stderr)}"
+                    )
+                    return errorJson("DELETE_FAILED", remove.stderr.ifBlank { "exit=${remove.exitCode}" }, path = safePath)
+                }
+                logger.info(
+                    "Agent terminal action=delete_path outcome=succeeded kind=${decision.kind.wireName} " +
+                        "recursive=${decision.recursive} deletedEntries=${decision.deletedEntries}"
+                )
+                JSONObject()
+                    .put("ok", true)
+                    .put("tool", "delete_path")
+                    .put("path", safePath)
+                    .put("resolved_path", safePath)
+                    .put("kind", decision.kind.wireName)
+                    .put("recursive", decision.recursive)
+                    .put("deleted", true)
+                    .put("deleted_entries", decision.deletedEntries)
+                    .toString()
+            }
+        }
+    }
+
+    /** 免 Root 删除：只在应用可访问范围内使用 File API，保护判定与 Root 分支同一套纯逻辑。 */
+    private fun deletePathWithoutRoot(path: String, recursive: Boolean): String {
+        val file = try {
+            UserFileAccess.resolve(path)
+        } catch (error: IllegalArgumentException) {
+            return errorJson("INVALID_ARGUMENT", error.message ?: "路径不可访问")
+        }
+        val absolute = file.absolutePath
+        val kind = when {
+            // 符号链接先于 isDirectory 判定：File.isDirectory 会跟随链接，误判会递归进目标目录。
+            java.nio.file.Files.isSymbolicLink(file.toPath()) -> TerminalEntryKind.FILE
+            file.isDirectory -> TerminalEntryKind.DIRECTORY
+            file.isFile -> TerminalEntryKind.FILE
+            file.exists() -> TerminalEntryKind.OTHER
+            else -> return errorJson(
+                "NOT_FOUND",
+                "文件不存在：$absolute；请先用 list_directory 确认路径",
+                path = absolute,
+            )
+        }
+        val counts = if (kind == TerminalEntryKind.DIRECTORY) countDirectoryEntries(file) else 1 to 1
+        return when (val decision = TerminalDeletePolicy.decide(
+            kind = kind,
+            directEntries = counts.first,
+            totalEntries = counts.second,
+            recursive = recursive,
+            normalizedPath = absolute,
+            workspaceRoots = protectedWorkspaceRoots(),
+        )) {
+            is TerminalDeletePolicy.Decision.Reject -> errorJson(decision.code, decision.message, path = absolute)
+            is TerminalDeletePolicy.Decision.Delete -> {
+                val deleted = try {
+                    if (kind == TerminalEntryKind.DIRECTORY) {
+                        deleteEntryRecursively(file)
+                    } else if (file.delete()) {
+                        1
+                    } else {
+                        return errorJson("DELETE_FAILED", "删除失败（无权限或文件被占用）：$absolute", path = absolute)
+                    }
+                } catch (error: Exception) {
+                    return errorJson("DELETE_FAILED", error.message ?: "删除失败", path = absolute)
+                }
+                logger.info(
+                    "Agent terminal action=delete_path outcome=succeeded kind=${decision.kind.wireName} " +
+                        "recursive=${decision.recursive} deletedEntries=$deleted noRoot=true"
+                )
+                JSONObject()
+                    .put("ok", true)
+                    .put("tool", "delete_path")
+                    .put("path", absolute)
+                    .put("resolved_path", absolute)
+                    .put("kind", decision.kind.wireName)
+                    .put("recursive", decision.recursive)
+                    .put("deleted", true)
+                    .put("deleted_entries", deleted)
+                    .toString()
+            }
+        }
+    }
+
+    /** 目录直接子项数与全部后代条目数（不含目录自身），用于 delete 的非空判定与影响面回显。 */
+    private fun countDirectoryEntries(directory: File): Pair<Int, Int> {
+        val children = directory.listFiles().orEmpty()
+        var total = 0
+        children.forEach { child -> total += countDescendants(child) }
+        return children.size to total
+    }
+
+    private fun countDescendants(file: File): Int =
+        if (java.nio.file.Files.isSymbolicLink(file.toPath()) || !file.isDirectory) {
+            1
+        } else {
+            1 + file.listFiles().orEmpty().sumOf { countDescendants(it) }
+        }
+
+    /** 递归删除（无 Root）：目录自身计入返回值；任一条目失败即抛出，避免静默部分删除。 */
+    private fun deleteEntryRecursively(file: File): Int {
+        if (java.nio.file.Files.isSymbolicLink(file.toPath()) || !file.isDirectory) {
+            if (!file.delete()) throw IllegalStateException("删除失败（无权限或文件被占用）：${file.absolutePath}")
+            return 1
+        }
+        var deleted = 0
+        file.listFiles().orEmpty().forEach { child -> deleted += deleteEntryRecursively(child) }
+        if (!file.delete()) throw IllegalStateException("删除失败（无权限或目录被占用）：${file.absolutePath}")
+        return deleted + 1
+    }
+
+    /** 探测命令：区分缺失/符号链接/目录/普通文件，并回报直接子项数与后代总数。 */
+    private fun deleteProbeCommand(safePath: String): String {
+        val quoted = shellQuote(safePath)
+        return "if [ ! -e $quoted ] && [ ! -L $quoted ]; then exit $PATH_EXIT_MISSING; fi; " +
+            "if [ -L $quoted ]; then printf 'file 1 1'; " +
+            "elif [ -d $quoted ]; then printf 'directory %s %s' " +
+            "\"\$(find $quoted -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)\" " +
+            "\"\$(find $quoted -mindepth 1 2>/dev/null | wc -l)\"; " +
+            "elif [ -f $quoted ]; then printf 'file 1 1'; " +
+            "else printf 'other 0 0'; fi"
+    }
+
+    private fun deleteExecCommand(
+        safePath: String,
+        decision: TerminalDeletePolicy.Decision.Delete,
+    ): String {
+        val quoted = shellQuote(safePath)
+        return when {
+            decision.kind == TerminalEntryKind.FILE -> "rm -f $quoted"
+            decision.recursive -> "rm -rf $quoted"
+            else -> "rmdir $quoted"
+        }
+    }
+
+    /** delete 保护用的工作区根（当前 Linux 工作区 + 私有工作区 + 宿主工作区常量）。 */
+    private fun protectedWorkspaceRoots(): List<String> = listOf(
+        runCatching { TerminalRuntime.currentLinuxWorkspaceRoot() }.getOrDefault(DEFAULT_CWD),
+        runCatching { TerminalRuntime.userWorkspacePath }.getOrDefault(DEFAULT_CWD),
+        DEFAULT_CWD,
+    )
+
     fun searchCode(rootPath: String, pattern: String, glob: String, maxResults: Int): String {
         if (!rootAvailable()) return UserFileAccess.search(rootPath, pattern, glob, maxResults)
         val trimmedPattern = pattern.trim()
@@ -1129,7 +1394,7 @@ internal class RootShellTerminalController(
                     "Agent terminal action=search_code outcome=failed code=MISSING_DIRECTORY " +
                         "patternChars=${trimmedPattern.length}"
                 )
-                return errorJson("MISSING_DIRECTORY", "搜索目录不存在：$safeRoot" + missingPathSuggestion(safeRoot))
+                return errorJson("MISSING_DIRECTORY", "搜索目录不存在：$safeRoot" + missingPathSuggestion(safeRoot), path = safeRoot)
             }
             val warningLines = GrepScanWarnings.lines(result.stderr)
             // 逐文件的权限/IO 警告（Permission denied / Bad file descriptor 等）会让 grep
@@ -1264,8 +1529,16 @@ internal class RootShellTerminalController(
         } else normalizePath(environmentPath)
     }
 
+    /**
+     * 相对路径与空白路径的默认基准：与绝对 `/workspace` 的翻译根同源
+     * （chroot 且环境就绪且有 Root 时为宿主工作区，其余模式为私有工作区）。
+     * 不能再单独取 userWorkspacePath——那会让同一工具内出现两套基准（实测 P2-2）。
+     */
     private fun defaultScanRoot(): String =
-        runCatching { TerminalRuntime.userWorkspacePath }.getOrNull()?.takeIf { it.isNotBlank() } ?: DEFAULT_CWD
+        runCatching { TerminalRuntime.currentLinuxWorkspaceRoot() }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_CWD
 
     private fun linuxMountPairs(): List<Pair<String, String>> =
         runCatching { linuxSharedMountsProvider().map { it.name to it.sourcePath } }
@@ -1339,7 +1612,7 @@ internal class RootShellTerminalController(
                 "路径不是普通文件：$safePath（可能是设备、管道或损坏的符号链接）"
         }
         logger.warn("Agent terminal action=$tool outcome=failed code=$code pathChars=${safePath.length}")
-        return errorJson(code, message)
+        return errorJson(code, message, path = safePath)
     }
 
     /**
@@ -1498,13 +1771,11 @@ internal class RootShellTerminalController(
         // Linux 视图先翻译为 Android 视图：Root Shell 的挂载命名空间里没有 /workspace，
         // 不翻译则读、列、搜遇到 Linux 写法直接失败，子代理批量取证时尤其致命；
         // 翻译根与终端里 /workspace 的实际指向一致（chroot 为宿主工作区，PRoot 为私有工作区）。
-        val translated = AgentFilePathMapper.toAndroidPath(raw, linuxMountPairs(), TerminalRuntime.currentLinuxWorkspaceRoot())
-        val effective = when {
-            translated == "~" -> USER_STORAGE
-            translated.startsWith("~/") -> USER_STORAGE + "/" + translated.removePrefix("~/")
-            translated.startsWith("/") -> translated
-            else -> "${defaultScanRoot()}/$translated"
-        }
+        // 相对路径必须使用同一次解析出的同一个根：否则会出现“绝对路径走宿主工作区、
+        // 相对路径落私有工作区”的双轨（实测 P2-2），模型传相对路径必然找不到文件。
+        val workspaceRoot = defaultScanRoot()
+        val translated = AgentFilePathMapper.toAndroidPath(raw, linuxMountPairs(), workspaceRoot)
+        val effective = TerminalFilePathResolution.resolve(translated, workspaceRoot, USER_STORAGE)
         val normalized = File(effective).canonicalPath
         return normalized
     }
@@ -1612,11 +1883,18 @@ internal class RootShellTerminalController(
     private fun String.truncateForJson(): String =
         if (length <= MAX_OUTPUT_CHARS) this else truncateByCodePoints(MAX_OUTPUT_CHARS) + "\n...[truncated]"
 
-    private fun errorJson(code: String, message: String): String =
+    /** [path] 非空时把解析后的绝对路径写回结果，便于调用方核对相对路径基准（P2-2）。 */
+    private fun errorJson(code: String, message: String, path: String? = null): String =
         JSONObject()
             .put("ok", false)
             .put("code", code)
             .put("message", message.truncateByCodePoints(300))
+            .also { json ->
+                if (path != null) {
+                    json.put("path", path)
+                    json.put("resolved_path", path)
+                }
+            }
             .toString()
 
     private data class ShellTextResult(val exitCode: Int, val output: String, val stderr: String)
@@ -1677,4 +1955,104 @@ internal class RootShellTerminalController(
         lateinit var stderrThread: Thread
         lateinit var waiterThread: Thread
     }
+}
+
+/**
+ * file 类工具的路径归一（纯函数，便于单测）：把 [AgentFilePathMapper.toAndroidPath] 翻译后的
+ * 路径落到 Android 视图——`~` 指向用户存储、绝对路径原样保留、相对路径以 [workspaceRoot] 为基准。
+ *
+ * 关键约束：相对路径必须与绝对 `/workspace` 使用同一次解析出的同一个 [workspaceRoot]，
+ * 否则会出现“绝对路径走宿主工作区、相对路径落私有工作区”的双轨（实测 P2-2），
+ * 调用方传相对路径必然找不到文件。
+ */
+internal object TerminalFilePathResolution {
+    fun resolve(translated: String, workspaceRoot: String, userStorage: String): String = when {
+        translated == "~" -> userStorage
+        translated.startsWith("~/") -> userStorage + "/" + translated.removePrefix("~/")
+        translated.startsWith("/") -> translated
+        else -> "$workspaceRoot/$translated"
+    }
+}
+
+/** delete 探测出的条目类型。 */
+internal enum class TerminalEntryKind(val wireName: String) {
+    FILE("file"),
+    DIRECTORY("directory"),
+    OTHER("other"),
+}
+
+/**
+ * delete 的保护判定与层级决策（纯函数，便于单测）：
+ * - 根、系统关键目录、外部存储根与工作区根一律拒绝；
+ * - 非空目录必须显式 recursive=true，否则拒绝并给出直接子项数；
+ * - 其余情况返回删除计划（是否递归、影响条目数，目录自身计入）。
+ */
+internal object TerminalDeletePolicy {
+    /** 与运行期工作区无关的固定保护路径：系统/存储关键点不接受删除。 */
+    val fixedProtectedPaths = setOf(
+        "/",
+        "/data",
+        "/data/data",
+        "/data/local/tmp",
+        "/system",
+        "/vendor",
+        "/odm",
+        "/product",
+        "/sdcard",
+        "/storage",
+        "/storage/emulated",
+        "/storage/emulated/0",
+    )
+
+    sealed interface Decision {
+        data class Delete(
+            val kind: TerminalEntryKind,
+            val recursive: Boolean,
+            val deletedEntries: Int,
+        ) : Decision
+
+        data class Reject(val code: String, val message: String) : Decision
+    }
+
+    /** 工作区/存储根与固定保护路径判定；返回 null 表示允许继续走层级决策。 */
+    fun protectionIssue(normalizedPath: String, workspaceRoots: Collection<String>): String? {
+        val path = normalizeRoot(normalizedPath)
+        if (path in fixedProtectedPaths) return "不允许删除受保护路径：$path"
+        if (workspaceRoots.any { normalizeRoot(it) == path }) {
+            return "不允许删除工作区/存储根目录：$path；请先进入其子目录或逐个删除子项"
+        }
+        return null
+    }
+
+    fun decide(
+        kind: TerminalEntryKind,
+        directEntries: Int,
+        totalEntries: Int,
+        recursive: Boolean,
+        normalizedPath: String,
+        workspaceRoots: Collection<String>,
+    ): Decision {
+        protectionIssue(normalizedPath, workspaceRoots)?.let { return Decision.Reject("PROTECTED_PATH", it) }
+        return when (kind) {
+            TerminalEntryKind.OTHER -> Decision.Reject(
+                "NOT_REGULAR_FILE",
+                "路径不是普通文件或目录：$normalizedPath（可能是设备、管道或损坏的符号链接），不支持删除",
+            )
+            TerminalEntryKind.FILE -> Decision.Delete(TerminalEntryKind.FILE, recursive = false, deletedEntries = 1)
+            TerminalEntryKind.DIRECTORY -> when {
+                directEntries > 0 && !recursive -> Decision.Reject(
+                    "DIRECTORY_NOT_EMPTY",
+                    "目录非空（直接子项 $directEntries 个）；如需删除目录及其内容请显式传 recursive=true",
+                )
+                recursive -> Decision.Delete(
+                    TerminalEntryKind.DIRECTORY,
+                    recursive = true,
+                    deletedEntries = totalEntries + 1,
+                )
+                else -> Decision.Delete(TerminalEntryKind.DIRECTORY, recursive = false, deletedEntries = 1)
+            }
+        }
+    }
+
+    private fun normalizeRoot(path: String): String = path.trim().trimEnd('/').ifBlank { "/" }
 }

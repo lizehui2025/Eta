@@ -148,7 +148,7 @@ internal object AgentDeviceToolCatalog {
                 ),
             )
             .put(emptyFunction("get_current_location", "读取系统已有的最近位置，不持续监听或主动唤醒 GPS。"))
-            .put(emptyFunction("get_device_environment", "读取锁屏、勿扰、铃声、音频输出和外接显示器状态。"))
+            .put(emptyFunction("get_device_environment", "读取锁屏、勿扰、铃声、音频输出和外接显示器状态。与 device_info(operation=environment) 等价（保留的细分入口）；返回体回显 tool 与 operation 便于确认调用身份。"))
             .put(
                 function(
                     "list_alarms",
@@ -170,7 +170,8 @@ internal object AgentDeviceToolCatalog {
             .put(
                 function(
                     "get_health_summary",
-                    "汇总系统健康数据中的步数、睡眠、运动、心率、体重和血氧；不返回原始测量序列。",
+                    "汇总系统健康数据中的步数、睡眠、运动、心率、体重和血氧；不返回原始测量序列。" +
+                        "records 全为 0 时附加 permission/readable 状态，区分未授权或不可读与确实无数据。",
                     properties("days" to integer("汇总最近天数，默认 7", 1, 30)),
                 ),
             )
@@ -186,7 +187,8 @@ internal object AgentDeviceToolCatalog {
             .put(
                 function(
                     "get_logcat",
-                    "读取最近系统日志。query 只在已读取日志中做文本过滤，不会进入 Shell。",
+                    "读取最近系统日志。query 会在扩大的扫描窗口（最近最多 2000 行）内做文本过滤，" +
+                        "返回体带 scanned_lines/matched 说明扫描范围；不会进入 Shell。",
                     properties(
                         "query" to string("可选过滤文本", 200),
                         "max_lines" to integer("最多日志行数，默认 200", 20, 500),
@@ -194,8 +196,8 @@ internal object AgentDeviceToolCatalog {
                 ),
             )
             .put(searchFunction("search_media", "检索本机相册中的图片，可按文件名或相册路径筛选。返回元数据与可打开的 content URI，不读取图片内容。"))
-            .put(searchFunction("search_audio", "检索本机音乐和音频文件，可按标题或文件名筛选。"))
-            .put(searchFunction("search_recordings", "检索本机录音文件。结果来自系统媒体库，不读取录音转写或音频内容。"))
+            .put(searchFunction("search_audio", "检索媒体库中的音乐、语音等音频文件，并标注 kind=audio；按 relative_path 排除录音应用目录（路径含 Record/录音），那些请用 search_recordings。"))
+            .put(searchFunction("search_recordings", "检索录音应用产生的录音，并标注 kind=recording；筛选媒体库中 relative_path 含 Record/录音 的条目（如 ColorOS 录音、通话录音），不读取转写或音频内容。"))
             .put(searchFunction("search_files", "检索共享存储中的文档和下载文件，可按文件名筛选。不会遍历其他应用私有目录。"))
             .put(searchFunction("search_calendar_events", "检索系统日历事件，可按标题、地点或说明筛选。"))
             .put(searchFunction("search_contacts", "检索系统通讯录联系人，返回姓名和 lookup URI。"))
@@ -205,7 +207,22 @@ internal object AgentDeviceToolCatalog {
             .put(searchFunction("search_coloros_notes", "检索 ColorOS 便签和待办，可按标题或正文筛选。仅在安装并可访问 ColorOS 便签时可用。"))
             .put(searchFunction("search_coloros_recordings", "检索 ColorOS 录音应用中的普通录音和通话录音，返回名称、时长、类型和文件路径。"))
             .put(searchFunction("search_recording_summaries", "检索 ColorOS 录音关联的转写摘要和便签内容。仅在录音应用生成过摘要时可用。"))
-            .put(searchFunction("search_coloros_memories", "检索 ColorOS 系统记忆，可读取已收集的信息、账单、日程、取件码、快递、地点和附件等关联内容。"))
+            .put(
+                function(
+                    "search_coloros_memories",
+                    "检索 ColorOS 系统记忆。默认摘要模式：每条只返回 id、来源应用、场景/分类、时间与 ≤200 字摘要，" +
+                        "并在 omitted 中列出被省略的字段组；OCR 全文、带签名的临时图片 URL、嵌套 extra_data 与关联详情需显式展开。",
+                    properties(
+                        "query" to string("可选关键词，最多 200 字"),
+                        "limit" to integer("最多返回数量，默认 10", 1, 30),
+                        "detail" to boolean("是否展开全部内容（等价同时开启下列 include_* 开关），默认 false"),
+                        "include_full_text" to boolean("是否返回 OCR 全文（data_text/data_text_cleanup），默认 false"),
+                        "include_image_urls" to boolean("是否返回截图/音频/深链等带签名的临时 URL，默认 false"),
+                        "include_extra_data" to boolean("是否返回嵌套 JSON（extra_data/sub_scene_data/data_entity/ocr_entity），默认 false"),
+                        "include_details" to boolean("是否返回账单、日程、取件码、快递等关联表详情，默认 false"),
+                    ),
+                ),
+            )
             .put(searchFunction("search_saved_places", "检索系统记忆中保存或识别的地点。"))
             .put(searchFunction("search_personal_orders", "检索系统记忆中识别的外卖、购物、快递、票券和出行订单。"))
             .put(searchFunction("search_qq_chat_images", "检索 QQ 聊天图片缓存，返回最近文件的时间、大小、类型和私有路径。仅在安装 QQ 且缓存仍存在时可用。"))

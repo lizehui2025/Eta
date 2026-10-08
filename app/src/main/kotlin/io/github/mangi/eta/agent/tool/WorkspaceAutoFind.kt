@@ -8,7 +8,10 @@ package io.github.mangi.eta.agent.tool
  * 传入开关时启用：
  * - `find=true`：目标不存在时在工作区自动查找；完全一致/忽略大小写/归一化（忽略 -_ 空格）
  *   三个档位内唯一命中则直接采用（写/编辑只允许前两档，降低误写风险），否则返回候选列表；
- * - `no_fail=true`：只返回候选列表，不自动采用、不直接以 NOT_FOUND 收场（优先级高于 find）。
+ * - `no_fail=true`：只返回候选列表，不自动采用、不直接以 NOT_FOUND 收场（优先级高于 find）；
+ *   零候选或枚举不可用时同样返回候选结构（count=0 / search_unavailable），不允许裸 NOT_FOUND。
+ *
+ * 候选条目带匹配层级（tier）与未自动采用原因（reason_not_adopted），便于调用方直接选择。
  *
  * 匹配只按文件名（basename），候选排序为"档位 → 路径更短 → 字典序"，保证确定性可单测。
  */
@@ -85,6 +88,41 @@ internal object WorkspaceAutoFind {
         if (bestTier > maxTier) return null
         val sameTier = ranked.filter { nameTier(it.substringAfterLast('/'), requestedName) == bestTier }
         return sameTier.singleOrNull()
+    }
+
+    /** 匹配层级名称（0/1/2 → exact/ignore_case/normalized），用于候选列表回显。 */
+    fun tierName(tier: Int): String = when (tier) {
+        0 -> "exact"
+        1 -> "ignore_case"
+        2 -> "normalized"
+        else -> "unknown"
+    }
+
+    /**
+     * 自动采用决策：`find=true` 且未开 `no_fail` 时，唯一命中且层级不超过 [maxTier] 才采用；
+     * `no_fail=true` 优先，只回候选项、不自动采用。
+     */
+    fun adoptionDecision(
+        candidates: List<String>,
+        requestedName: String,
+        maxTier: Int,
+        find: Boolean,
+        noFail: Boolean,
+    ): String? = if (find && !noFail) chooseAdoption(candidates, requestedName, maxTier) else null
+
+    /**
+     * 是否返回候选结构：有候选照常返回；`no_fail=true` 时即使零候选也要给出明确空候选结构，
+     * 不允许退化成裸 NOT_FOUND（实测 P2-3）。
+     */
+    fun shouldReturnCandidateList(candidateCount: Int, noFail: Boolean): Boolean =
+        candidateCount > 0 || noFail
+
+    /** 候选未自动采用的原因（回显用）：no_fail 优先、层级超上限、同层多候选三类。 */
+    fun nonAdoptionReason(tier: Int, sameTierCount: Int, maxTier: Int, noFail: Boolean): String = when {
+        noFail -> "no_fail=true：按参数要求只返回候选，不自动采用"
+        tier > maxTier -> "匹配层级 ${tierName(tier)} 超过该工具自动采用上限 ${tierName(maxTier)}（写/编辑更严格）"
+        sameTierCount > 1 -> "同一匹配层级 ${tierName(tier)} 有 $sameTierCount 个候选，无法唯一确定"
+        else -> "未满足唯一采用条件"
     }
 
     /** 从 [path] 起向上找最近存在的目录（最多 [maxLevels] 层）；都不存在返回 null。 */

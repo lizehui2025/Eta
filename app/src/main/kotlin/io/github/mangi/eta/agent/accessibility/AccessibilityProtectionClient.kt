@@ -7,6 +7,7 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import io.github.mangi.eta.core.AndroidAgentLogger
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -63,6 +64,11 @@ internal object AccessibilityProtectionClient {
 
     fun requestRecoveryBlocking(context: Context): ControlStatus {
         if (Looper.myLooper() == Looper.getMainLooper()) {
+            // 主线程不能阻塞等待响应；失败原因必须留痕，否则上层只能看到笼统的“后端不可用”。
+            AndroidAgentLogger.warn(
+                "Agent accessibility action=request_recovery outcome=failed " +
+                    "reason=main_thread status=${ControlStatus.UNAVAILABLE.name}"
+            )
             return ControlStatus.UNAVAILABLE
         }
         val latch = CountDownLatch(1)
@@ -79,7 +85,24 @@ internal object AccessibilityProtectionClient {
         val completed = runCatching {
             latch.await(CONTROL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         }.getOrDefault(false)
-        return if (completed) status else ControlStatus.UNAVAILABLE
+        if (!completed) {
+            AndroidAgentLogger.warn(
+                "Agent accessibility action=request_recovery outcome=failed " +
+                    "reason=timeout timeout_ms=$CONTROL_TIMEOUT_MS status=${status.name}"
+            )
+            return ControlStatus.UNAVAILABLE
+        }
+        if (status != ControlStatus.APPLIED) {
+            AndroidAgentLogger.warn(
+                "Agent accessibility action=request_recovery outcome=failed " +
+                    "reason=backend_status status=${status.name}"
+            )
+        } else {
+            AndroidAgentLogger.info(
+                "Agent accessibility action=request_recovery outcome=applied"
+            )
+        }
+        return status
     }
 
     private fun sendRequest(
@@ -102,9 +125,17 @@ internal object AccessibilityProtectionClient {
                     AccessibilityProtectionProtocol.EXTRA_ENABLED,
                     isEnabled(context),
                 ) ?: isEnabled(context)
+                val status = resultCode.toControlStatus()
+                if (status != ControlStatus.APPLIED) {
+                    AndroidAgentLogger.warn(
+                        "Agent accessibility action=protection_request outcome=failed " +
+                            "request=$action result_code=$resultCode status=${status.name} " +
+                            "enabled=$actualEnabled"
+                    )
+                }
                 onResult(
                     ControlResult(
-                        status = resultCode.toControlStatus(),
+                        status = status,
                         enabled = actualEnabled,
                     ),
                 )
@@ -126,7 +157,13 @@ internal object AccessibilityProtectionClient {
                 null,
                 null,
             )
-        } catch (_: RuntimeException) {
+        } catch (throwable: RuntimeException) {
+            AndroidAgentLogger.warn(
+                "Agent accessibility action=protection_request outcome=failed " +
+                    "request=$action reason=broadcast_rejected " +
+                    "type=${throwable.javaClass.simpleName} " +
+                    "message=${throwable.message.orEmpty().take(120)}"
+            )
             scheduler.post {
                 onResult(
                     ControlResult(

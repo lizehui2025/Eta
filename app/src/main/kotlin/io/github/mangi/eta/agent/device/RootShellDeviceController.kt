@@ -162,13 +162,16 @@ internal class RootShellDeviceController(
                 "accessibility",
                 JSONObject()
                     .put("available", accessibility != null)
+                    .put("degraded", accessibility == null)
                     .put("package", accessibility?.currentPackageName().orEmpty())
                     .put(
                         "note",
                         if (accessibility != null) {
                             "节点来自无障碍服务，支持 tap_element、replace_text、clear_text、scroll_element 等稳定节点动作"
                         } else {
-                            "无障碍服务未启用，节点来自 uiautomator；坐标工具会回退到 Root Shell"
+                            "无障碍服务未启用，已降级：节点来自 uiautomator，截图/按键走 Root；" +
+                                "节点身份校验更严格（界面变动即 STALE_NODE），" +
+                                "replace_text/clear_text 等需要无障碍节点句柄的动作不可用"
                         }
                     )
             )
@@ -340,6 +343,15 @@ internal class RootShellDeviceController(
     ): String {
         if (text.length > MAX_REPLACE_TEXT_CHARS) {
             return errorJson("TEXT_TOO_LONG", "replace_text 最多支持 $MAX_REPLACE_TEXT_CHARS 个字符")
+        }
+        // uiautomator 快照只有坐标没有可写的节点句柄：明确拒绝，不落到含糊的 NO_OBSERVATION。
+        if (index != null && observation != null && observation.accessibilitySnapshot == null) {
+            return errorJson(
+                "NODE_ACTION_REQUIRES_ACCESSIBILITY",
+                "replace_text/clear_text 需要无障碍节点句柄，当前观察快照来自 uiautomator" +
+                    "（无障碍服务未启用）。请开启 Eta 无障碍服务后重新 observe_screen；" +
+                    "或改用 input_text（焦点输入）等 Root 通道动作"
+            )
         }
         AgentAccessibilityService.current()?.let { service ->
             val snapshot = observation?.accessibilitySnapshot
@@ -632,10 +644,10 @@ internal class RootShellDeviceController(
         val result = serviceResult ?: run {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = runCatching { clipboard.primaryClip }.getOrNull()
-            if (clip == null || clip.itemCount <= 0) {
-                AgentAccessibilityService.ClipboardReadResult.failure()
-            } else {
-                AgentAccessibilityService.ClipboardReadResult(
+            when {
+                clip == null -> AgentAccessibilityService.ClipboardReadResult.unavailable()
+                clip.itemCount <= 0 -> AgentAccessibilityService.ClipboardReadResult.empty()
+                else -> AgentAccessibilityService.ClipboardReadResult(
                     ok = true,
                     text = clip.getItemAt(0).coerceToText(context)?.toString().orEmpty(),
                 )
@@ -649,7 +661,7 @@ internal class RootShellDeviceController(
         if (!result.ok) {
             json
                 .put("code", result.code)
-                .put("message", "剪贴板为空，或当前应用无权读取剪贴板")
+                .put("message", result.message.ifBlank { "读取系统剪贴板失败：${result.code}" })
         }
         return json.toString()
     }

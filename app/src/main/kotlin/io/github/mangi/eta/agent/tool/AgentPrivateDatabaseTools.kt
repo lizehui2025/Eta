@@ -24,7 +24,7 @@ internal class AgentPrivateDatabaseTools(
 
     private fun listAlarms(database: SQLiteDatabase, args: JSONObject): String {
         if (!database.hasColumns("alarms", setOf("_id", "hour", "minutes", "enabled"))) {
-            return error("CLOCK_SCHEMA_UNSUPPORTED", "当前时钟数据库结构暂不受支持")
+            return error("CLOCK_SCHEMA_UNSUPPORTED", "当前时钟数据库结构与已知 ColorOS 版本不一致；可改用 set_alarm/set_timer 直接创建")
         }
         val limit = args.optInt("limit", 20).coerceIn(1, 50)
         val items = database.rows(
@@ -42,7 +42,7 @@ internal class AgentPrivateDatabaseTools(
 
     private fun listTimers(database: SQLiteDatabase, args: JSONObject): String {
         if (!database.hasColumns("timer_schedule", setOf("_id", "duration", "state"))) {
-            return error("CLOCK_SCHEMA_UNSUPPORTED", "当前时钟数据库结构暂不受支持")
+            return error("CLOCK_SCHEMA_UNSUPPORTED", "当前时钟数据库结构与已知 ColorOS 版本不一致；可改用 set_alarm/set_timer 直接创建")
         }
         val limit = args.optInt("limit", 20).coerceIn(1, 50)
         val items = database.rows(
@@ -60,7 +60,7 @@ internal class AgentPrivateDatabaseTools(
 
     private fun searchClipboard(database: SQLiteDatabase, args: JSONObject): String {
         if (!database.hasColumns("CLIPBOARD_ITEM", setOf("TIME", "CONTENT"))) {
-            return error("CLIPBOARD_SCHEMA_UNSUPPORTED", "当前剪贴板历史结构暂不受支持")
+            return error("CLIPBOARD_SCHEMA_UNSUPPORTED", "当前剪贴板历史结构与已知版本不一致：可能输入法已升级；可重新复制后再查询")
         }
         val limit = args.optInt("limit", 20).coerceIn(1, 50)
         val query = args.optString("query").trim()
@@ -75,25 +75,50 @@ internal class AgentPrivateDatabaseTools(
         return ok("search_clipboard_history", items, limit)
     }
 
-    private fun healthSummary(database: SQLiteDatabase, args: JSONObject): String {
+    /**
+     * 汇总健康数据。除汇总值外还记录数据表是否存在/是否读取失败：
+     * records 全为 0 时附加 permission/readable，区分“未授权或不可读”与“窗口内确实无数据”。
+     * 内部可见以便单测直接注入内存数据库（不触发 Root 快照）；有数据时不改变既有结构。
+     */
+    internal fun healthSummary(database: SQLiteDatabase, args: JSONObject): String {
         val days = args.optInt("days", 7).coerceIn(1, 30)
         val cutoff = System.currentTimeMillis() - days * DAY_MS
         val summary = JSONObject()
-        database.aggregate(
+        var dataPoints = 0L
+        val missingTables = mutableListOf<String>()
+        var readFailed = false
+
+        fun readAggregate(table: String, query: String): LongArray? {
+            if (database.tableColumns(table).isEmpty()) {
+                missingTables += table
+                return null
+            }
+            val values = database.aggregate(table, query, cutoff)
+            if (values == null) readFailed = true
+            return values
+        }
+
+        readAggregate(
             "steps_record_table",
             "SELECT COUNT(*), COALESCE(SUM(count),0) FROM steps_record_table WHERE end_time>=?",
-            cutoff,
-        )?.let { summary.put("steps", JSONObject().put("records", it[0]).put("count", it[1])) }
-        database.aggregate(
+        )?.let {
+            summary.put("steps", JSONObject().put("records", it[0]).put("count", it[1]))
+            dataPoints += it[0]
+        }
+        readAggregate(
             "sleep_session_record_table",
             "SELECT COUNT(*), COALESCE(SUM(end_time-start_time),0) FROM sleep_session_record_table WHERE end_time>=?",
-            cutoff,
-        )?.let { summary.put("sleep", JSONObject().put("sessions", it[0]).put("duration_ms", it[1])) }
-        database.aggregate(
+        )?.let {
+            summary.put("sleep", JSONObject().put("sessions", it[0]).put("duration_ms", it[1]))
+            dataPoints += it[0]
+        }
+        readAggregate(
             "exercise_session_record_table",
             "SELECT COUNT(*), COALESCE(SUM(end_time-start_time),0) FROM exercise_session_record_table WHERE end_time>=?",
-            cutoff,
-        )?.let { summary.put("exercise", JSONObject().put("sessions", it[0]).put("duration_ms", it[1])) }
+        )?.let {
+            summary.put("exercise", JSONObject().put("sessions", it[0]).put("duration_ms", it[1]))
+            dataPoints += it[0]
+        }
         if (
             database.hasColumns("heart_rate_record_table", setOf("row_id", "end_time")) &&
             database.hasColumns("heart_rate_record_series_table", setOf("parent_key", "beats_per_minute"))
@@ -113,19 +138,46 @@ internal class AgentPrivateDatabaseTools(
                             .put("max_bpm", cursor.getLong(2))
                             .put("avg_bpm", cursor.getDouble(3)),
                     )
+                    dataPoints += cursor.getLong(0)
                 }
             }
         }
         database.latestMeasurement("weight_record_table", "time", "weight", cutoff)
-            ?.let { summary.put("latest_weight_kg", it / 1_000.0) }
+            ?.let {
+                summary.put("latest_weight_kg", it / 1_000.0)
+                dataPoints += 1
+            }
         database.latestMeasurement("oxygen_saturation_record_table", "time", "percentage", cutoff)
-            ?.let { summary.put("latest_oxygen_saturation", it) }
-        return JSONObject()
+            ?.let {
+                summary.put("latest_oxygen_saturation", it)
+                dataPoints += 1
+            }
+        val result = JSONObject()
             .put("ok", true)
             .put("tool", "get_health_summary")
             .put("window_days", days)
             .put("summary", summary)
-            .toString()
+        if (dataPoints == 0L) {
+            // 全部为 0：显式给出权限/可读性判定，区分“未授权或不可读”与“窗口内确实无数据”。
+            val corePresent = CORE_HEALTH_TABLES.count { it !in missingTables }
+            val readable = corePresent > 0 && !readFailed
+            result
+                .put("permission", if (readable) "granted" else "unavailable")
+                .put("readable", readable)
+            if (missingTables.isNotEmpty()) result.put("missing_tables", JSONArray(missingTables))
+            result.put(
+                "note",
+                if (readable) {
+                    "健康数据来源可读，最近 $days 天确实没有记录：数据可能尚未同步；" +
+                        "可在系统健康应用中确认数据来源，或增大 days 后重试"
+                } else {
+                    "健康数据来源不可读或结构不匹配：可能未授予健康数据访问权限、" +
+                        "设备没有 Health Connect 数据或记录尚未同步；请检查权限健康页授权，" +
+                        "并先在系统健康应用中产生数据后重试"
+                },
+            )
+        }
+        return result.toString()
     }
 
     private fun readDatabase(source: DatabaseSource, unavailableCode: String, block: (SQLiteDatabase) -> String): String =
@@ -257,20 +309,29 @@ internal class AgentPrivateDatabaseTools(
         const val SNAPSHOT_PREFIX = "eta-private-data-"
         const val MAX_FIELD_CHARS = 4_000
         const val DAY_MS = 24L * 60 * 60 * 1_000
+
+        /** 核心健康数据表：全为 0 时用它们判断数据源是否存在（缺失=结构不匹配或未初始化）。 */
+        val CORE_HEALTH_TABLES = listOf(
+            "steps_record_table",
+            "sleep_session_record_table",
+            "exercise_session_record_table",
+        )
         val CLOCK_DATABASE = DatabaseSource(
             "/data/user_de/{user}/com.coloros.alarmclock/databases/alarms.db",
             32L * 1024 * 1024,
-            "ColorOS 时钟数据暂时不可访问",
+            "无法读取 ColorOS 时钟数据库：可能时钟应用数据不存在、结构不匹配或文件权限不足；" +
+                "请确认设备使用 ColorOS 时钟并已授予 Root",
         )
         val CLIPBOARD_DATABASE = DatabaseSource(
             "/data/user/{user}/com.sohu.inputmethod.sogouoem/databases/clipboard_db",
             32L * 1024 * 1024,
-            "当前输入法没有可访问的剪贴板历史",
+            "当前输入法没有可访问的剪贴板历史：可能输入法不是受支持版本、未开启剪贴板历史功能或数据库不存在",
         )
         val HEALTH_DATABASE = DatabaseSource(
             "/data/system_ce/{user}/healthconnect/healthconnect.db",
             256L * 1024 * 1024,
-            "系统健康数据暂时不可访问",
+            "无法读取系统健康数据库：可能设备没有 Health Connect 数据、记录尚未同步或文件不可读；" +
+                "请在系统健康应用中确认数据后再试",
         )
     }
 }

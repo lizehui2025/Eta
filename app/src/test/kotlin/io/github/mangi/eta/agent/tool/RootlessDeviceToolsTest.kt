@@ -114,6 +114,28 @@ class RootlessDeviceToolsTest {
         }
     }
 
+    @Test
+    fun deviceEnvironmentEchoesEntryIdentityForBothEntries() {
+        val context = RuntimeEnvironment.getApplication()
+        rejectingRootExecutor().use { root ->
+            val tools = AgentStructuredDeviceTools(context, NoOpLogger, root, rootAvailable = { false })
+
+            val legacy = JSONObject(tools.execute("get_device_environment", JSONObject())!!.content)
+            assertTrue(legacy.getBoolean("ok"))
+            assertEquals("get_device_environment", legacy.getString("tool"))
+            assertEquals("environment", legacy.getString("operation"))
+
+            // 规范入口 device_info 复用同一实现，但身份字段必须能区分（P2-1 回显请求）。
+            val canonical = JSONObject(
+                tools.execute("device_info", JSONObject().put("operation", "environment"))!!.content,
+            )
+            assertTrue(canonical.getBoolean("ok"))
+            assertEquals("device_info", canonical.getString("tool"))
+            assertEquals("environment", canonical.getString("operation"))
+            assertEquals(legacy.getInt("display_count"), canonical.getInt("display_count"))
+        }
+    }
+
     private fun rejectingRootExecutor() = BoundedRootCommandExecutor(NoOpLogger) {
         error("普通实现不应尝试调用 Root")
     }

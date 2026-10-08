@@ -46,6 +46,14 @@ internal object ColorOsMemoryDatabaseQuery {
         val projection = CORE_COLUMNS.filter(memoryColumns::contains)
         val keyword = args.optString("query").trim()
         val limit = args.optInt("limit", DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
+        // 摘要模式（默认，仅 search_coloros_memories）：先给身份/时间/短摘要，OCR 全文、带签名临时 URL、
+        // 嵌套 extra_data 与关联详情按需展开，避免单条记忆就占满上下文预算。
+        val summaryMode = !ordersOnly
+        val expanded = !summaryMode || args.optBoolean("detail", false)
+        val includeFullText = expanded || args.optBoolean("include_full_text", false)
+        val includeImageUrls = expanded || args.optBoolean("include_image_urls", false)
+        val includeExtraData = expanded || args.optBoolean("include_extra_data", false)
+        val includeDetails = expanded || args.optBoolean("include_details", false)
         val selectionParts = mutableListOf<String>()
         val selectionArgs = mutableListOf<String>()
         if ("deleted" in memoryColumns) selectionParts += "${"deleted".sqlIdentifier()}=0"
@@ -122,11 +130,24 @@ internal object ColorOsMemoryDatabaseQuery {
         val items = JSONArray()
         var resultBytes = 0
         var resultTruncated = false
+        // 关联表存在时摘要模式才标注 details 可按需展开；不为此额外查询每一行。
+        val detailsOmitted = summaryMode && !expanded && !includeDetails && DETAIL_SPECS.any { spec ->
+            spec.linkColumn in database.tableColumns(spec.table)
+        }
         cursor.use {
             while (it.moveToNext()) {
                 val item = it.currentRow()
                 val memoryId = item.optString("memory_id")
-                if (memoryId.isNotBlank()) {
+                if (summaryMode && !expanded) {
+                    summarizeMemoryItem(
+                        item = item,
+                        includeFullText = includeFullText,
+                        includeImageUrls = includeImageUrls,
+                        includeExtraData = includeExtraData,
+                        detailsOmitted = detailsOmitted,
+                    )
+                }
+                if (memoryId.isNotBlank() && includeDetails) {
                     val details = relatedDetails(database, memoryId)
                     if (details.length() > 0) item.put("details", details)
                 }
@@ -145,13 +166,58 @@ internal object ColorOsMemoryDatabaseQuery {
             }
             if (!it.isAfterLast) resultTruncated = true
         }
-        return JSONObject()
+        val result = JSONObject()
             .put("ok", true)
             .put("tool", toolName)
             .put("items", items)
             .put("count", items.length())
             .put("truncated", resultTruncated || items.length() == limit)
-            .toString()
+        if (summaryMode && !expanded) {
+            result.put("summary_mode", true).put(
+                "note",
+                "默认摘要模式：每条只返回 id、来源应用、场景/分类、时间与 ≤$SUMMARY_CHARS 字摘要；" +
+                    "omitted 列出被省略的字段组，可用 detail=true 或 include_full_text/include_image_urls/" +
+                    "include_extra_data/include_details 分别展开。",
+            )
+        }
+        return result.toString()
+    }
+
+    /** 摘要模式下裁剪单条记忆：保留轻量身份字段与 ≤200 字摘要，被移除的字段组写入 omitted 供按需展开。 */
+    private fun summarizeMemoryItem(
+        item: JSONObject,
+        includeFullText: Boolean,
+        includeImageUrls: Boolean,
+        includeExtraData: Boolean,
+        detailsOmitted: Boolean,
+    ) {
+        val abstract = item.optString("data_abstract").ifBlank {
+            item.optString("data_text_cleanup").ifBlank { item.optString("data_text") }
+        }.trim()
+        if (abstract.isNotBlank()) {
+            item.put(
+                "summary",
+                if (abstract.length > SUMMARY_CHARS) abstract.take(SUMMARY_CHARS) + "…" else abstract,
+            )
+        }
+        item.remove("data_abstract")
+        val omitted = JSONArray()
+        if (!includeFullText && item.dropFields(FULL_TEXT_COLUMNS)) omitted.put("full_text")
+        if (!includeImageUrls && item.dropFields(IMAGE_URL_COLUMNS)) omitted.put("image_urls")
+        if (!includeExtraData && item.dropFields(EXTRA_DATA_COLUMNS)) omitted.put("extra_data")
+        if (detailsOmitted) omitted.put("details")
+        if (omitted.length() > 0) item.put("omitted", omitted)
+    }
+
+    private fun JSONObject.dropFields(names: List<String>): Boolean {
+        var dropped = false
+        names.forEach { name ->
+            if (has(name)) {
+                remove(name)
+                dropped = true
+            }
+        }
+        return dropped
     }
 
     private fun searchPlaces(database: ColorOsMemoryReadDatabase, args: JSONObject): String {
@@ -307,6 +373,12 @@ internal object ColorOsMemoryDatabaseQuery {
     private const val RELATED_LIMIT = 3
     private const val MAX_FIELD_CHARS = 4_000
     private const val MAX_RESULT_BYTES = 240 * 1024
+    private const val SUMMARY_CHARS = 200
+
+    /** 摘要模式下按需展开的字段组：OCR 全文、带签名临时 URL、嵌套 JSON。 */
+    private val FULL_TEXT_COLUMNS = listOf("data_text", "data_text_cleanup")
+    private val IMAGE_URL_COLUMNS = listOf("screenshot", "audio_file", "deeplink")
+    private val EXTRA_DATA_COLUMNS = listOf("extra_data", "sub_scene_data", "data_entity", "ocr_entity")
 
     private val CORE_COLUMNS = listOf(
         "memory_id", "data_source", "data_text", "package_name", "app_name", "activity_name",

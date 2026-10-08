@@ -931,13 +931,16 @@ class AgentAccessibilityService : AccessibilityService() {
     fun readClipboard(): ClipboardReadResult = runOnMainSync {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = runCatching { clipboard.primaryClip }.getOrNull()
-            ?: return@runOnMainSync ClipboardReadResult.failure()
-        if (clip.itemCount <= 0) return@runOnMainSync ClipboardReadResult.failure()
+            ?: return@runOnMainSync ClipboardReadResult.unavailable()
+        if (clip.itemCount <= 0) return@runOnMainSync ClipboardReadResult.empty()
         ClipboardReadResult(
             ok = true,
             text = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty(),
         )
-    } ?: ClipboardReadResult.failure(code = "SERVICE_TIMEOUT")
+    } ?: ClipboardReadResult.failure(
+        code = "SERVICE_TIMEOUT",
+        message = "无障碍服务主线程无响应，未能读取剪贴板；请重试",
+    )
 
     fun statusJson(): JSONObject =
         JSONObject()
@@ -1998,10 +2001,24 @@ class AgentAccessibilityService : AccessibilityService() {
         val ok: Boolean,
         val text: String = "",
         val code: String = "",
+        val message: String = "",
     ) {
         companion object {
-            fun failure(code: String = "CLIPBOARD_UNAVAILABLE_OR_EMPTY"): ClipboardReadResult =
-                ClipboardReadResult(ok = false, code = code)
+            /** 剪贴板服务不可访问：读取被系统拒绝、后台读取受限或服务不可用。 */
+            fun unavailable(): ClipboardReadResult = failure(
+                code = "CLIPBOARD_UNAVAILABLE",
+                message = "无法读取系统剪贴板（读取被拒绝或服务不可用）；" +
+                    "请将 Eta 切到前台重试，或改用 clipboard 的其他动作",
+            )
+
+            /** 剪贴板可读，但当前没有任何内容。 */
+            fun empty(): ClipboardReadResult = failure(
+                code = "CLIPBOARD_EMPTY",
+                message = "系统剪贴板当前为空；请先复制内容后重试",
+            )
+
+            fun failure(code: String, message: String): ClipboardReadResult =
+                ClipboardReadResult(ok = false, code = code, message = message)
         }
     }
 

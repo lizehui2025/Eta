@@ -251,6 +251,7 @@ internal class AgentLocalTools(
                 "read_file" -> textResult(terminalTool { readFile(dispatchArgs) })
                 "write_file" -> textResult(terminalTool { writeFile(dispatchArgs) })
                 "edit_file" -> textResult(terminalTool { editFile(dispatchArgs) })
+                "delete_path" -> textResult(terminalTool { deletePath(dispatchArgs) })
                 "search_code" -> textResult(terminalTool { searchCode(dispatchArgs) })
                 "list_directory" -> textResult(terminalTool { listDirectory(dispatchArgs) })
                 "memory_get" -> textResult(memoryGet(dispatchArgs))
@@ -390,6 +391,7 @@ internal class AgentLocalTools(
                         "edit" -> "edit_file"
                         "search" -> "search_code"
                         "list" -> "list_directory"
+                        "delete" -> "delete_path"
                         else -> return call
                     },
                     args,
@@ -904,6 +906,9 @@ internal class AgentLocalTools(
             closeIfDone = args.optBoolean("close_if_done", false),
             environment = args.optString("environment").ifBlank { defaultTerminalEnvironment() },
             taskId = args.optString("task_id").ifBlank { null },
+            daemonLimit = args.optInt("limit", 10),
+            daemonRunningOnly = args.optBoolean("running_only", false),
+            daemonState = args.optString("state").ifBlank { null },
         )
     }
 
@@ -920,44 +925,85 @@ internal class AgentLocalTools(
         }
 
     private fun readFile(args: JSONObject): String =
-        terminalController.readFile(
-            path = args.optString("path"),
-            offsetBytes = args.optInt("offset_bytes", 0),
-            maxBytes = args.optInt("max_bytes", 65_536)
+        withResolvedPathEcho(
+            terminalController.readFile(
+                path = args.optString("path"),
+                offsetBytes = args.optInt("offset_bytes", 0),
+                maxBytes = args.optInt("max_bytes", 65_536)
+            ),
+            args.optString("path"),
         )
 
     private fun writeFile(args: JSONObject): String =
-        terminalController.writeFile(
-            path = args.optString("path"),
-            content = args.optString("content"),
-            append = args.optBoolean("append", false)
+        withResolvedPathEcho(
+            terminalController.writeFile(
+                path = args.optString("path"),
+                content = args.optString("content"),
+                append = args.optBoolean("append", false)
+            ),
+            args.optString("path"),
         )
 
     private fun listDirectory(args: JSONObject): String =
-        terminalController.listDirectory(
-            path = args.optString("path"),
-            showHidden = args.optBoolean("show_hidden", false),
-            limit = args.optInt("limit", 80),
-            offset = args.optInt("offset", 0),
-            glob = args.optString("glob"),
-            recursive = args.optBoolean("recursive", false),
+        withResolvedPathEcho(
+            terminalController.listDirectory(
+                path = args.optString("path"),
+                showHidden = args.optBoolean("show_hidden", false),
+                limit = args.optInt("limit", 80),
+                offset = args.optInt("offset", 0),
+                glob = args.optString("glob"),
+                recursive = args.optBoolean("recursive", false),
+            ),
+            args.optString("path"),
         )
 
     private fun editFile(args: JSONObject): String =
-        terminalController.editFile(
-            path = args.optString("path"),
-            oldText = args.optString("old_string"),
-            newText = args.optString("new_string"),
-            replaceAll = args.optBoolean("replace_all", false),
+        withResolvedPathEcho(
+            terminalController.editFile(
+                path = args.optString("path"),
+                oldText = args.optString("old_string"),
+                newText = args.optString("new_string"),
+                replaceAll = args.optBoolean("replace_all", false),
+            ),
+            args.optString("path"),
         )
 
     private fun searchCode(args: JSONObject): String =
-        terminalController.searchCode(
-            rootPath = args.optString("path"),
-            pattern = args.optString("pattern"),
-            glob = args.optString("glob"),
-            maxResults = args.optInt("max_results", AgentCodeSearch.MAX_RESULTS),
+        withResolvedPathEcho(
+            terminalController.searchCode(
+                rootPath = args.optString("path"),
+                pattern = args.optString("pattern"),
+                glob = args.optString("glob"),
+                maxResults = args.optInt("max_results", AgentCodeSearch.MAX_RESULTS),
+            ),
+            args.optString("path"),
         )
+
+    private fun deletePath(args: JSONObject): String =
+        withResolvedPathEcho(
+            terminalController.deletePath(
+                path = args.optString("path"),
+                recursive = args.optBoolean("recursive", false),
+            ),
+            args.optString("path"),
+        )
+
+    /**
+     * file 类工具的结果回显：把结果 JSON 中解析后的绝对路径复制为 resolved_path；
+     * 输入是相对路径（或为空）时追加 resolved_note 说明基准，避免调用方按错误基准继续调用（实测 P2-2）。
+     */
+    private fun withResolvedPathEcho(result: String, requestedPath: String): String {
+        val json = runCatching { JSONObject(result) }.getOrNull() ?: return result
+        val resolved = json.optString("path").takeIf { it.isNotBlank() } ?: return result
+        json.put("resolved_path", resolved)
+        val requested = requestedPath.trim()
+        when {
+            requested.isEmpty() -> json.put("resolved_note", "未指定路径，已使用当前工作区根：$resolved")
+            !requested.startsWith("/") && requested != "~" && !requested.startsWith("~/") ->
+                json.put("resolved_note", "相对路径已按当前工作区根解析：$requested → $resolved")
+        }
+        return json.toString()
+    }
 
     // ── 读写工具的自动查找（find / no_fail，默认关闭） ──────────────────────
 
@@ -999,7 +1045,14 @@ internal class AgentLocalTools(
             ?.takeIf { it.ok }
             ?.root
             ?.takeIf { it.isNotBlank() }
-            ?: return AutoFindLookup.Proceed(args)
+        if (workspaceRoot == null) {
+            // 工作区根本列不出来：no_fail=true 时给出结构化结论，不允许裸 NOT_FOUND（P2-3）。
+            return if (noFail) {
+                autoFindUnavailableResult(toolName, rawPath, requestedName, scanRoot = "")
+            } else {
+                AutoFindLookup.Proceed(args)
+            }
+        }
         val parent = rawPath.substringBeforeLast('/', "").ifBlank { workspaceRoot }
         // 目标已存在（含同名目录）时不介入：既有流程会正常读取或给出 IS_DIRECTORY。
         val parentListing = listingOf(parent, recursive = false, glob = requestedName, showHidden = showHidden, limit = 50)
@@ -1020,24 +1073,42 @@ internal class AgentLocalTools(
         ) ?: workspaceRoot
         val outcome = WorkspaceAutoFind.findIn(scanRoot, requestedName) { root, glob ->
             listingOf(root, recursive = true, glob = glob, showHidden = showHidden, limit = 200)
-        } ?: return AutoFindLookup.Proceed(args)
-        val candidates = outcome.candidates.take(WorkspaceAutoFind.MAX_CANDIDATES)
-        if (find && !noFail) {
-            val adoptTier = when (toolName) {
-                "write_file", "edit_file" -> WorkspaceAutoFind.WRITE_ADOPT_TIER
-                else -> WorkspaceAutoFind.READ_ADOPT_TIER
-            }
-            WorkspaceAutoFind.chooseAdoption(candidates, requestedName, adoptTier)?.let { adopted ->
-                return AutoFindLookup.Proceed(
-                    args = JSONObject(args.toString()).apply { put("path", adopted) },
-                    resolvedFrom = rawPath,
-                    resolvedPath = adopted,
-                )
+        }
+        if (outcome == null) {
+            // 枚举完全不可用（list_directory 抛错）：no_fail=true 时仍要给出结构化结论，
+            // 不能退化成裸 NOT_FOUND；find 单独开启时保持既有行为走正常错误流程（P2-3）。
+            return if (noFail) {
+                autoFindUnavailableResult(toolName, rawPath, requestedName, scanRoot)
+            } else {
+                AutoFindLookup.Proceed(args)
             }
         }
-        if (candidates.isEmpty()) return AutoFindLookup.Proceed(args)
+        val adoptTier = when (toolName) {
+            "write_file", "edit_file" -> WorkspaceAutoFind.WRITE_ADOPT_TIER
+            else -> WorkspaceAutoFind.READ_ADOPT_TIER
+        }
+        val candidates = outcome.candidates.take(WorkspaceAutoFind.MAX_CANDIDATES)
+        WorkspaceAutoFind.adoptionDecision(candidates, requestedName, adoptTier, find, noFail)?.let { adopted ->
+            return AutoFindLookup.Proceed(
+                args = JSONObject(args.toString()).apply { put("path", adopted) },
+                resolvedFrom = rawPath,
+                resolvedPath = adopted,
+            )
+        }
+        if (!WorkspaceAutoFind.shouldReturnCandidateList(candidates.size, noFail)) {
+            return AutoFindLookup.Proceed(args)
+        }
         return AutoFindLookup.Candidates(
-            autoFindCandidatesJson(toolName, rawPath, outcome.scanRoot, outcome.truncated, candidates, noFail),
+            autoFindCandidatesJson(
+                toolName = toolName,
+                requestedPath = rawPath,
+                scanRoot = outcome.scanRoot,
+                truncated = outcome.truncated,
+                candidates = candidates,
+                requestedName = requestedName,
+                adoptTier = adoptTier,
+                noFail = noFail,
+            ),
         )
     }
 
@@ -1059,39 +1130,98 @@ internal class AgentLocalTools(
         )
     }
 
+    /** no_fail 下工作区不可枚举时的结构化结论：FILE_CANDIDATES + count=0 + search_unavailable（P2-3）。 */
+    private fun autoFindUnavailableResult(
+        toolName: String,
+        requestedPath: String,
+        requestedName: String,
+        scanRoot: String,
+    ): AutoFindLookup.Candidates = AutoFindLookup.Candidates(
+        autoFindCandidatesJson(
+            toolName = toolName,
+            requestedPath = requestedPath,
+            scanRoot = scanRoot,
+            truncated = false,
+            candidates = emptyList(),
+            requestedName = requestedName,
+            adoptTier = WorkspaceAutoFind.READ_ADOPT_TIER,
+            noFail = true,
+            searchUnavailable = true,
+        ),
+    )
+
+    /**
+     * 候选列表（no_fail / 多候选）：每条候选带匹配层级与未自动采用原因，便于模型直接选择；
+     * no_fail=true 且零候选时同样返回该结构（count=0），不允许裸 NOT_FOUND（实测 P2-3）。
+     */
     private fun autoFindCandidatesJson(
         toolName: String,
         requestedPath: String,
         scanRoot: String,
         truncated: Boolean,
         candidates: List<String>,
+        requestedName: String,
+        adoptTier: Int,
         noFail: Boolean,
-    ): String = JSONObject()
-        .put("ok", false)
-        .put("tool", toolName)
-        .put("code", "FILE_CANDIDATES")
-        .put("requested_path", requestedPath)
-        .put("scan_root", scanRoot)
-        .put("count", candidates.size)
-        .put("candidates", JSONArray(candidates))
-        .put("truncated", truncated)
-        .put(
-            "message",
-            buildString {
-                append("目标不存在：").append(requestedPath).append("。")
-                append(
-                    if (noFail) {
-                        "已按 no_fail 返回工作区候选（不自动采用）："
-                    } else {
-                        "自动查找命中候选但无法唯一确定（未自动采用）："
-                    },
-                )
-                append(candidates.joinToString("；"))
-                append("。请选择正确路径后重新调用。")
-                if (truncated) append("枚举达到上限，候选可能不完整。")
-            },
-        )
-        .toString()
+        searchUnavailable: Boolean = false,
+    ): String {
+        val ranked = WorkspaceAutoFind.rankCandidates(candidates, requestedName)
+        val tierCounts = ranked
+            .mapNotNull { path -> WorkspaceAutoFind.nameTier(path.substringAfterLast('/'), requestedName) }
+            .groupingBy { it }
+            .eachCount()
+        val candidateDetails = JSONArray()
+        ranked.forEach { path ->
+            val tier = WorkspaceAutoFind.nameTier(path.substringAfterLast('/'), requestedName) ?: 0
+            candidateDetails.put(
+                JSONObject()
+                    .put("path", path)
+                    .put("tier", WorkspaceAutoFind.tierName(tier))
+                    .put(
+                        "reason_not_adopted",
+                        WorkspaceAutoFind.nonAdoptionReason(tier, tierCounts[tier] ?: 1, adoptTier, noFail),
+                    ),
+            )
+        }
+        return JSONObject()
+            .put("ok", false)
+            .put("tool", toolName)
+            .put("code", "FILE_CANDIDATES")
+            .put("requested_path", requestedPath)
+            .put("scan_root", scanRoot)
+            .put("count", ranked.size)
+            .put("candidates", candidateDetails)
+            .put("truncated", truncated)
+            .put("search_unavailable", searchUnavailable)
+            .put(
+                "message",
+                buildString {
+                    append("目标不存在：").append(requestedPath).append("。")
+                    when {
+                        searchUnavailable ->
+                            append(
+                                "工作区枚举不可用（Root 会话或目录读取失败），无法给出候选；" +
+                                    "请先用 list_directory 确认工作区可访问后重试，或直接传绝对路径。",
+                            )
+                        ranked.isEmpty() ->
+                            append("已按 no_fail 返回候选：未找到匹配的文件；请核对文件名，或先用 list_directory/search_code 确认工作区内容。")
+                        else -> {
+                            append(
+                                if (noFail) {
+                                    "已按 no_fail 返回工作区候选（不自动采用）："
+                                } else {
+                                    "自动查找命中候选但无法唯一确定（未自动采用）："
+                                },
+                            )
+                            append(ranked.joinToString("；"))
+                            append("。请选择正确路径后重新调用。")
+                        }
+                    }
+                    if (truncated) append("枚举达到上限，候选可能不完整。")
+                },
+            )
+            .toString()
+    }
 
     /** 自动采用后把"原路径 → 实际采用路径"回填进结果，避免模型继续按错误路径理解。 */
     private fun annotateAutoResolved(

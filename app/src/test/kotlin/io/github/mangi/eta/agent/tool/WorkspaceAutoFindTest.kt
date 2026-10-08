@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.tool
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -62,6 +63,56 @@ class WorkspaceAutoFindTest {
     }
 
     @Test
+    fun adoptionDecisionAdoptsUniqueHitOnlyForFindWithoutNoFail() {
+        val unique = listOf("/ws/a/Foo.kt", "/ws/b/Other.kt")
+        // find=true 且未开 no_fail：唯一完全一致直接采用。
+        assertEquals(
+            "/ws/a/Foo.kt",
+            WorkspaceAutoFind.adoptionDecision(unique, "Foo.kt", maxTier = 2, find = true, noFail = false),
+        )
+        // 多候选同档：不采用。
+        assertNull(
+            WorkspaceAutoFind.adoptionDecision(
+                listOf("/ws/a/Foo.kt", "/ws/b/Foo.kt"), "Foo.kt", maxTier = 2, find = true, noFail = false,
+            ),
+        )
+        // no_fail=true 优先于 find：即使唯一命中也不采用。
+        assertNull(WorkspaceAutoFind.adoptionDecision(unique, "Foo.kt", maxTier = 2, find = true, noFail = true))
+        // find 未开启：不采用。
+        assertNull(WorkspaceAutoFind.adoptionDecision(unique, "Foo.kt", maxTier = 2, find = false, noFail = false))
+        // 写/编辑严格层级（maxTier=1）：只匹配到归一化档位时不采用；读类（maxTier=2）可采用。
+        val normalizedOnly = listOf("/ws/a/agent_loop.kt")
+        assertNull(WorkspaceAutoFind.adoptionDecision(normalizedOnly, "AgentLoop.kt", maxTier = 1, find = true, noFail = false))
+        assertEquals(
+            "/ws/a/agent_loop.kt",
+            WorkspaceAutoFind.adoptionDecision(normalizedOnly, "AgentLoop.kt", maxTier = 2, find = true, noFail = false),
+        )
+    }
+
+    @Test
+    fun shouldReturnCandidateListIsAlwaysTrueForNoFailEvenWithZeroCandidates() {
+        assertTrue(WorkspaceAutoFind.shouldReturnCandidateList(3, noFail = false))
+        // no_fail=true 且零候选：仍要返回 count=0 的候选结构，不允许裸 NOT_FOUND。
+        assertTrue(WorkspaceAutoFind.shouldReturnCandidateList(0, noFail = true))
+        // find 单独开启且零候选：回落正常错误流程。
+        assertFalse(WorkspaceAutoFind.shouldReturnCandidateList(0, noFail = false))
+    }
+
+    @Test
+    fun nonAdoptionReasonExplainsTierAndAmbiguity() {
+        // no_fail 优先。
+        assertTrue(WorkspaceAutoFind.nonAdoptionReason(0, 1, 1, noFail = true).startsWith("no_fail=true"))
+        // 层级超过写/编辑采用上限。
+        assertTrue(WorkspaceAutoFind.nonAdoptionReason(2, 1, 1, noFail = false).contains("normalized"))
+        // 同层多候选。
+        assertTrue(WorkspaceAutoFind.nonAdoptionReason(0, 2, 1, noFail = false).contains("2"))
+        assertEquals("exact", WorkspaceAutoFind.tierName(0))
+        assertEquals("ignore_case", WorkspaceAutoFind.tierName(1))
+        assertEquals("normalized", WorkspaceAutoFind.tierName(2))
+        assertEquals("unknown", WorkspaceAutoFind.tierName(9))
+    }
+
+    @Test
     fun parseListingFilesKeepsOnlyFileEntriesAndJoinsRoot() {
         val text = "d sub\n- a.kt\n- sub/b.kt\n"
         assertEquals(
@@ -106,6 +157,15 @@ class WorkspaceAutoFindTest {
     @Test
     fun findInReturnsNullWhenListingUnavailable() {
         assertNull(WorkspaceAutoFind.findIn("/ws", "Foo.kt") { _, _ -> null })
+    }
+
+    @Test
+    fun findInReturnsEmptyOutcomeWhenNothingMatches() {
+        // 两轮都无匹配：返回空候选的 Outcome（非 null），由调用方决定是否回落原错误流程。
+        val outcome = WorkspaceAutoFind.findIn("/ws", "Foo.kt") { root, _ ->
+            WorkspaceAutoFind.Listing(ok = true, root = root, entriesText = "- other/Bar.kt\n", truncated = false)
+        }
+        assertEquals(emptyList<String>(), outcome?.candidates)
     }
 
     @Test

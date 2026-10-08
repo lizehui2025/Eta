@@ -4,6 +4,7 @@ import android.app.Application
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteException
 import io.github.mangi.eta.core.ColorOsMemoryBridgeProtocol
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -47,7 +48,12 @@ class ColorOsMemoryDatabaseQueryTest {
         database.execSQL("INSERT INTO bills VALUES ('deleted', 88, 'CNY', 0)")
 
         val result = JSONObject(
-            ColorOsMemoryDatabaseQuery.execute(database, ColorOsMemoryBridgeProtocol.OPERATION_SEARCH, JSONObject()),
+            // detail=true 保持既有完整结构；关联详情现在属于按需展开内容。
+            ColorOsMemoryDatabaseQuery.execute(
+                database,
+                ColorOsMemoryBridgeProtocol.OPERATION_SEARCH,
+                JSONObject().put("detail", true),
+            ),
         )
 
         assertTrue(result.getBoolean("ok"))
@@ -172,6 +178,137 @@ class ColorOsMemoryDatabaseQueryTest {
 
         assertSame(failure, thrown)
     }
+
+    @Test
+    fun memoriesDefaultToSummaryModeWithOmittedGroups() {
+        createRichMemories()
+        createBills()
+        val longText = "OCR全文".repeat(60)
+        val longAbstract = "这是一条关于快递的长摘要".repeat(20)
+        insertRichMemory(
+            id = "rich",
+            text = longText,
+            cleanup = longText,
+            abstractText = longAbstract,
+            screenshot = "https://cdn.example.com/memory.jpg?sig=TEMP_SIGNATURE",
+            extraData = "{\"nested\":{\"deep\":true}}",
+            subSceneData = "{\"scene\":1}",
+        )
+        database.execSQL("INSERT INTO bills VALUES ('rich', 5.0, 0)")
+
+        val result = JSONObject(
+            ColorOsMemoryDatabaseQuery.execute(database, ColorOsMemoryBridgeProtocol.OPERATION_SEARCH, JSONObject()),
+        )
+
+        assertTrue(result.getBoolean("ok"))
+        assertEquals("search_coloros_memories", result.getString("tool"))
+        assertTrue(result.getBoolean("summary_mode"))
+        assertTrue(result.getString("note").contains("摘要"))
+        val item = result.getJSONArray("items").getJSONObject(0)
+        assertEquals("rich", item.getString("memory_id"))
+        // 摘要：标题/来源/时间类小字段保留，全文、URL、嵌套 JSON 与关联详情默认不返回。
+        assertEquals("测试应用", item.getString("app_name"))
+        assertEquals(10, item.getInt("created_time"))
+        assertFalse(item.has("data_text"))
+        assertFalse(item.has("data_text_cleanup"))
+        assertFalse(item.has("data_abstract"))
+        assertFalse(item.has("screenshot"))
+        assertFalse(item.has("extra_data"))
+        assertFalse(item.has("sub_scene_data"))
+        assertFalse(item.has("details"))
+        val summary = item.getString("summary")
+        assertEquals(200 + 1, summary.length)
+        assertTrue(summary.endsWith("…"))
+        val omitted = item.getJSONArray("omitted").stringValues().toSet()
+        assertTrue("full_text" in omitted)
+        assertTrue("image_urls" in omitted)
+        assertTrue("extra_data" in omitted)
+        assertTrue("details" in omitted)
+    }
+
+    @Test
+    fun memoriesExpansionFlagsReturnOnlyRequestedGroups() {
+        createRichMemories()
+        createBills()
+        insertRichMemory(
+            id = "rich",
+            text = "OCR正文",
+            cleanup = "清洗后的正文",
+            abstractText = "短摘要",
+            screenshot = "https://cdn.example.com/memory.jpg?sig=TEMP_SIGNATURE",
+            extraData = "{\"a\":1}",
+            subSceneData = "{\"b\":2}",
+        )
+        database.execSQL("INSERT INTO bills VALUES ('rich', 5.0, 0)")
+
+        val partial = JSONObject(
+            ColorOsMemoryDatabaseQuery.execute(
+                database,
+                ColorOsMemoryBridgeProtocol.OPERATION_SEARCH,
+                JSONObject().put("include_full_text", true).put("include_image_urls", true),
+            ),
+        )
+
+        assertTrue(partial.getBoolean("summary_mode"))
+        val partialItem = partial.getJSONArray("items").getJSONObject(0)
+        assertEquals("OCR正文", partialItem.getString("data_text"))
+        assertEquals("清洗后的正文", partialItem.getString("data_text_cleanup"))
+        assertEquals("https://cdn.example.com/memory.jpg?sig=TEMP_SIGNATURE", partialItem.getString("screenshot"))
+        assertFalse(partialItem.has("extra_data"))
+        assertFalse(partialItem.has("details"))
+        val partialOmitted = partialItem.getJSONArray("omitted").stringValues().toSet()
+        assertFalse("full_text" in partialOmitted)
+        assertFalse("image_urls" in partialOmitted)
+        assertTrue("extra_data" in partialOmitted)
+        assertTrue("details" in partialOmitted)
+
+        val full = JSONObject(
+            ColorOsMemoryDatabaseQuery.execute(
+                database,
+                ColorOsMemoryBridgeProtocol.OPERATION_SEARCH,
+                JSONObject().put("detail", true),
+            ),
+        )
+
+        assertFalse(full.has("summary_mode"))
+        val fullItem = full.getJSONArray("items").getJSONObject(0)
+        assertEquals("OCR正文", fullItem.getString("data_text"))
+        assertEquals("短摘要", fullItem.getString("data_abstract"))
+        assertEquals("{\"a\":1}", fullItem.getString("extra_data"))
+        assertFalse(fullItem.has("omitted"))
+        assertEquals(1, fullItem.getJSONObject("details").getJSONArray("bills").length())
+    }
+
+    private fun createRichMemories() {
+        database.execSQL(
+            "CREATE TABLE memories (memory_id TEXT, data_text TEXT, data_text_cleanup TEXT, data_abstract TEXT, " +
+                "screenshot TEXT, audio_file TEXT, deeplink TEXT, extra_data TEXT, sub_scene_data TEXT, " +
+                "app_name TEXT, scene_name TEXT, image_count INTEGER, created_time INTEGER, deleted INTEGER, " +
+                "recycle_time INTEGER)",
+        )
+    }
+
+    private fun createBills() {
+        database.execSQL("CREATE TABLE bills (associate_memory_id TEXT, amount REAL, status INTEGER)")
+    }
+
+    private fun insertRichMemory(
+        id: String,
+        text: String,
+        cleanup: String,
+        abstractText: String,
+        screenshot: String,
+        extraData: String,
+        subSceneData: String,
+    ) {
+        database.execSQL(
+            "INSERT INTO memories VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, '测试应用', '快递', 2, 10, 0, 0)",
+            arrayOf<Any>(id, text, cleanup, abstractText, screenshot, extraData, subSceneData),
+        )
+    }
+
+    private fun JSONArray.stringValues(): List<String> =
+        (0 until length()).map { getString(it) }
 
     private fun createMemories() {
         database.execSQL(

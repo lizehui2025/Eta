@@ -590,20 +590,29 @@ internal class AgentStructuredDeviceTools(
     private fun getLogcat(args: JSONObject): String {
         val maxLines = args.optInt("max_lines", 200).coerceIn(20, 500)
         val query = args.optString("query").trim()
+        // query 提供时扩大扫描窗口：只在最近 max_lines 行内过滤会把“没扫到”误当成“系统没有相关日志”。
+        val scanLines = if (query.isBlank()) maxLines else maxOf(LOGCAT_QUERY_SCAN_LINES, maxLines)
         val result = root.execute(
-            "logcat -d -v threadtime -t $maxLines",
-            maxOutputBytes = 512 * 1024,
+            "logcat -d -v threadtime -t $scanLines",
+            maxOutputBytes = if (query.isBlank()) LOGCAT_MAX_OUTPUT_BYTES else LOGCAT_QUERY_MAX_OUTPUT_BYTES,
         )
         if (!result.ok) return rootError(result)
-        val lines = result.stdout.lineSequence()
-            .filter { query.isBlank() || it.contains(query, ignoreCase = true) }
-            .take(maxLines)
-            .toList()
-        return ok("get_logcat")
-            .put("lines", JSONArray(lines))
-            .put("count", lines.size)
+        val window = AgentLogcatWindow.scan(result.stdout, query, maxLines)
+        val payload = ok("get_logcat")
+            .put("lines", JSONArray(window.lines))
+            .put("count", window.lines.size)
             .put("truncated", result.truncated)
-            .toString()
+            .put("scanned_lines", window.scannedLines)
+            .put("matched", window.matched)
+        // 明确匹配只发生在已扫描窗口内，避免把 0 命中解读为“系统无相关日志”。
+        if (query.isNotBlank()) {
+            payload.put(
+                "note",
+                "query 仅在最近扫描的 ${window.scannedLines} 行日志内匹配（扫描窗口上限 $scanLines 行）；" +
+                    "0 命中不代表系统没有相关日志，可在复现问题后重试或改用更精确的关键词。",
+            )
+        }
+        return payload.toString()
     }
 
     private fun rootMutationResult(
@@ -752,6 +761,13 @@ internal class AgentStructuredDeviceTools(
         /** 通知扩展字段正则缓存，避免每次调用重复编译同一个 key 的 Pattern。 */
         val NOTIFICATION_EXTRA_PATTERNS = ConcurrentHashMap<String, Regex>()
 
+        /** get_logcat：无 query 时的输出上限（与既有行为一致）。 */
+        const val LOGCAT_MAX_OUTPUT_BYTES = 512 * 1024
+
+        /** get_logcat：有 query 时扫描最近 2000 行（杏宽窗口但耗时/内存有界），输出上限相应提高。 */
+        const val LOGCAT_QUERY_SCAN_LINES = 2_000
+        const val LOGCAT_QUERY_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
+
         val PACKAGE_NAME = Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
         val NETWORK_BLOCK = Regex("<Network>.*?</Network>", setOf(RegexOption.DOT_MATCHES_ALL))
         val XML_SSID = Regex("""<string name="SSID">(.*?)</string>""")
@@ -767,5 +783,20 @@ internal class AgentStructuredDeviceTools(
         )
         val WIFI_STATUS_SSID = Regex("""\bSSID:\s*([^,\r\n]+)""")
         val WIFI_STATUS_RSSI = Regex("""\bRSSI:\s*(-?\d+)""")
+    }
+}
+
+/**
+ * get_logcat 的扫描窗口过滤：扫描行数与返回行数分离（query 在扩大后的窗口内匹配），
+ * 并把 scanned/matched 统计回给调用方；独立成纯函数便于单测覆盖，不触发 Root 进程。
+ */
+internal object AgentLogcatWindow {
+    data class Scan(val lines: List<String>, val scannedLines: Int, val matched: Int)
+
+    fun scan(output: String, query: String, maxLines: Int): Scan {
+        val window = output.lineSequence().filter { it.isNotEmpty() }.toList()
+        val matching = if (query.isBlank()) window else window.filter { it.contains(query, ignoreCase = true) }
+        // 命中多于返回上限时保留最新的若干行（logcat 按时间递增）。
+        return Scan(matching.takeLast(maxLines), window.size, matching.size)
     }
 }

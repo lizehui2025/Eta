@@ -41,6 +41,27 @@ class AgentDeviceToolCatalogTest {
         assertTrue("app_state_control" in actions)
     }
 
+    @Test
+    fun colorOsMemoriesSchemaDeclaresOnDemandExpansionSwitches() {
+        val tools = AgentToolCatalog.build(
+            terminalTools = false,
+            browserTools = false,
+            deviceDirectTools = false,
+            deviceSensitiveReadTools = true,
+            deviceSensitiveActionTools = false,
+        )
+        val properties = (0 until tools.length())
+            .map { tools.getJSONObject(it).getJSONObject("function") }
+            .first { it.getString("name") == "search_coloros_memories" }
+            .getJSONObject("parameters")
+            .getJSONObject("properties")
+        // 未在 schema 声明的字段会被参数宽容化剔除，摘要开关必须显式声明。
+        listOf(
+            "query", "limit", "detail", "include_full_text", "include_image_urls",
+            "include_extra_data", "include_details",
+        ).forEach { name -> assertTrue(name, properties.has(name)) }
+    }
+
     private fun names(
         direct: Boolean,
         reads: Boolean,

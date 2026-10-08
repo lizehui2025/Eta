@@ -51,10 +51,14 @@ internal class AgentPersonalDataTools(
         projection = listOf("_id", "title", "_display_name", "artist", "album", "relative_path", "duration", "date_modified", "_size"),
         sort = "date_modified DESC",
         searchableColumns = listOf("title", "_display_name", "artist", "relative_path"),
-        fixedWhere = if (recordingsOnly) "relative_path LIKE '%Record%'" else null,
+        // 录音应用产物路径含 Record/录音；两工具用互补筛选：search_audio 排除录音目录，search_recordings 只取录音目录。
+        fixedWhere = if (recordingsOnly) AUDIO_RECORDING_PATH_FILTER else AUDIO_NON_RECORDING_PATH_FILTER,
         args = args,
     ) { row ->
         row.put("uri", "content://media/external/audio/media/${row.optString("_id")}")
+        // 标注命中类别与数据源，便于调用方区分音乐/语音与录音应用产物（两者共用媒体库数据源）。
+        row.put("kind", if (recordingsOnly) "recording" else "audio")
+        row.put("source", "media_store")
     }
 
     private fun searchFiles(args: JSONObject): AgentModelClient.ToolResult = query(
@@ -156,7 +160,7 @@ internal class AgentPersonalDataTools(
         directory = QQ_CHAT_IMAGES_DIRECTORY,
         pathFilter = "\\( -path '*/chatimg/*' -o -path '*/chatraw/*' -o -path '*/chatthumb/*' \\)",
         unavailableCode = "QQ_CHAT_IMAGES_UNAVAILABLE",
-        unavailableMessage = "QQ 聊天图片缓存暂时不可访问",
+        unavailableMessage = "QQ 聊天图片缓存不可访问：可能未安装 QQ、缓存目录不存在或 Root 权限不足；请确认 QQ 已接收过图片后重试",
         args = args,
         kind = ::qqImageKind,
     )
@@ -166,7 +170,7 @@ internal class AgentPersonalDataTools(
         directory = WECHAT_CHAT_IMAGES_DIRECTORY,
         pathFilter = "-path '*/image/*'",
         unavailableCode = "WECHAT_CHAT_IMAGES_UNAVAILABLE",
-        unavailableMessage = "微信聊天图片缓存暂时不可访问",
+        unavailableMessage = "微信聊天图片缓存不可访问：可能未安装微信、缓存目录不存在或 Root 权限不足；请确认微信已接收过图片后重试",
         args = args,
         kind = { "image" },
     )
@@ -232,7 +236,8 @@ internal class AgentPersonalDataTools(
         }
         val result = root.execute(command, timeoutMillis = QUERY_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES)
         if (!result.ok || PersonalDataContentParser.hasProviderFailure(result.stdout, result.stderr)) {
-            return sensitive(error(rootErrorCode(result), "个人数据源暂时不可访问"))
+            // 错误码保持不变；message 说明可能原因与补救方向（权限/来源不存在/结构不匹配/超时）。
+            return sensitive(error(rootErrorCode(result), personalDataFailureMessage(result)))
         }
         val items = PersonalDataContentParser.parseRows(result.stdout, projection)
             .take(limit)
@@ -294,6 +299,19 @@ internal class AgentPersonalDataTools(
         else -> "PERSONAL_DATA_UNAVAILABLE"
     }
 
+    /** 个人数据源失败时的可行动提示：区分 Root 缺失、查询超时与来源不存在/未授权/结构不匹配。 */
+    private fun personalDataFailureMessage(result: BoundedRootCommandExecutor.Result): String = when {
+        result.errorCode == "ROOT_UNAVAILABLE" || result.errorCode == "ROOT_REQUIRED" ->
+            "个人数据源需要 Root 权限：请先授予 Root 后重试"
+        result.timedOut ->
+            "个人数据查询超时：数据源响应过慢，可缩小 query 或降低 limit 后重试"
+        result.errorCode.isNotBlank() ->
+            "个人数据源执行失败（${result.errorCode}）：请确认数据来源应用可用后重试"
+        else ->
+            "个人数据源暂时不可访问：可能对应应用未安装或数据不存在、未授权或系统数据结构不匹配；" +
+                "请确认来源应用与权限后重试"
+    }
+
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
     private fun error(code: String, message: String): String =
@@ -313,6 +331,15 @@ internal class AgentPersonalDataTools(
     }
 
 }
+
+/**
+ * search_audio / search_recordings 的路径筛选（媒体库 relative_path）：
+ * 录音应用产物（ColorOS 录音、通话录音等）路径含 Record/录音；两工具取互补条件，语义不再重叠。
+ */
+internal const val AUDIO_RECORDING_PATH_FILTER =
+    "relative_path LIKE '%Record%' OR relative_path LIKE '%录音%'"
+internal const val AUDIO_NON_RECORDING_PATH_FILTER =
+    "COALESCE(relative_path,'') NOT LIKE '%Record%' AND COALESCE(relative_path,'') NOT LIKE '%录音%'"
 
 internal object PersonalDataContentParser {
     fun hasProviderFailure(stdout: String, stderr: String): Boolean =

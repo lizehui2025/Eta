@@ -27,7 +27,13 @@ internal class AgentPersonalContextTools(private val context: Context) {
         "recent_app_activity" -> sensitive(recentAppActivity(args))
         "app_usage_summary" -> sensitive(appUsageSummary(args))
         "get_current_location" -> sensitive(currentLocation())
-        "get_device_environment" -> sensitive(deviceEnvironment())
+        "get_device_environment" -> sensitive(deviceEnvironment(args))
+        // 规范目录里的 device_info 若带着 operation 直达本层，同样按规范身份回显；其余 operation 交给上层分派。
+        "device_info" -> if (args.optString("operation").equals("environment", ignoreCase = true)) {
+            sensitive(deviceEnvironment(args, canonicalEntry = true))
+        } else {
+            null
+        }
         else -> null
     }
 
@@ -121,7 +127,16 @@ internal class AgentPersonalContextTools(private val context: Context) {
         )
     }
 
-    private fun deviceEnvironment(): String {
+    /**
+     * 读取设备环境。device_info(operation=environment) 与 get_device_environment 共用本实现，
+     * 但回显各自身份：canonicalEntry=true 时返回 tool=device_info + operation=environment，
+     * 旧入口返回 tool=get_device_environment + operation=environment，调用方可确认实际命中的入口。
+     */
+    private fun deviceEnvironment(
+        args: JSONObject,
+        // 规范分派会剥掉 operation；若调用方（或后续保留 operation 的分派）把请求透传进来，视为规范入口。
+        canonicalEntry: Boolean = args.optString("operation").equals("environment", ignoreCase = true),
+    ): String {
         val audio = context.getSystemService(AudioManager::class.java)
         val displays = context.getSystemService(DisplayManager::class.java)?.displays.orEmpty()
         val power = context.getSystemService(PowerManager::class.java)
@@ -133,7 +148,8 @@ internal class AgentPersonalContextTools(private val context: Context) {
                 .put("product_name", device.productName?.toString())
                 .put("is_sink", device.isSink)
         }
-        return ok("get_device_environment")
+        return ok(if (canonicalEntry) "device_info" else "get_device_environment")
+            .put("operation", "environment")
             .put("interactive", power?.isInteractive)
             .put("device_locked", keyguard?.isDeviceLocked)
             .put("ringer_mode", audio?.ringerMode?.let(::ringerMode))
