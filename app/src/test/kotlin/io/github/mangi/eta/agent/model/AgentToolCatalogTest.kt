@@ -289,7 +289,8 @@ class AgentToolCatalogTest {
         assertTrue(properties.has("glob"))
         assertTrue(properties.has("recursive"))
         assertTrue(function.getString("description").contains("读取、写入、编辑、搜索"))
-        assertEquals(listOf("read", "write", "edit", "search", "list"),
+        // delete 是有意新增的 file_ops 操作（校验/映射/硬拦/子代理拦截已全链路登记）。
+        assertEquals(listOf("read", "write", "edit", "search", "list", "delete"),
             properties.getJSONObject("operation").getJSONArray("enum").stringValues())
     }
 

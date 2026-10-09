@@ -228,11 +228,15 @@ internal object AgentWebSearchResults {
             }
             break
         }
+        val totalChars = items.sumOf { it.charCount() }
+        val returnedChars = returned.sumOf { it.charCount() }
         return BudgetedResults(
             items = returned,
-            truncated = returned.size < items.size,
-            totalChars = items.sumOf { it.charCount() },
-            returnedChars = returned.sumOf { it.charCount() },
+            // 条目被丢弃或首条摘要被截断都算截断：只看条目数会漏掉“唯一候选被截断”的情况，
+            // 导致 total_chars/returned_chars 已显示内容被裁剪、truncated 与 note 却缺失。
+            truncated = returned.size < items.size || returnedChars < totalChars,
+            totalChars = totalChars,
+            returnedChars = returnedChars,
         )
     }
 

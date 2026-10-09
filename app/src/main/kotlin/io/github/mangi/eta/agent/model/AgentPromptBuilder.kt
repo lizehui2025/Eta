@@ -124,7 +124,9 @@ internal object AgentPromptBuilder {
                     "只有任务需要读取或汇总屏幕信息、后续目标或界面状态未知、工具报告节点过期或结果不确定，" +
                     "以及任务结束前确实需要确认最终结果时，才观察屏幕；后续操作依赖特定文本或应用出现时使用 ui_action（action=wait，condition=text 或 package）。" +
                     "屏幕观察与 GUI 操作前会确认 Eta 无障碍服务；只有系统保护后端可用时才会请求有限重绑。" +
-                    "若工具返回 ACCESSIBILITY_UNAVAILABLE、ACCESSIBILITY_PROTECTION_UNAVAILABLE 或 ACCESSIBILITY_REPAIR_TIMEOUT，说明动作未执行，" +
+                    "无障碍不可用但已授予 Root 时自动降级放行：观察结果会标注 degraded=true（节点来自 uiautomator、截图/按键走 Root），" +
+                    "replace_text/clear_text 等需要无障碍节点句柄的动作不可用，且界面变动即 STALE_NODE，需重新观察后再操作。" +
+                    "若工具返回 ACCESSIBILITY_UNAVAILABLE、ACCESSIBILITY_PROTECTION_UNAVAILABLE 或 ACCESSIBILITY_REPAIR_TIMEOUT，说明无障碍与 Root 均不可用、动作未执行，" +
                     "不要改用坐标或 Shell 重放 GUI 动作。"
             )
         )
