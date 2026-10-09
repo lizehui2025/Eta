@@ -47,6 +47,90 @@ internal object TerminalRuntime {
     fun workspace(identity: String): String =
         if (identity == "root") HOST_WORKSPACE_PATH else userWorkspacePath
 
+    /** 每个 Agent run 的独立工作区目录名：`<工作区根>/sessions/<runId>`。 */
+    const val SESSIONS_DIR = "sessions"
+
+    /** 保留的最近 run 工作区数量；更旧的在下一次开 run 时清理。 */
+    const val MAX_RETAINED_SESSION_WORKSPACES = 8
+
+    @Volatile private var agentWorkspace: String? = null
+
+    /** 当前 run 的干净工作区；没有活跃 run 时为 null。 */
+    fun activeAgentWorkspace(): String? = agentWorkspace
+
+    /**
+     * 工具的相对路径基准根：有活跃 run 时用它的干净工作区，否则回退全局工作区根。
+     * 回退保证没有 run 上下文（如设置页自检、旧调用点）时行为与过去一致。
+     */
+    fun currentToolWorkspaceRoot(): String = agentWorkspace ?: currentLinuxWorkspaceRoot()
+
+    /**
+     * 开 run：算出该 run 的工作区、尽力建目录（宿主工作区由 Root 通道的 payload 补建，
+     * App 进程对 /data/local/tmp 无写权限）并清理更旧的工作区，随后把工具基准切到它。
+     */
+    fun beginAgentWorkspace(runId: String): String {
+        val workspaceRoot = currentLinuxWorkspaceRoot()
+        val path = sessionWorkspacePath(workspaceRoot, runId)
+        runCatching {
+            val dir = File(path)
+            dir.mkdirs()
+            pruneSessionWorkspaceDirs(File(sessionsDirPath(workspaceRoot)), dir.name)
+        }
+        agentWorkspace = path
+        return path
+    }
+
+    /** run 结束：只清理属于该 run 的基准，避免误清已经切到新 run 的状态。 */
+    fun endAgentWorkspace(runId: String) {
+        val current = agentWorkspace ?: return
+        if (current == sessionWorkspacePath(currentLinuxWorkspaceRoot(), runId)) agentWorkspace = null
+    }
+
+    /** `<工作区根>/sessions`；根为空时退化为 `/sessions`。 */
+    fun sessionsDirPath(workspaceRoot: String): String {
+        val base = workspaceRoot.trimEnd('/')
+        return if (base.isEmpty()) "/$SESSIONS_DIR" else "$base/$SESSIONS_DIR"
+    }
+
+    /** run 工作区绝对路径（纯函数）。 */
+    fun sessionWorkspacePath(workspaceRoot: String, runId: String): String =
+        "${sessionsDirPath(workspaceRoot)}/${safeRunId(runId)}"
+
+    /** runId 只保留文件系统安全字符再截断：防路径穿越、空白与超长目录名。 */
+    fun safeRunId(runId: String): String =
+        runId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+            .take(64)
+            .ifBlank { "run" }
+
+    /**
+     * 纯判定：除当前工作区外按 mtime 倒序保留 `keep - 1` 个，返回待删除目录名。
+     * 当前工作区永不删除；`keep` 不为正时不返回当前工作区。
+     */
+    fun pruneSessionWorkspaces(
+        entries: List<Pair<String, Long>>,
+        keep: Int,
+        activeName: String,
+    ): List<String> {
+        // 现存目录数已在保留预算内（含当前工作区那一个名额）：不需要清理。
+        if (entries.size <= keep) return emptyList()
+        return entries.asSequence()
+            .filter { it.first != activeName }
+            .sortedWith(compareByDescending<Pair<String, Long>> { it.second }.thenBy { it.first })
+            .drop((keep - 1).coerceAtLeast(0))
+            .map { it.first }
+            .toList()
+    }
+
+    /** 按数量上限清理旧工作区；目录不可写（宿主工作区属 Root）时静默跳过，由 Root 通道处理。 */
+    private fun pruneSessionWorkspaceDirs(sessionsDir: File, activeName: String) {
+        val entries = sessionsDir.listFiles().orEmpty()
+            .filter { it.isDirectory }
+            .map { it.name to it.lastModified() }
+        if (entries.isEmpty()) return
+        pruneSessionWorkspaces(entries, MAX_RETAINED_SESSION_WORKSPACES, activeName)
+            .forEach { name -> File(sessionsDir, name).deleteRecursively() }
+    }
+
     /**
      * 当前 Linux 工具环境里 `/workspace` 对应的 Android 侧根路径。
      * 与终端“选择的环境”同来源（LinuxEnvironmentSettingsRepository + LinuxEnvironmentPaths 的

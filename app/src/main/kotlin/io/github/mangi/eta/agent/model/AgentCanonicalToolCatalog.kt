@@ -168,13 +168,14 @@ internal object AgentCanonicalToolCatalog {
     private fun fileOps(): JSONObject = AgentToolSchema.function(
         "file_ops",
         "在当前授权范围内读取、写入、编辑、搜索、列出或删除文件/目录。使用 Linux/Android 终端时仍遵循运行环境说明。" +
-            "删除仅支持文件与空目录，非空目录需显式 recursive=true；相对路径按当前工作区根解析（与 /workspace 同一基准）。",
+            "删除仅支持文件与空目录，非空目录需显式 recursive=true；相对路径按当前 run 工作区根解析" +
+            "（每个 run 独立、开跑即为空目录；与 /workspace 同一基准）。",
         objectSchema(
             "operation" to enum(
                 "文件操作类型（必填，每次调用必须显式提供）：read=读取 / write=写入 / edit=编辑 / search=搜索 / list=列目录 / delete=删除文件或空目录",
                 "read", "write", "edit", "search", "list", "delete",
             ),
-            "path" to string("文件或目录路径；相对路径按当前工作区根解析（与 /workspace 同一基准），结果带 resolved_path 回显", 4_000),
+            "path" to string("文件或目录路径；相对路径按当前 run 工作区根解析（每个 run 独立、开跑即为空目录；与 /workspace 同一基准），结果带 resolved_path 回显", 4_000),
             "query" to string("搜索文本或正则", 2_000),
             "pattern" to string("代码搜索正则（兼容底层搜索器）", 2_000),
             "max_results" to integer("最多搜索结果", 1, 500),
@@ -193,6 +194,10 @@ internal object AgentCanonicalToolCatalog {
             "no_fail" to bool(
                 "可选、默认关闭，仅 read/write/edit：目标不存在时只返回候选列表供下一步选择，" +
                     "不自动采用任何候选（优先级高于 find）；零候选时也返回 count=0 的候选结构，不会裸报 NOT_FOUND。",
+            ),
+            "include_mounts" to bool(
+                "可选、默认关闭，仅 search：把 /workspace/mounts/<name> 下的共享挂载一并搜索。" +
+                    "默认只搜索指定目录（挂载可能很大，避免拖慢搜索）；结果里会回显 searched_roots 与 mounts_searched。",
             ),
             "offset_bytes" to integerValue("读取偏移字节数"),
             "max_bytes" to integerValue("最多读取字节数"),

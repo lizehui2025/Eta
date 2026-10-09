@@ -311,7 +311,7 @@ internal object AgentTerminalToolCatalog {
                                 .put(
                                     "path",
                                     JSONObject().put("type", "string")
-                                        .put("description", "搜索根目录，默认使用终端工作区。")
+                                        .put("description", "搜索根目录，默认使用当前 run 的工作区（每次 run 独立、开跑即为空目录）。")
                                 )
                                 .put(
                                     "glob",

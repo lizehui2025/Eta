@@ -39,6 +39,7 @@ import io.github.mangi.eta.agent.terminal.LinuxEnvironmentPaths
 import io.github.mangi.eta.agent.terminal.terminalEnvironment
 import io.github.mangi.eta.agent.terminal.RootShellTerminalController
 import io.github.mangi.eta.agent.terminal.SharedFolderMounts
+import io.github.mangi.eta.agent.terminal.TerminalRuntime
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.core.AgentLogger
 import io.github.mangi.eta.core.HookSupport
@@ -957,17 +958,57 @@ internal class AgentLocalTools(
         )
 
     private fun listDirectory(args: JSONObject): String =
-        withResolvedPathEcho(
-            terminalController.listDirectory(
-                path = args.optString("path"),
-                showHidden = args.optBoolean("show_hidden", false),
-                limit = args.optInt("limit", 80),
-                offset = args.optInt("offset", 0),
-                glob = args.optString("glob"),
-                recursive = args.optBoolean("recursive", false),
+        withWorkspaceMountsView(
+            withResolvedPathEcho(
+                terminalController.listDirectory(
+                    path = args.optString("path"),
+                    showHidden = args.optBoolean("show_hidden", false),
+                    limit = args.optInt("limit", 80),
+                    offset = args.optInt("offset", 0),
+                    glob = args.optString("glob"),
+                    recursive = args.optBoolean("recursive", false),
+                ),
+                args.optString("path"),
             ),
-            args.optString("path"),
         )
+
+    /**
+     * 列目录或搜索落在工作区根（当前 run 的干净工作区 / 全局工作区）时，把共享挂载一并暴露出来：
+     * 结果里直接给出 /workspace/mounts/<name> 与对应 Android 源，模型不必猜挂载里有什么。
+     */
+    private fun withWorkspaceMountsView(content: String): String {
+        val json = runCatching { JSONObject(content) }.getOrNull() ?: return content
+        if (!json.optBoolean("ok")) return content
+        val resolved = json.optString("resolved_path").ifBlank { json.optString("path") }.trimEnd('/')
+        if (resolved.isBlank() || !isWorkspaceRoot(resolved)) return content
+        val mounts = runCatching { SharedFolderMounts.current() }.getOrDefault(emptyList())
+        val view = JSONArray()
+        mounts.forEach { mount ->
+            view.put(
+                JSONObject()
+                    .put("name", mount.name)
+                    .put("path", "${SharedFolderMounts.LINUX_MOUNTS_ROOT}/${mount.name}")
+                    .put("source", mount.sourcePath),
+            )
+        }
+        json.put("mounts", view)
+            .put(
+                "mounts_note",
+                if (mounts.isEmpty()) {
+                    "当前未配置共享文件夹，/workspace/mounts 下没有挂载。"
+                } else {
+                    "共享挂载用 /workspace/mounts/<name>/... 访问（代码库通常就在这里）；" +
+                        "要连同挂载一起搜索，在 file_ops search 传 include_mounts=true。"
+                },
+            )
+        return json.toString()
+    }
+
+    private fun isWorkspaceRoot(path: String): Boolean =
+        listOf(
+            runCatching { TerminalRuntime.currentToolWorkspaceRoot() }.getOrNull(),
+            runCatching { TerminalRuntime.currentLinuxWorkspaceRoot() }.getOrNull(),
+        ).filterNotNull().any { it.trimEnd('/') == path }
 
     private fun editFile(args: JSONObject): String =
         withResolvedPathEcho(
@@ -981,14 +1022,17 @@ internal class AgentLocalTools(
         )
 
     private fun searchCode(args: JSONObject): String =
-        withResolvedPathEcho(
-            terminalController.searchCode(
-                rootPath = args.optString("path"),
-                pattern = args.optString("pattern"),
-                glob = args.optString("glob"),
-                maxResults = args.optInt("max_results", AgentCodeSearch.MAX_RESULTS),
+        withWorkspaceMountsView(
+            withResolvedPathEcho(
+                terminalController.searchCode(
+                    rootPath = args.optString("path"),
+                    pattern = args.optString("pattern"),
+                    glob = args.optString("glob"),
+                    maxResults = args.optInt("max_results", AgentCodeSearch.MAX_RESULTS),
+                    includeMounts = args.optBoolean("include_mounts", false),
+                ),
+                args.optString("path"),
             ),
-            args.optString("path"),
         )
 
     private fun deletePath(args: JSONObject): String =

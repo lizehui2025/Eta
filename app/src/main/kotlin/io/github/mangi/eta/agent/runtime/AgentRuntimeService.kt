@@ -38,6 +38,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityService
 import io.github.mangi.eta.agent.device.RootAccess
+import io.github.mangi.eta.agent.terminal.TerminalRuntime
 import io.github.mangi.eta.agent.media.AgentImageCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.overlay.AgentHapticFeedback
@@ -393,6 +394,9 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         activeSession = session
         refreshKeepAlive()
         lastCompletedRunContext = null
+        // 每个 run 一个干净工作区：目录名取 runId，工具的相对路径基准随之切换；
+        // 宿主工作区由 Root 通道在 payload 里补建（App 进程无写权限）。
+        runCatching { TerminalRuntime.beginAgentWorkspace(request.runId) }
         runCatching {
             startService(Intent(this, AgentRuntimeService::class.java).setAction(ACTION_KEEP_ALIVE))
         }.onFailure { throwable ->
@@ -419,10 +423,13 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             try {
                 executeRun(session, request)
             } finally {
+                // run 结束即释放工具基准：下一次 run 会切到它自己的干净工作区。
+                TerminalRuntime.endAgentWorkspace(request.runId)
                 AgentExecutionService.release("run:${request.runId}")
             }
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) {
+            TerminalRuntime.endAgentWorkspace(request.runId)
             AgentExecutionService.release("run:${request.runId}")
             session.complete(
                 AgentRuntimeWire.RunResult(

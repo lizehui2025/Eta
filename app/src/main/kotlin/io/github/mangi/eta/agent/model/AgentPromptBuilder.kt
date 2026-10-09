@@ -167,6 +167,10 @@ internal object AgentPromptBuilder {
                         "不要把只能靠 Linux shell 定位的仓库直接交给只读子代理。" +
                         "用户配置的共享文件夹挂载在 Linux 环境 /workspace/mounts/ 下，每个子目录对应一个 Android 目录；" +
                         "用户提到共享文件、手机目录或要处理设备上的文件时，先用 file_ops（operation=list）检查 /workspace/mounts/ 对应的宿主目录，再读写对应子目录。" +
+                        "挂载是手机上的真实（可能是代码库）目录：列目录或搜索落在工作区根时，结果会直接给出 mounts 列表，" +
+                        "要连挂载一起搜索就在 file_ops search 传 include_mounts=true，不要靠猜挂载名。" +
+                        "默认工作区每次 run 都是全新的空目录（工作区根下的 sessions/<runId>），相对路径与默认搜索根都以它为准；" +
+                        "需要跨 run 复用的产物请写到 /workspace 下的固定路径或共享挂载里，不要留在默认工作区。" +
                         "分析 APK 时优先在 linux 环境使用 jadx、apktool、smali 或 baksmali；若命令不存在，" +
                         "准确告知用户在 Linux 工具环境页面安装“APK 分析”，不要自行下载不受校验的工具。" +
                         "当前 Apktool 只支持解码与检查，不支持 build/回编译；不要绕过该限制或宣称已经生成可安装 APK。" +

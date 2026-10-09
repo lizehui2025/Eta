@@ -302,6 +302,27 @@ internal class ShellProcessSupervisor(
             "eta_mount_optional ${shellQuote(mount.sourcePath)} " +
                 "\"\$eta_rootfs${SharedFolderMounts.LINUX_MOUNTS_ROOT}/${mount.name}\" bind"
         }
+        // 当前 run 的干净工作区由 Root 通道补建（App 进程对宿主工作区没有写权限），
+        // 并顺带按数量上限清理更旧的 run 工作区：当前工作区与不合规目录名都跳过（宁可不删）。
+        // 只有落在宿主工作区里的 run 工作区需要 Root 通道补建：App 进程建不了 /data/local/tmp；
+        // 私有工作区由 App 直接建，免得 Root 建出 root 属主的目录挡住后续写入。
+        val hostSessionsDir = TerminalRuntime.sessionsDirPath(TerminalRuntime.HOST_WORKSPACE_PATH)
+        val runWorkspace = TerminalRuntime.activeAgentWorkspace()
+            ?.takeIf { it.startsWith("$hostSessionsDir/") }
+        val runWorkspaceBlock = if (runWorkspace == null) {
+            ""
+        } else {
+            val activeName = TerminalRuntime.safeRunId(runWorkspace.substringAfterLast('/'))
+            "            \"${'$'}eta_busybox\" mkdir -p ${shellQuote(runWorkspace)} || true\n" +
+                "            eta_sessions=${shellQuote(hostSessionsDir)}\n" +
+                "            if [ -d \"${'$'}eta_sessions\" ]; then\n" +
+                "              \"${'$'}eta_busybox\" ls -1t \"${'$'}eta_sessions\" 2>/dev/null | tail -n +" +
+                "${TerminalRuntime.MAX_RETAINED_SESSION_WORKSPACES + 1} | while read -r eta_old; do\n" +
+                "                case \"${'$'}eta_old\" in *[!A-Za-z0-9._-]*|$activeName) continue;; esac\n" +
+                "                \"${'$'}eta_busybox\" rm -rf \"${'$'}eta_sessions/${'$'}eta_old\"\n" +
+                "              done\n" +
+                "            fi\n"
+        }
         val innerScriptHead = """
             eta_rootfs=${'$'}1
             eta_busybox=${'$'}2
@@ -331,6 +352,7 @@ internal class ShellProcessSupervisor(
             eta_mount_required /data/local/tmp "${'$'}eta_rootfs/data/local/tmp" bind
             "${'$'}eta_busybox" mkdir -p ${TerminalRuntime.HOST_WORKSPACE_PATH} || exit 125
             eta_mount_required ${TerminalRuntime.HOST_WORKSPACE_PATH} "${'$'}eta_rootfs/workspace" bind
+$runWorkspaceBlock
         """.trimIndent()
         val innerScriptTail = """
             if [ "${'$'}eta_mode" = command ]; then

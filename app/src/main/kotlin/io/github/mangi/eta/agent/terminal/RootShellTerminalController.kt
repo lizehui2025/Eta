@@ -327,7 +327,13 @@ internal class RootShellTerminalController(
         val normalizedIdentity = normalizeIdentity(identity)
         environmentPreflight(normalizedIdentity, environment)?.let { return it }
         val safeCwd = normalizeCwd(cwd, environment, normalizedIdentity)
-        val setup = if (safeCwd == TerminalRuntime.workspace(normalizedIdentity)) "mkdir -p ${shellQuote(safeCwd)} && " else ""
+        // 默认工作区可能在本次 run 里刚切换过来（宿主工作区由 Root 通道补建），这里兜底 mkdir。
+        val toolRoot = runCatching { TerminalRuntime.currentToolWorkspaceRoot() }.getOrNull()
+        val setup = if (safeCwd == TerminalRuntime.workspace(normalizedIdentity) || safeCwd == toolRoot) {
+            "mkdir -p ${shellQuote(safeCwd)} && "
+        } else {
+            ""
+        }
         val fullCommand = "${setup}cd ${shellQuote(safeCwd)} && export TERM=dumb NO_COLOR=1 && $trimmed"
         val process = processSupervisor.startShellProcess(
             identity = normalizedIdentity,
@@ -1362,7 +1368,20 @@ internal class RootShellTerminalController(
         DEFAULT_CWD,
     )
 
-    fun searchCode(rootPath: String, pattern: String, glob: String, maxResults: Int): String {
+    fun searchCode(
+        rootPath: String,
+        pattern: String,
+        glob: String,
+        maxResults: Int,
+        includeMounts: Boolean = false,
+    ): String {
+        val primary = searchCodeSingle(rootPath, pattern, glob, maxResults)
+        if (!includeMounts) return primary
+        return mergeMountSearches(primary, pattern, glob, maxResults)
+    }
+
+    /** 单根搜索：原有实现保持不动，供主根与逐个挂载复用。 */
+    private fun searchCodeSingle(rootPath: String, pattern: String, glob: String, maxResults: Int): String {
         if (!rootAvailable()) return UserFileAccess.search(rootPath, pattern, glob, maxResults)
         val trimmedPattern = pattern.trim()
         if (trimmedPattern.isEmpty()) {
@@ -1489,6 +1508,72 @@ internal class RootShellTerminalController(
             .toString()
     }
 
+    /**
+     * 把共享挂载一并纳入搜索（include_mounts=true）：每个挂载各跑一次单根搜索，
+     * 命中路径改写成 Linux 视图 `/workspace/mounts/<name>/...`，并回显真正搜索过的根，
+     * 避免模型拿到源路径后分不清结果来自哪个挂载。
+     */
+    private fun mergeMountSearches(
+        primary: String,
+        pattern: String,
+        glob: String,
+        maxResults: Int,
+    ): String {
+        val primaryJson = runCatching { JSONObject(primary) }.getOrNull() ?: return primary
+        val mounts = linuxMountPairs()
+        if (mounts.isEmpty()) return primaryJson.put("mounts_searched", 0).toString()
+        val merged = JSONArray()
+        fun collect(json: JSONObject?, sourcePrefix: String?, viewPrefix: String?) {
+            val array = json?.optJSONArray("results") ?: return
+            for (index in 0 until array.length()) {
+                var entry = array.optString(index)
+                if (sourcePrefix != null && viewPrefix != null && entry.startsWith(sourcePrefix)) {
+                    entry = viewPrefix + entry.removePrefix(sourcePrefix)
+                }
+                merged.put(entry)
+            }
+        }
+        collect(primaryJson, null, null)
+        val searchedRoots = JSONArray()
+        primaryJson.optString("path").takeIf { it.isNotBlank() }?.let { searchedRoots.put(it) }
+        val failures = JSONArray()
+        mounts.forEach { (name, source) ->
+            val view = "${AgentFilePathMapper.LINUX_MOUNTS_ROOT}/$name"
+            searchedRoots.put(view)
+            val json = runCatching { JSONObject(searchCodeSingle(source, pattern, glob, maxResults)) }.getOrNull()
+            if (json == null || !json.optBoolean("ok")) {
+                failures.put(
+                    JSONObject().put("mount", name).put("path", view)
+                        .put("code", json?.optString("code").orEmpty())
+                        .put("message", json?.optString("message").orEmpty()),
+                )
+                return@forEach
+            }
+            collect(json, source.trimEnd('/'), view.trimEnd('/'))
+        }
+        val bounded = JSONArray()
+        var budget = AgentCodeSearch.MAX_ENTRIES_TEXT_CHARS
+        for (index in 0 until merged.length()) {
+            val entry = merged.optString(index)
+            if (entry.length + 1 > budget) break
+            bounded.put(entry)
+            budget -= entry.length + 1
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("tool", "search_code")
+            .put("path", primaryJson.optString("path"))
+            .put("pattern", primaryJson.optString("pattern"))
+            .put("glob", primaryJson.optString("glob"))
+            .put("count", bounded.length())
+            .put("truncated", bounded.length() < merged.length())
+            .put("results", bounded)
+            .put("searched_roots", searchedRoots)
+            .put("mounts_searched", mounts.size)
+            .also { json -> if (failures.length() > 0) json.put("mount_failures", failures) }
+            .toString()
+    }
+
     private fun normalizeIdentity(identity: String): String {
         val normalized = identity.ifBlank { "root" }.lowercase()
         require(normalized == "root" || normalized == "user") {
@@ -1533,7 +1618,9 @@ internal class RootShellTerminalController(
     }
 
     private fun normalizeCwd(cwd: String?, environment: TerminalEnvironment, identity: String): String {
-        val defaultCwd = if (environment.isLinux) LINUX_DEFAULT_CWD else TerminalRuntime.workspace(identity)
+        // 非 Linux 后端的默认 cwd 用当前 run 的干净工作区（没有活跃 run 时回退全局工作区根），
+        // 让每次申请 session 都落在自己的空目录里，而不是全局共享、越用越脏的目录。
+        val defaultCwd = if (environment.isLinux) LINUX_DEFAULT_CWD else TerminalRuntime.currentToolWorkspaceRoot()
         val requested = cwd?.trim().orEmpty().ifBlank { defaultCwd }
         val environmentPath = when {
             requested == "~" || requested.startsWith("~/") || requested.startsWith("/") -> requested
@@ -1549,12 +1636,13 @@ internal class RootShellTerminalController(
     }
 
     /**
-     * 相对路径与空白路径的默认基准：与绝对 `/workspace` 的翻译根同源
+     * 相对路径与空白路径的默认基准：有活跃 run 时是该 run 的干净工作区，
+     * 否则回退到与绝对 `/workspace` 同源的全局工作区根
      * （chroot 且环境就绪且有 Root 时为宿主工作区，其余模式为私有工作区）。
-     * 不能再单独取 userWorkspacePath——那会让同一工具内出现两套基准（实测 P2-2）。
+     * 不能单独取 userWorkspacePath——那会让同一工具内出现两套基准（实测 P2-2）。
      */
     private fun defaultScanRoot(): String =
-        runCatching { TerminalRuntime.currentLinuxWorkspaceRoot() }
+        runCatching { TerminalRuntime.currentToolWorkspaceRoot() }
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
             ?: DEFAULT_CWD
