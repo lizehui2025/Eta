@@ -44,6 +44,9 @@ internal class RootShellTerminalController(
         const val DAEMON_LIST_MAX_LIMIT = 50
         const val DAEMON_COMMAND_SUMMARY_CHARS = 120
 
+        /** daemon_list 的默认分页偏移：0 表示从排序后的第一条开始（配合 limit 翻页）。 */
+        const val DAEMON_LIST_DEFAULT_OFFSET = 0
+
         /** daemon_list 的 state 过滤取值（空串表示未指定）。 */
         val DAEMON_LIST_STATES = setOf("", "running", "exited", "all")
 
@@ -137,6 +140,7 @@ internal class RootShellTerminalController(
         daemonLimit: Int = DAEMON_LIST_DEFAULT_LIMIT,
         daemonRunningOnly: Boolean = false,
         daemonState: String? = null,
+        daemonOffset: Int = DAEMON_LIST_DEFAULT_OFFSET,
     ): String {
         return when (action.lowercase()) {
             "open" -> openSession(identity = identity, cwd = cwd, environment = environment)
@@ -177,6 +181,7 @@ internal class RootShellTerminalController(
                 limit = daemonLimit,
                 runningOnly = daemonRunningOnly,
                 state = daemonState,
+                offset = daemonOffset,
             )
             "daemon_logs" -> daemonLogs(taskId = taskId.orEmpty())
             "daemon_stop" -> daemonStop(taskId = taskId.orEmpty())
@@ -474,8 +479,11 @@ internal class RootShellTerminalController(
      * 守护任务列表：默认只回 10 条（上限 50），running 排前；命令文本改为单行截断摘要，
      * 不再把 keepalive 之类的内联脚本整段吐出（实测 P1-1）。已退出的陈旧记录显式计入
      * stale_count 并提示用 daemon_stop 清理，不静默吞。
+     *
+     * 支持 offset 分页（跳过排序后的前 offset 条，越界时返回空页），返回体补 offset/next_offset/has_more；
+     * offset=0 时字段与旧版一致，hidden/truncated 仍表示“本次未显示的条数”。
      */
-    private fun daemonList(limit: Int, runningOnly: Boolean, state: String?): String {
+    private fun daemonList(limit: Int, runningOnly: Boolean, state: String?, offset: Int): String {
         val supervisor = detachedSupervisor
             ?: return errorJson("DAEMON_UNAVAILABLE", "守护任务宿主不可用")
         val normalizedState = state?.trim()?.lowercase().orEmpty()
@@ -495,7 +503,9 @@ internal class RootShellTerminalController(
             .filter { runningFilter == null || it.running == runningFilter }
             .sortedWith(compareByDescending<DetachedTaskStatus> { it.running }.thenByDescending { it.task.startedAt })
         val max = limit.coerceIn(1, DAEMON_LIST_MAX_LIMIT)
-        val page = matched.take(max)
+        val skip = offset.coerceAtLeast(0)
+        val page = matched.drop(skip).take(max)
+        val hasMore = skip + page.size < matched.size
         val tasks = JSONArray()
         page.forEach { status ->
             val summary = daemonCommandSummary(status.task.command)
@@ -526,6 +536,9 @@ internal class RootShellTerminalController(
             .put("matched", matched.size)
             .put("hidden", hiddenCount)
             .put("limit", max)
+            .put("offset", skip)
+            .put("next_offset", if (hasMore) skip + page.size else JSONObject.NULL)
+            .put("has_more", hasMore)
             .put("filter", when (runningFilter) { true -> "running"; false -> "exited"; null -> "all" })
             .put("truncated", hiddenCount > 0)
             .put("stale_count", exitedCount)
@@ -536,7 +549,13 @@ internal class RootShellTerminalController(
                 buildString {
                     append("共 ").append(statuses.size).append(" 个守护任务，运行中 ").append(runningCount).append(" 个")
                     append("；本次显示 ").append(page.size).append(" 个")
-                    if (hiddenCount > 0) append("（还有 ").append(hiddenCount).append(" 个未显示，可提高 limit 或改用过滤）")
+                    if (hasMore) {
+                        append("（已从 offset=").append(skip).append(" 开始，后面还有 ")
+                            .append(matched.size - skip - page.size)
+                            .append(" 个未显示，可用 offset=").append(skip + page.size).append(" 翻页或提高 limit）")
+                    } else if (hiddenCount > 0) {
+                        append("（还有 ").append(hiddenCount).append(" 个未显示，可提高 limit 或调整 offset=").append(skip).append("）")
+                    }
                     append("。")
                     if (exitedCount > 0) {
                         append("有 ").append(exitedCount).append(" 个已退出的陈旧记录，可用 daemon_stop task_id=<id> 清理记录。")

@@ -6,7 +6,7 @@ import io.github.mangi.eta.agent.model.ResponsesEphemeralState
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** loader 由 Runtime 绑定当前会话；分页只限制返回内容，不修改持久历史。返回前剔除推理字段，对外是脱敏视图。 */
+/** loader 由 Runtime 绑定当前会话；分页只限制返回内容，不修改持久历史。返回前剔除推理字段与 `_eta_` 内部协议字段，对外是脱敏视图。 */
 internal class ConversationHistoryTool(
     private val loader: () -> List<AgentModelClient.ConversationMessage>,
 ) : AgentModelClient.ToolExecutor {
@@ -27,12 +27,16 @@ internal class ConversationHistoryTool(
         val entries = JSONArray()
         while (index < history.size && remaining > 0 && entries.length() < 20) {
             val message = history[index]
-            // output items 属于协议内部状态，reasoning_content 是模型的内部思考：
-            // 都不通过历史读取工具暴露给模型；先过滤再切片，保证所有分页与 query 搜索都是脱敏视图。
+            // 三类内容都不是模型可见的消息结构：output items 属于协议内部状态，reasoning_content 是模型的内部思考，
+            // `_eta_` 前缀键是持久化协议字段（消息 id、上下文摘要、压缩标记等），只供本机续写历史用。
+            // 先脱敏再切片，保证所有分页与 query 搜索都是脱敏视图。
             val text = AgentConversationCodec.toJsonObject(message)
                 .apply {
                     remove(ResponsesEphemeralState.OUTPUT_ITEMS_KEY)
                     remove(REASONING_CONTENT_KEY)
+                    // 按前缀整体剔除内部字段：既覆盖已知键，也避免误删模型需要的 role/content/tool_calls/tool_call_id。
+                    keys().asSequence().filter { it.startsWith(INTERNAL_KEY_PREFIX) }.toList()
+                        .forEach { remove(it) }
                 }
                 .toString()
             if (query.isNotBlank() && !text.contains(query, ignoreCase = true)) {
@@ -58,12 +62,16 @@ internal class ConversationHistoryTool(
             .put("ok", true).put("total_messages", history.size).put("entries", entries)
             .put("has_more", index < history.size)
             .put("next_message_index", index).put("next_offset", offset)
-            // 告知调用方这是脱敏视图：推理字段已从返回文本中剔除。
-            .put("reasoning_excluded", true).toString())
+            // 告知调用方这是脱敏视图：推理字段与内部协议字段都已从返回文本中剔除。
+            .put("reasoning_excluded", true)
+            .put("internal_fields_excluded", true).toString())
     }
 
     private companion object {
         /** 消息模型与 Codec 中的推理字段键名；历史读取工具不暴露内部思考。 */
         const val REASONING_CONTENT_KEY = "reasoning_content"
+
+        /** 持久化协议字段前缀；带此前缀的键只服务本机续写历史，不进入模型可见文本。 */
+        const val INTERNAL_KEY_PREFIX = "_eta_"
     }
 }

@@ -745,6 +745,82 @@ class AgentModelClientLoopTest {
         assertEquals(1, events.filterIsInstance<AgentEvent.ToolStarted>().size)
     }
 
+    @Test
+    fun rejectedApprovalCarriesReasonAndSensitivityTierToTheModel() {
+        val provider = ScriptedProvider(
+            assistant(
+                finishReason = "tool_calls",
+                toolCalls = listOf(toolCall("cred-1", "get_current_context", "{}")),
+            ),
+            assistant(content = "已改用显式意图重试", finishReason = "stop"),
+        )
+        var executions = 0
+
+        val result = AgentLoop(
+            config = modelConfig(),
+            messages = JSONArray().put(AgentConversationCodec.userTextMessage("开始")),
+            tools = AgentToolCatalog.build(terminalTools = false, browserTools = false),
+            provider = provider,
+            toolExecutor = AgentModelClient.ToolExecutor {
+                executions += 1
+                AgentModelClient.ToolResult("{\"ok\":true}")
+            },
+            runController = AgentRunController(),
+            traceFormatter = AgentTraceFormatter(),
+            onEvent = {},
+            // 非凭据类工具时闸门不干预，这里直接给出可携带原因的拒绝结论。
+            toolApprovalDecisionHandler = { _, call ->
+                ToolSensitivityGate.evaluate(call.name, "开始") ?: ToolApprovalDecision.Reject(
+                    reason = "工具属于凭据类（credential）、当前指令未显式要求；请先让用户表达意图。",
+                    sensitivityTier = ToolSensitivityGate.TIER_CREDENTIAL,
+                    gate = ToolSensitivityGate.GATE_NO_INTENT,
+                )
+            },
+        ).run()
+
+        assertEquals(0, executions)
+        val rejected = provider.requests[1].getJSONObjectFromEnd(1).getString("content")
+        assertTrue(rejected.contains("TOOL_REVIEW_REJECTED"))
+        assertTrue(rejected.contains("审核理由："))
+        assertTrue(rejected.contains("请先让用户表达意图"))
+        assertTrue(rejected.contains("\"sensitivity_tier\":\"credential\""))
+        assertTrue(rejected.contains("\"gate\":\"no_intent\""))
+        assertEquals("已改用显式意图重试", result.content)
+    }
+
+    @Test
+    fun allowedApprovalExecutesTheToolWithoutGateMarker() {
+        val provider = ScriptedProvider(
+            assistant(
+                finishReason = "tool_calls",
+                toolCalls = listOf(toolCall("call-1", "get_current_context", "{}")),
+            ),
+            assistant(content = "完成", finishReason = "stop"),
+        )
+        val executed = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+        AgentLoop(
+            config = modelConfig(),
+            messages = JSONArray().put(AgentConversationCodec.userTextMessage("开始")),
+            tools = AgentToolCatalog.build(terminalTools = false, browserTools = false),
+            provider = provider,
+            toolExecutor = AgentModelClient.ToolExecutor { call ->
+                executed += call.name
+                AgentModelClient.ToolResult(JSONObject().put("ok", true).toString())
+            },
+            runController = AgentRunController(),
+            traceFormatter = AgentTraceFormatter(),
+            onEvent = {},
+            toolApprovalDecisionHandler = { _, _ -> ToolApprovalDecision.Allow() },
+        ).run()
+
+        assertEquals(listOf("get_current_context"), executed.toList())
+        // 未命中闸门（sensitivityTier 为空）的结果不得被附加审核标记。
+        assertFalse(
+            provider.requests[1].getJSONObjectFromEnd(1).getString("content").contains("sensitivity_tier")
+        )
+    }
+
     private class ScriptedProvider(
         private val responses: List<(ProviderRequest, AgentRunController) -> JSONObject>,
     ) : AgentProviderClient {

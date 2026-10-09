@@ -43,6 +43,11 @@ internal class AgentLoop(
     private val toolBatchExecutor: AgentToolBatchExecutor = AgentToolBatchExecutor(),
     private val projectionCache: AgentRequestProjectionCache = AgentRequestProjectionCache(),
     persistentRecovery: Boolean = false,
+    /**
+     * 可携带原因的审批回调：与 [toolApprovalHandler] 二选一，且优先使用本回调，
+     * 让拒绝原因（确定性闸门或 LLM 审核器给出）能随工具结果回给模型。默认 null 时行为与旧版一致。
+     */
+    private val toolApprovalDecisionHandler: ((Int, AgentModelClient.ToolCall) -> ToolApprovalDecision)? = null,
 ) {
     private val noProgressGuard = AgentNoProgressGuard()
     private val effectiveModelRetry = if (persistentRecovery) {
@@ -374,12 +379,14 @@ internal class AgentLoop(
                 retryHint = AgentToolRetryHints.FIX_ARGUMENTS,
             )
         }
-        if (toolApprovalHandler?.invoke(round, toolCall) == false) {
+        val approvalDecision = resolveApprovalDecision(round, toolCall)
+        if (approvalDecision is ToolApprovalDecision.Reject) {
             return rejectedToolOutcome(
                 round = round,
                 toolCall = toolCall,
-                code = "TOOL_REVIEW_REJECTED",
-                message = "用户或自动审核拒绝了本次工具调用；不要通过改名、拆分或换工具绕过该决定。",
+                code = approvalDecision.code ?: ToolApprovalDecision.CODE_REVIEW_REJECTED,
+                message = rejectionMessage(approvalDecision),
+                metadata = rejectionMetadata(approvalDecision),
                 retryHint = AgentToolRetryHints.RETRY_OR_REPORT,
             )
         }
@@ -498,12 +505,14 @@ internal class AgentLoop(
         } else {
             result
         }
-        if (finalResult.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
+        // 凭据闸门放行时把审核标记并入结果，让"这次为何放行"在会话与排障里可追溯。
+        val releasedResult = withGateMarker(finalResult, approvalDecision)
+        if (releasedResult.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
             sensitiveToolCallIds += toolCall.id
         }
 
-        emitToolFinished(round, toolCall, finalResult)
-        return ToolOutcome(toolCall, finalResult)
+        emitToolFinished(round, toolCall, releasedResult)
+        return ToolOutcome(toolCall, releasedResult)
     }
 
     /** 只给成功的 tool result 追加软提示；失败结果已在 rejectedToolOutcome 里带上 hint。 */
@@ -533,6 +542,48 @@ internal class AgentLoop(
             JSONObject(result.content).put("argument_adjustment", message).toString()
         }.getOrElse { result.content + "\n" + message }
         return result.copy(content = content)
+    }
+
+    /**
+     * 审批回调优先取能携带原因的实现；旧布尔回调保持兼容（拒绝时退回通用原因），
+     * 因此子代理执行器等仍用布尔回调的调用点无需改动。
+     */
+    private fun resolveApprovalDecision(
+        round: Int,
+        toolCall: AgentModelClient.ToolCall,
+    ): ToolApprovalDecision? {
+        toolApprovalDecisionHandler?.let { handler -> return handler.invoke(round, toolCall) }
+        val allowed = toolApprovalHandler?.invoke(round, toolCall) ?: return null
+        return if (allowed) ToolApprovalDecision.Allow() else ToolApprovalDecision.Reject(DEFAULT_REJECT_REASON)
+    }
+
+    /** 拒绝文案保留原有契约句，再把审核原因附在末尾，避免模型只看到千篇一律的拒绝。 */
+    private fun rejectionMessage(decision: ToolApprovalDecision.Reject): String =
+        if (decision.reason.isBlank()) {
+            DEFAULT_REJECT_REASON
+        } else {
+            "$DEFAULT_REJECT_REASON 审核理由：${decision.reason}"
+        }
+
+    /** 拒绝元数据：敏感分级、命中的闸门与审核原因随工具结果一起回给模型。 */
+    private fun rejectionMetadata(decision: ToolApprovalDecision.Reject): JSONObject =
+        JSONObject().also { payload ->
+            decision.sensitivityTier?.let { tier -> payload.put("sensitivity_tier", tier) }
+            decision.gate?.let { gate -> payload.put("gate", gate) }
+            if (decision.reason.isNotBlank()) payload.put("review_reason", decision.reason)
+        }
+
+    /** 闸门放行（凭据类且意图命中）时把审核标记并入成功结果；未命中闸门的工具原样返回。 */
+    private fun withGateMarker(
+        result: AgentModelClient.ToolResult,
+        decision: ToolApprovalDecision?,
+    ): AgentModelClient.ToolResult {
+        val tier = decision?.sensitivityTier ?: return result
+        val gate = decision.gate ?: return result
+        val parsed = runCatching { JSONObject(result.content) }.getOrNull() ?: return result
+        if (!parsed.optBoolean("ok", true)) return result
+        parsed.put("sensitivity_tier", tier).put("gate", gate)
+        return result.copy(content = parsed.toString())
     }
 
     private fun rejectedToolOutcome(
@@ -747,5 +798,9 @@ internal class AgentLoop(
     companion object {
         /** 单轮思考链上限：超限丢弃最旧部分，只防内存无界，不截断正常结果。 */
         const val MAX_REASONING_CHARS = 200_000
+
+        /** 旧布尔审批回调拒绝时的默认文案；保留原文，避免破坏既有对外契约。 */
+        const val DEFAULT_REJECT_REASON =
+            "用户或自动审核拒绝了本次工具调用；不要通过改名、拆分或换工具绕过该决定。"
     }
 }

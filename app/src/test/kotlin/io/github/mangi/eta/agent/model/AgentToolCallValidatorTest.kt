@@ -190,6 +190,33 @@ class AgentToolCallValidatorTest {
     }
 
     @Test
+    fun fileOpsDeleteRequiresPathAndAcceptsItWhenPresent() {
+        val validator = validatorFor(
+            name = "file_ops",
+            parameters = JSONObject()
+                .put("type", "object")
+                .put("properties", JSONObject()
+                    .put("operation", JSONObject().put("type", "string")
+                        .put("enum", JSONArray().put("read").put("list").put("delete")))
+                    .put("path", JSONObject().put("type", "string"))
+                    .put("recursive", JSONObject().put("type", "boolean")))
+                .put("required", JSONArray().put("operation")),
+        )
+        fun fileOps(arguments: String) = AgentModelClient.ToolCall(
+            id = "file-ops-delete-$arguments",
+            name = "file_ops",
+            argumentsJson = arguments,
+        )
+
+        // delete 在执行层已映射到 delete_path，校验层只应要求 path。
+        val missingPath = validator.validateDetailed(fileOps("""{"operation":"delete"}"""))
+        assertTrue("缺 path 必须被拦下：${missingPath.message}", missingPath.message.contains("缺少必填字段 path"))
+        assertEquals(listOf("path"), missingPath.missing)
+        assertNull(validator.validate(fileOps("""{"operation":"delete","path":"/workspace/gone.txt"}""")))
+        assertNull(validator.validate(fileOps("""{"operation":"delete","path":"/workspace/tmp","recursive":true}""")))
+    }
+
+    @Test
     fun realCatalogFileOpsRejectsMissingOperationBeforeDispatch() {
         // 真实工具表链路：即使模型漏发整个 operation 键，也在执行分发前被同一套 schema 拦截。
         val tools = AgentToolCatalog.build(terminalTools = true, browserTools = false)

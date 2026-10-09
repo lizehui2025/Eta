@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.tool
 
+import android.os.Process
 import io.github.mangi.eta.agent.device.BoundedRootCommandExecutor
 import io.github.mangi.eta.agent.media.MAX_AGENT_IMAGE_BYTES
 import io.github.mangi.eta.agent.model.AgentModelClient
@@ -157,7 +158,7 @@ internal class AgentPersonalDataTools(
 
     private fun searchQqChatImages(args: JSONObject): AgentModelClient.ToolResult = searchPrivateChatImages(
         tool = "search_qq_chat_images",
-        directory = QQ_CHAT_IMAGES_DIRECTORY,
+        directory = qqChatImagesDirectory(),
         pathFilter = "\\( -path '*/chatimg/*' -o -path '*/chatraw/*' -o -path '*/chatthumb/*' \\)",
         unavailableCode = "QQ_CHAT_IMAGES_UNAVAILABLE",
         unavailableMessage = "QQ 聊天图片缓存不可访问：可能未安装 QQ、缓存目录不存在或 Root 权限不足；请确认 QQ 已接收过图片后重试",
@@ -167,8 +168,9 @@ internal class AgentPersonalDataTools(
 
     private fun searchWechatChatImages(args: JSONObject): AgentModelClient.ToolResult = searchPrivateChatImages(
         tool = "search_wechat_chat_images",
-        directory = WECHAT_CHAT_IMAGES_DIRECTORY,
-        pathFilter = "-path '*/image/*'",
+        directory = wechatChatImagesDirectory(),
+        // 微信图片缓存在 image 与 image2 两个目录：都纳入过滤，避免漏掉较新的会话图片。
+        pathFilter = "-path '*/image/*' -o -path '*/image2/*'",
         unavailableCode = "WECHAT_CHAT_IMAGES_UNAVAILABLE",
         unavailableMessage = "微信聊天图片缓存不可访问：可能未安装微信、缓存目录不存在或 Root 权限不足；请确认微信已接收过图片后重试",
         args = args,
@@ -184,6 +186,23 @@ internal class AgentPersonalDataTools(
         args: JSONObject,
         kind: (String) -> String,
     ): AgentModelClient.ToolResult {
+        // 先探测目录与 Root：把“Root 不可用”“目录不存在”“查询超时”分开，不再折叠成一个 UNAVAILABLE。
+        val probe = root.execute(
+            "if [ -d $directory ]; then echo $DIRECTORY_PRESENT_MARKER; else echo $DIRECTORY_MISSING_MARKER; fi",
+            timeoutMillis = QUERY_TIMEOUT_MS,
+            maxOutputBytes = MAX_OUTPUT_BYTES,
+        )
+        if (!probe.ok) {
+            return sensitive(error(privateChatImageFailureCode(probe, unavailableCode), unavailableMessage))
+        }
+        if (DIRECTORY_PRESENT_MARKER !in probe.stdout) {
+            return sensitive(
+                error(
+                    "DIR_MISSING",
+                    "聊天图片缓存目录不存在（$directory）：对应应用可能未安装或尚未接收过图片；请确认后重试",
+                ),
+            )
+        }
         val result = root.execute(
             "test -d $directory && " +
                 "find $directory -type f $pathFilter -size -${CHAT_IMAGE_MAX_FILE_BYTES}c " +
@@ -191,7 +210,9 @@ internal class AgentPersonalDataTools(
             timeoutMillis = QUERY_TIMEOUT_MS,
             maxOutputBytes = MAX_OUTPUT_BYTES,
         )
-        if (!result.ok) return sensitive(error(unavailableCode, unavailableMessage))
+        if (!result.ok) {
+            return sensitive(error(privateChatImageFailureCode(result, unavailableCode), unavailableMessage))
+        }
 
         val keyword = args.optString("query").trim().lowercase(Locale.ROOT)
         val limit = args.optInt("limit", DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
@@ -236,8 +257,10 @@ internal class AgentPersonalDataTools(
         }
         val result = root.execute(command, timeoutMillis = QUERY_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES)
         if (!result.ok || PersonalDataContentParser.hasProviderFailure(result.stdout, result.stderr)) {
-            // 错误码保持不变；message 说明可能原因与补救方向（权限/来源不存在/结构不匹配/超时）。
-            return sensitive(error(rootErrorCode(result), personalDataFailureMessage(result)))
+            // 错误码按原因区分（权限拒绝/来源不存在/Root/超时）；查询成功但无数据仍走下面的
+            // ok:true,count:0 空结果语义，不折叠成失败。
+            val code = rootErrorCode(result)
+            return sensitive(error(code, personalDataFailureMessage(result, code)))
         }
         val items = PersonalDataContentParser.parseRows(result.stdout, projection)
             .take(limit)
@@ -293,15 +316,46 @@ internal class AgentPersonalDataTools(
         else -> "other"
     }
 
-    private fun rootErrorCode(result: BoundedRootCommandExecutor.Result): String = when {
-        result.errorCode.isNotBlank() -> result.errorCode
-        result.timedOut -> "PERSONAL_DATA_QUERY_TIMEOUT"
-        else -> "PERSONAL_DATA_UNAVAILABLE"
+    /** 聊天图片探测/查询失败的归一化码：Root 不可用与超时单列，其余回退各工具的旧 UNAVAILABLE 码。 */
+    private fun privateChatImageFailureCode(result: BoundedRootCommandExecutor.Result, unavailableCode: String): String = when {
+        result.errorCode in ROOT_ERROR_CODES -> "ROOT_REQUIRED"
+        result.timedOut -> "QUERY_TIMEOUT"
+        else -> unavailableCode
     }
 
-    /** 个人数据源失败时的可行动提示：区分 Root 缺失、查询超时与来源不存在/未授权/结构不匹配。 */
-    private fun personalDataFailureMessage(result: BoundedRootCommandExecutor.Result): String = when {
-        result.errorCode == "ROOT_UNAVAILABLE" || result.errorCode == "ROOT_REQUIRED" ->
+    /** QQ 聊天图片缓存目录：按当前用户拼接，避免硬编码 /storage/emulated/0。 */
+    private fun qqChatImagesDirectory(): String =
+        "$EXTERNAL_STORAGE_ROOT/${currentUserId()}/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
+
+    /** 微信聊天图片缓存目录：同上，按当前用户拼接。 */
+    private fun wechatChatImagesDirectory(): String =
+        "$EXTERNAL_STORAGE_ROOT/${currentUserId()}/Android/data/com.tencent.mm/MicroMsg"
+
+    /** 与私有数据库取用户口径一致：应用 UID 除以 100000 即当前 Android 用户号。 */
+    private fun currentUserId(): Int = Process.myUid() / USER_ID_RANGE
+
+    /**
+     * 失败时给出可区分错误码：Root 相关码与超时单列，权限拒绝/来源不存在从输出文本识别，
+     * 其余仍透传执行器错误码或回退 PERSONAL_DATA_UNAVAILABLE（旧码兼容）。
+     */
+    private fun rootErrorCode(result: BoundedRootCommandExecutor.Result): String {
+        val classified = PersonalDataContentParser.classifyFailure(result.stdout, result.stderr)
+        return when {
+            result.errorCode in ROOT_ERROR_CODES -> result.errorCode
+            result.timedOut -> "PERSONAL_DATA_QUERY_TIMEOUT"
+            classified != null -> classified
+            result.errorCode.isNotBlank() -> result.errorCode
+            else -> "PERSONAL_DATA_UNAVAILABLE"
+        }
+    }
+
+    /** 个人数据源失败时的可行动提示：区分权限拒绝、来源不存在、Root 缺失、查询超时与结构不匹配。 */
+    private fun personalDataFailureMessage(result: BoundedRootCommandExecutor.Result, code: String): String = when {
+        code == "PERMISSION_DENIED" ->
+            "个人数据源权限被拒绝：请在系统设置中授予对应读取权限（或确认 Root 可用）后重试"
+        code == "SOURCE_MISSING" ->
+            "个人数据来源不存在：对应应用可能未安装、数据尚未生成或结构不匹配；请确认来源后重试"
+        result.errorCode in ROOT_ERROR_CODES ->
             "个人数据源需要 Root 权限：请先授予 Root 后重试"
         result.timedOut ->
             "个人数据查询超时：数据源响应过慢，可缩小 query 或降低 limit 后重试"
@@ -324,10 +378,17 @@ internal class AgentPersonalDataTools(
         const val MAX_LIMIT = 30
         const val QUERY_TIMEOUT_MS = 15_000L
         const val MAX_OUTPUT_BYTES = 512 * 1024
-        const val QQ_CHAT_IMAGES_DIRECTORY = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
-        const val WECHAT_CHAT_IMAGES_DIRECTORY = "/storage/emulated/0/Android/data/com.tencent.mm/MicroMsg"
+        /** 外置存储根：用户号在运行期拼接，不硬编码 /storage/emulated/0。 */
+        const val EXTERNAL_STORAGE_ROOT = "/storage/emulated"
+        const val USER_ID_RANGE = 100_000
+        const val DIRECTORY_PRESENT_MARKER = "eta-chat-image-dir-present"
+        const val DIRECTORY_MISSING_MARKER = "eta-chat-image-dir-missing"
         const val CHAT_IMAGE_CANDIDATE_LIMIT = 120
         const val CHAT_IMAGE_MAX_FILE_BYTES = MAX_AGENT_IMAGE_BYTES.toLong()
+
+        /** Root 相关的执行器错误码：目录/查询探测失败时映射到 ROOT_REQUIRED。 */
+        val ROOT_ERROR_CODES =
+            setOf("ROOT_UNAVAILABLE", "ROOT_REQUIRED", "ROOT_DENIED", "PERMISSION_DENIED")
     }
 
 }
@@ -342,6 +403,30 @@ internal const val AUDIO_NON_RECORDING_PATH_FILTER =
     "COALESCE(relative_path,'') NOT LIKE '%Record%' AND COALESCE(relative_path,'') NOT LIKE '%录音%'"
 
 internal object PersonalDataContentParser {
+    /** 权限被拒绝的典型输出：Provider 抛 SecurityException，或 Root/签名权限被拒。 */
+    private val PERMISSION_DENIED_HINTS = listOf(
+        "SecurityException", "Permission Denial", "Permission denied", "requires android.permission",
+    )
+
+    /** 来源不存在的典型输出：URI/Provider 无法解析，或目标路径/记录缺失。 */
+    private val SOURCE_MISSING_HINTS = listOf(
+        "IllegalArgumentException", "Unknown URL", "Unknown authority", "Unable to find provider",
+        "no such file or directory", "does not exist",
+    )
+
+    /**
+     * 从 stdout/stderr 识别失败类别：权限拒绝与来源不存在分别返回 PERMISSION_DENIED / SOURCE_MISSING；
+     * 识别不出时返回 null，由调用方回退旧的 PERSONAL_DATA_UNAVAILABLE 兼容码。
+     */
+    fun classifyFailure(stdout: String, stderr: String): String? {
+        val text = "$stdout\n$stderr"
+        return when {
+            PERMISSION_DENIED_HINTS.any { text.contains(it, ignoreCase = true) } -> "PERMISSION_DENIED"
+            SOURCE_MISSING_HINTS.any { text.contains(it, ignoreCase = true) } -> "SOURCE_MISSING"
+            else -> null
+        }
+    }
+
     fun hasProviderFailure(stdout: String, stderr: String): Boolean =
         sequenceOf(stdout, stderr).any { output ->
             output.contains("Error while accessing provider:") ||

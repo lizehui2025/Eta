@@ -181,6 +181,8 @@ internal class AgentToolCallValidator(tools: JSONArray) {
             }
             "file_ops" -> when (args.optString("operation")) {
                 "read", "list" -> missing("path")
+                // delete 与 read/list 同样只需要 path；recursive 为可选参数，不在此校验。
+                "delete" -> missing("path")
                 "write" -> missing("path", "content")
                 "edit" -> missing("path", "old_string", "new_string")
                 "search" -> missing("path") ?: anyOf("query", "pattern")

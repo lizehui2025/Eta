@@ -46,13 +46,14 @@ internal object ColorOsMemoryDatabaseQuery {
         val projection = CORE_COLUMNS.filter(memoryColumns::contains)
         val keyword = args.optString("query").trim()
         val limit = args.optInt("limit", DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
-        // 摘要模式（默认，仅 search_coloros_memories）：先给身份/时间/短摘要，OCR 全文、带签名临时 URL、
-        // 嵌套 extra_data 与关联详情按需展开，避免单条记忆就占满上下文预算。
-        val summaryMode = !ordersOnly
-        val expanded = !summaryMode || args.optBoolean("detail", false)
+        // 摘要模式默认对记忆检索与订单检索都生效：先给身份/时间/短摘要，OCR 全文、带签名临时 URL、
+        // 长文本 notes/classify、嵌套 extra_data 与关联详情按需展开，避免单条记忆就占满上下文预算。
+        val expanded = args.optBoolean("detail", false)
+        val summaryMode = !expanded
         val includeFullText = expanded || args.optBoolean("include_full_text", false)
         val includeImageUrls = expanded || args.optBoolean("include_image_urls", false)
         val includeExtraData = expanded || args.optBoolean("include_extra_data", false)
+        val includeNotes = expanded || args.optBoolean("include_notes", false)
         val includeDetails = expanded || args.optBoolean("include_details", false)
         val selectionParts = mutableListOf<String>()
         val selectionArgs = mutableListOf<String>()
@@ -144,6 +145,7 @@ internal object ColorOsMemoryDatabaseQuery {
                         includeFullText = includeFullText,
                         includeImageUrls = includeImageUrls,
                         includeExtraData = includeExtraData,
+                        includeNotes = includeNotes,
                         detailsOmitted = detailsOmitted,
                     )
                 }
@@ -177,7 +179,7 @@ internal object ColorOsMemoryDatabaseQuery {
                 "note",
                 "默认摘要模式：每条只返回 id、来源应用、场景/分类、时间与 ≤$SUMMARY_CHARS 字摘要；" +
                     "omitted 列出被省略的字段组，可用 detail=true 或 include_full_text/include_image_urls/" +
-                    "include_extra_data/include_details 分别展开。",
+                    "include_extra_data/include_notes/include_details 分别展开。",
             )
         }
         return result.toString()
@@ -189,6 +191,7 @@ internal object ColorOsMemoryDatabaseQuery {
         includeFullText: Boolean,
         includeImageUrls: Boolean,
         includeExtraData: Boolean,
+        includeNotes: Boolean,
         detailsOmitted: Boolean,
     ) {
         val abstract = item.optString("data_abstract").ifBlank {
@@ -205,6 +208,7 @@ internal object ColorOsMemoryDatabaseQuery {
         if (!includeFullText && item.dropFields(FULL_TEXT_COLUMNS)) omitted.put("full_text")
         if (!includeImageUrls && item.dropFields(IMAGE_URL_COLUMNS)) omitted.put("image_urls")
         if (!includeExtraData && item.dropFields(EXTRA_DATA_COLUMNS)) omitted.put("extra_data")
+        if (!includeNotes && item.dropFields(NOTES_COLUMNS)) omitted.put("notes")
         if (detailsOmitted) omitted.put("details")
         if (omitted.length() > 0) item.put("omitted", omitted)
     }
@@ -375,9 +379,12 @@ internal object ColorOsMemoryDatabaseQuery {
     private const val MAX_RESULT_BYTES = 240 * 1024
     private const val SUMMARY_CHARS = 200
 
-    /** 摘要模式下按需展开的字段组：OCR 全文、带签名临时 URL、嵌套 JSON。 */
+    /** 摘要模式下按需展开的字段组：OCR 全文、带签名临时 URL、长文本 notes/classify、嵌套 JSON。 */
     private val FULL_TEXT_COLUMNS = listOf("data_text", "data_text_cleanup")
     private val IMAGE_URL_COLUMNS = listOf("screenshot", "audio_file", "deeplink")
+
+    /** 单条 notes 可长达约 12KB：默认摘要不返回，需 include_notes=true 展开。 */
+    private val NOTES_COLUMNS = listOf("notes", "classify")
     private val EXTRA_DATA_COLUMNS = listOf("extra_data", "sub_scene_data", "data_entity", "ocr_entity")
 
     private val CORE_COLUMNS = listOf(

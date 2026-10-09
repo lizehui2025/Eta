@@ -238,7 +238,12 @@ internal class AgentLocalTools(
                 "get_clipboard" -> textResult(getClipboard())
                 "paste_text" -> textResult(pasteText(dispatchArgs))
                 "press_key" -> textResult(deviceController.pressKey(dispatchArgs.optString("button")))
-                "wait" -> textResult(deviceController.waitMs(dispatchArgs.optInt("duration_ms", 1_000)))
+                // 契约/schema 用 timeout_ms 表达时长；duration_ms 仅为旧调用的兼容回退。
+                "wait" -> textResult(
+                    deviceController.waitMs(
+                        dispatchArgs.optInt("timeout_ms", dispatchArgs.optInt("duration_ms", 1_000)),
+                    ),
+                )
                 "wait_for_text" -> textResult(waitForText(dispatchArgs))
                 "wait_for_package" -> textResult(waitForPackage(dispatchArgs))
                 "open_system_panel" -> textResult(deviceController.openSystemPanel(dispatchArgs.optString("panel")))
@@ -334,9 +339,14 @@ internal class AgentLocalTools(
                 )
             }
             "device_info" -> {
-                val args = JSONObject(input.toString()).apply { remove("operation") }
+                val operation = input.optString("operation")
+                val args = JSONObject(input.toString()).apply {
+                    // get_device_environment 依赖 operation 区分调用入口与身份回显（实测 P2-1），
+                    // 只有这条需要保留；其余 operation 的下游按旧行为去掉该键。
+                    if (operation != "environment") remove("operation")
+                }
                 legacy(
-                    when (input.optString("operation")) {
+                    when (operation) {
                         "context" -> "get_current_context"
                         "status" -> "device_status"
                         "network" -> "network_info"
@@ -909,6 +919,8 @@ internal class AgentLocalTools(
             daemonLimit = args.optInt("limit", 10),
             daemonRunningOnly = args.optBoolean("running_only", false),
             daemonState = args.optString("state").ifBlank { null },
+            // daemon_list 翻页：schema 已声明 offset，缺省 0 时行为与旧版一致。
+            daemonOffset = args.optInt("offset", 0),
         )
     }
 

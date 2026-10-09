@@ -78,7 +78,8 @@ class ColorOsMemoryDatabaseQueryTest {
         val order = "ETA_'%_123"
         database.execSQL("INSERT INTO shipments VALUES (?, ?, ?)", arrayOf<Any>("shipment", order, "待取件"))
 
-        val result = query(ColorOsMemoryBridgeProtocol.OPERATION_ORDERS, order)
+        // 订单检索默认也走摘要模式：关联详情需显式 detail=true 展开。
+        val result = query(ColorOsMemoryBridgeProtocol.OPERATION_ORDERS, order) { put("detail", true) }
 
         assertTrue(result.getBoolean("ok"))
         assertEquals("search_personal_orders", result.getString("tool"))
@@ -215,6 +216,8 @@ class ColorOsMemoryDatabaseQueryTest {
         assertFalse(item.has("screenshot"))
         assertFalse(item.has("extra_data"))
         assertFalse(item.has("sub_scene_data"))
+        assertFalse(item.has("notes"))
+        assertFalse(item.has("classify"))
         assertFalse(item.has("details"))
         val summary = item.getString("summary")
         assertEquals(200 + 1, summary.length)
@@ -223,6 +226,7 @@ class ColorOsMemoryDatabaseQueryTest {
         assertTrue("full_text" in omitted)
         assertTrue("image_urls" in omitted)
         assertTrue("extra_data" in omitted)
+        assertTrue("notes" in omitted)
         assertTrue("details" in omitted)
     }
 
@@ -260,6 +264,7 @@ class ColorOsMemoryDatabaseQueryTest {
         assertFalse("full_text" in partialOmitted)
         assertFalse("image_urls" in partialOmitted)
         assertTrue("extra_data" in partialOmitted)
+        assertTrue("notes" in partialOmitted)
         assertTrue("details" in partialOmitted)
 
         val full = JSONObject(
@@ -277,6 +282,50 @@ class ColorOsMemoryDatabaseQueryTest {
         assertEquals("{\"a\":1}", fullItem.getString("extra_data"))
         assertFalse(fullItem.has("omitted"))
         assertEquals(1, fullItem.getJSONObject("details").getJSONArray("bills").length())
+
+        // 长文本 notes/classify 只在 include_notes=true 时返回。
+        val withNotes = JSONObject(
+            ColorOsMemoryDatabaseQuery.execute(
+                database,
+                ColorOsMemoryBridgeProtocol.OPERATION_SEARCH,
+                JSONObject().put("include_notes", true),
+            ),
+        )
+
+        val notesItem = withNotes.getJSONArray("items").getJSONObject(0)
+        assertEquals("长备注".repeat(10), notesItem.getString("notes"))
+        assertEquals("分类", notesItem.getString("classify"))
+        assertFalse("notes" in notesItem.getJSONArray("omitted").stringValues().toSet())
+    }
+
+    @Test
+    fun ordersDefaultToSummaryModeAndRequireExplicitExpansion() {
+        createMemories()
+        insertMemory("shipment", "保存的单据")
+        database.execSQL("CREATE TABLE shipments (associate_memory_id TEXT, \"order\" TEXT, status TEXT)")
+        database.execSQL("INSERT INTO shipments VALUES (?, ?, ?)", arrayOf<Any>("shipment", "ETA_123", "待取件"))
+
+        val summary = query(ColorOsMemoryBridgeProtocol.OPERATION_ORDERS, "ETA_123")
+
+        assertTrue(summary.getBoolean("ok"))
+        assertEquals("search_personal_orders", summary.getString("tool"))
+        assertTrue(summary.getBoolean("summary_mode"))
+        val summaryItem = summary.getJSONArray("items").getJSONObject(0)
+        assertFalse(summaryItem.has("data_text"))
+        assertFalse(summaryItem.has("details"))
+        val summaryOmitted = summaryItem.getJSONArray("omitted").stringValues().toSet()
+        assertTrue("full_text" in summaryOmitted)
+        assertTrue("details" in summaryOmitted)
+
+        // 显式 detail=true 后仍能拿到关联单据详情，行为与记忆检索一致。
+        val expanded = query(ColorOsMemoryBridgeProtocol.OPERATION_ORDERS, "ETA_123") { put("detail", true) }
+
+        assertFalse(expanded.has("summary_mode"))
+        assertEquals(
+            "待取件",
+            expanded.getJSONArray("items").getJSONObject(0)
+                .getJSONObject("details").getJSONArray("shipments").getJSONObject(0).getString("status"),
+        )
     }
 
     private fun createRichMemories() {
@@ -284,7 +333,7 @@ class ColorOsMemoryDatabaseQueryTest {
             "CREATE TABLE memories (memory_id TEXT, data_text TEXT, data_text_cleanup TEXT, data_abstract TEXT, " +
                 "screenshot TEXT, audio_file TEXT, deeplink TEXT, extra_data TEXT, sub_scene_data TEXT, " +
                 "app_name TEXT, scene_name TEXT, image_count INTEGER, created_time INTEGER, deleted INTEGER, " +
-                "recycle_time INTEGER)",
+                "recycle_time INTEGER, notes TEXT, classify TEXT)",
         )
     }
 
@@ -300,10 +349,12 @@ class ColorOsMemoryDatabaseQueryTest {
         screenshot: String,
         extraData: String,
         subSceneData: String,
+        notes: String = "长备注".repeat(10),
+        classify: String = "分类",
     ) {
         database.execSQL(
-            "INSERT INTO memories VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, '测试应用', '快递', 2, 10, 0, 0)",
-            arrayOf<Any>(id, text, cleanup, abstractText, screenshot, extraData, subSceneData),
+            "INSERT INTO memories VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, '测试应用', '快递', 2, 10, 0, 0, ?, ?)",
+            arrayOf<Any>(id, text, cleanup, abstractText, screenshot, extraData, subSceneData, notes, classify),
         )
     }
 
@@ -330,11 +381,15 @@ class ColorOsMemoryDatabaseQueryTest {
         )
     }
 
-    private fun query(operation: String, keyword: String = ""): JSONObject = JSONObject(
+    private fun query(
+        operation: String,
+        keyword: String = "",
+        extra: JSONObject.() -> Unit = {},
+    ): JSONObject = JSONObject(
         ColorOsMemoryDatabaseQuery.execute(
             ColorOsMemoryReadDatabase(database::rawQuery),
             operation,
-            JSONObject().put("query", keyword),
+            JSONObject().put("query", keyword).apply(extra),
         ),
     )
 

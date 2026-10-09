@@ -158,7 +158,10 @@ internal object AgentSubagentPolicy {
     }
 
     private fun isWriteCall(call: AgentModelClient.ToolCall): Boolean {
-        if (call.name == "file_ops") return call.parsedArgsOrNull()?.optString("operation") in setOf("write", "edit")
+        if (call.name == "file_ops") {
+            // delete 也是写操作：research 子代理不得删文件。
+            return call.parsedArgsOrNull()?.optString("operation") in setOf("write", "edit", "delete")
+        }
         if (call.name == "memory") return call.parsedArgsOrNull()?.optString("operation") == "write"
         return call.name in setOf("write_file", "edit_file", "memory_write")
     }

@@ -85,6 +85,36 @@ class AgentPrivateDatabaseHealthSummaryTest {
         assertFalse(result.has("readable"))
     }
 
+    @Test
+    fun snapshotFailuresMapToDistinctClockCodes() {
+        // 纯逻辑断言：快照失败原因 → 工具错误码，不依赖 Root、Context 或 Robolectric 运行时。
+        assertEquals(
+            "CLOCK_DB_MISSING",
+            snapshotFailureErrorCode(SNAPSHOT_REASON_SOURCE_MISSING, "CLOCK_DB", "CLOCK_DATA_UNAVAILABLE"),
+        )
+        assertEquals(
+            "CLOCK_DB_TOO_LARGE",
+            snapshotFailureErrorCode(SNAPSHOT_REASON_SOURCE_TOO_LARGE, "CLOCK_DB", "CLOCK_DATA_UNAVAILABLE"),
+        )
+        assertEquals(
+            "CLOCK_DB_COPY_FAILED",
+            snapshotFailureErrorCode(SNAPSHOT_REASON_COPY_FAILED, "CLOCK_DB", "CLOCK_DATA_UNAVAILABLE"),
+        )
+        assertEquals(
+            "CLOCK_DB_COPY_FAILED",
+            snapshotFailureErrorCode(SNAPSHOT_REASON_TIMEOUT, "CLOCK_DB", "CLOCK_DATA_UNAVAILABLE"),
+        )
+        assertEquals(
+            "ROOT_REQUIRED",
+            snapshotFailureErrorCode(SNAPSHOT_REASON_ROOT_REQUIRED, "CLOCK_DB", "CLOCK_DATA_UNAVAILABLE"),
+        )
+        // 未迁移的数据源（剪贴板/健康）仍回退旧码，保持兼容。
+        assertEquals(
+            "CLIPBOARD_HISTORY_UNAVAILABLE",
+            snapshotFailureErrorCode(SNAPSHOT_REASON_COPY_FAILED, null, "CLIPBOARD_HISTORY_UNAVAILABLE"),
+        )
+    }
+
     private fun summary(): JSONObject =
         JSONObject(tools.healthSummary(database, JSONObject().put("days", 7)))
 

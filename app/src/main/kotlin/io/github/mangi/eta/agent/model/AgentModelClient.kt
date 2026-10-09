@@ -213,17 +213,20 @@ internal object AgentModelClient {
         val tools = toolsFor(initialCapabilities)
         val askUserTool = AgentUserQuestionTool(controller = runController, onEvent = onEvent)
         val manualApprovalLock = Any()
-        val toolApprovalHandler: (Int, ToolCall) -> Boolean = { round, call ->
+        fun decideToolApproval(round: Int, call: ToolCall): ToolApprovalDecision =
             when (instructionReview) {
-                InstructionReview.BYPASS -> true
-                InstructionReview.AUTOMATIC -> reviewToolCallAutomatically(
-                    config = config,
-                    provider = provider,
-                    controller = runController,
-                    sessionId = sessionId,
-                    userGoal = prompt,
-                    call = call,
-                )
+                InstructionReview.BYPASS -> ToolApprovalDecision.Allow()
+                InstructionReview.AUTOMATIC ->
+                    // 凭据类工具先过确定性闸门，口径与模型裁量无关；命中即不再调用审核器。
+                    ToolSensitivityGate.evaluate(call.name, prompt)
+                        ?: reviewToolCallAutomatically(
+                            config = config,
+                            provider = provider,
+                            controller = runController,
+                            sessionId = sessionId,
+                            userGoal = prompt,
+                            call = call,
+                        )
                 InstructionReview.MANUAL -> synchronized(manualApprovalLock) {
                     val approvalCall = ToolCall(
                         id = "${call.id}-review",
@@ -236,10 +239,20 @@ internal object AgentModelClient {
                     )
                     val result = askUserTool.ask(round, approvalCall)
                     val json = runCatching { JSONObject(result.content) }.getOrNull()
-                    json?.optBoolean("ok") == true &&
-                        json.optJSONArray("selected_options")?.optString(0) == "批准本次"
+                    if (json?.optBoolean("ok") == true &&
+                        json.optJSONArray("selected_options")?.optString(0) == "批准本次") {
+                        ToolApprovalDecision.Allow(reason = "用户批准本次调用。", gate = "manual_approval")
+                    } else {
+                        ToolApprovalDecision.Reject(reason = "用户拒绝了本次调用。", gate = "manual_approval")
+                    }
                 }
             }
+        // 子代理执行器仍只接受布尔回调，这里做同源适配，避免两套判断产生分歧。
+        val toolApprovalHandler: (Int, ToolCall) -> Boolean = { round, call ->
+            decideToolApproval(round, call).allowed
+        }
+        val toolApprovalDecisionHandler: (Int, ToolCall) -> ToolApprovalDecision = { round, call ->
+            decideToolApproval(round, call)
         }
         onEvent(
             AgentEvent.RunStarted(
@@ -308,7 +321,7 @@ internal object AgentModelClient {
             askUserHandler = { round: Int, call: ToolCall ->
                 if (call.name == AgentInteractionToolCatalog.TOOL_NAME) askUserTool.ask(round, call) else null
             },
-            toolApprovalHandler = toolApprovalHandler,
+            toolApprovalDecisionHandler = toolApprovalDecisionHandler,
             persistentRecovery = persistentRecovery,
             toolsForRound = {
                 val capabilities = capabilitiesProvider()
@@ -420,8 +433,15 @@ internal object AgentModelClient {
         sessionId: String,
         userGoal: String,
         call: ToolCall,
-    ): Boolean {
-        if (AutomaticInstructionReview.hasHardBlock(call.name, call.argumentsJson)) return false
+    ): ToolApprovalDecision {
+        if (AutomaticInstructionReview.hasHardBlock(call.name, call.argumentsJson)) {
+            // 硬拦仍然先于提示词，但原因必须让模型看得见，而不是只回一个布尔 false。
+            return ToolApprovalDecision.Reject(
+                reason = "该调用命中硬性禁止规则（破坏性 shell 命令或文件写入），自动审核直接拒绝。",
+                code = ToolApprovalDecision.CODE_REVIEW_REJECTED,
+                gate = "hard_block",
+            )
+        }
         return runCatching {
             controller.throwIfCancelled()
             val trace = traceFormatter.summarizeArguments(call)
@@ -452,8 +472,26 @@ internal object AgentModelClient {
             )
             val content = response.assistantMessage.optString("content").trim()
             val decision = JSONObject(content)
-            decision.optBoolean("allow", false)
-        }.getOrDefault(false)
+            val allow = decision.optBoolean("allow", false)
+            // 审核器的 reason 之前被丢弃，导致拒绝信息千篇一律；这里原样透传。
+            val reason = decision.optString("reason").trim()
+            if (allow) {
+                ToolApprovalDecision.Allow(reason = reason, gate = "llm_review")
+            } else {
+                ToolApprovalDecision.Reject(
+                    reason = reason.ifBlank { "自动审核器未返回允许结论。" },
+                    code = ToolApprovalDecision.CODE_REVIEW_REJECTED,
+                    gate = "llm_review",
+                )
+            }
+        }.getOrElse { throwable ->
+            // 审核器不可用或输出不可解析时沿用原来的保守拒绝，但要说明这是审核失败而非用户意图。
+            ToolApprovalDecision.Reject(
+                reason = "自动审核未返回可用结论（${throwable.javaClass.simpleName}），按拒绝处理。",
+                code = ToolApprovalDecision.CODE_REVIEW_REJECTED,
+                gate = "llm_review",
+            )
+        }
     }
 
     private fun sanitizeReviewText(value: String): String = value

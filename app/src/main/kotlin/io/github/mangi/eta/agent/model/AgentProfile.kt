@@ -43,7 +43,7 @@ internal object AutomaticInstructionReview {
         }
         if (toolName == "file_ops") {
             val operation = runCatching { JSONObject(argumentsJson).optString("operation") }.getOrDefault("")
-            if (operation == "write" || operation == "edit") {
+            if (operation == "write" || operation == "edit" || operation == "delete") {
                 return normalized.contains("/system/") || normalized.contains("/data/")
             }
         }

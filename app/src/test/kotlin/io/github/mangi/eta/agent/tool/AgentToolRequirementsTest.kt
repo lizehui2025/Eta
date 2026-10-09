@@ -1,6 +1,9 @@
 package io.github.mangi.eta.agent.tool
 
+import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.AgentSubagentPolicy
 import io.github.mangi.eta.agent.model.AgentToolCatalog
+import io.github.mangi.eta.agent.model.SubagentMode
 import io.github.mangi.eta.agent.roleplay.CharacterMemoryTools
 import org.json.JSONArray
 import org.json.JSONObject
@@ -94,6 +97,47 @@ class AgentToolRequirementsTest {
             .unavailableCode("search_coloros_memories"))
         assertEquals(null, AgentToolCapabilities(rootAvailable = true, lsposedAvailable = false, colorOs = true)
             .unavailableCode("search_coloros_memories"))
+    }
+
+    @Test
+    fun fileOpsDeleteResolvesToDeletePathAndIsNotParallelReadOnly() {
+        val deleteArgs = JSONObject().put("operation", "delete").put("path", "/workspace/gone.txt")
+        assertEquals("delete_path", AgentToolRequirements.effectiveName("file_ops", deleteArgs))
+        assertEquals(RootRequirement.PARTIAL, AgentToolRequirements.rootRequirement("file_ops", deleteArgs))
+        assertFalse(AgentToolRequirements.rootDenied("file_ops", deleteArgs, false))
+        // delete_path 是写原语，不参与只读并行批次。
+        assertFalse(AgentToolRequirements.isParallelReadOnly("file_ops", deleteArgs))
+        assertTrue(AgentToolRequirements.isParallelReadOnly("file_ops", JSONObject().put("operation", "read")))
+    }
+
+    @Test
+    fun deleteCountsAsWriteForResearchSubagentsOnly() {
+        val executed = mutableListOf<String>()
+        val base = AgentModelClient.ToolExecutor { call ->
+            executed += call.name
+            AgentModelClient.ToolResult(content = "{}")
+        }
+        val deleteCall = AgentModelClient.ToolCall(
+            id = "delete-1",
+            name = "file_ops",
+            argumentsJson = """{"operation":"delete","path":"/workspace/gone.txt"}""",
+        )
+
+        val rejected = AgentSubagentPolicy.guardedExecutor(base, SubagentMode.RESEARCH).execute(deleteCall)
+        assertTrue(
+            "research 必须把 delete 当写操作拒绝：${rejected.content}",
+            rejected.content.contains("research 模式不允许写操作"),
+        )
+        assertTrue(executed.isEmpty())
+
+        AgentSubagentPolicy.guardedExecutor(base, SubagentMode.CODE).execute(deleteCall)
+        assertEquals(listOf("file_ops"), executed)
+
+        // 读操作在 research 下仍放行：删除规则不外溢到只读调用。
+        AgentSubagentPolicy.guardedExecutor(base, SubagentMode.RESEARCH).execute(
+            AgentModelClient.ToolCall("read-1", "file_ops", """{"operation":"read","path":"a.txt"}"""),
+        )
+        assertEquals(listOf("file_ops", "file_ops"), executed)
     }
 
     private fun catalog(root: Boolean) = AgentToolCatalog.build(

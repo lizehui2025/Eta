@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.tool
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -20,6 +21,28 @@ class PersonalDataContentParserTest {
                 stderr = "",
             ),
         )
+    }
+
+    @Test
+    fun classifiesPermissionDenialAndMissingSourceInsteadOfOneUnavailableCode() {
+        assertEquals(
+            "PERMISSION_DENIED",
+            PersonalDataContentParser.classifyFailure(
+                stdout = "",
+                stderr = "Error while accessing provider:sms\n" +
+                    "java.lang.SecurityException: Permission Denial: reading content://sms",
+            ),
+        )
+        assertEquals(
+            "SOURCE_MISSING",
+            PersonalDataContentParser.classifyFailure(
+                stdout = "",
+                stderr = "Error while accessing provider:media\n" +
+                    "java.lang.IllegalArgumentException: Unknown URL content://media/external/file",
+            ),
+        )
+        // 识别不出原因时返回 null，由调用方回退旧码；空结果（No result found.）不算失败。
+        assertNull(PersonalDataContentParser.classifyFailure("No result found.", ""))
     }
 
     @Test

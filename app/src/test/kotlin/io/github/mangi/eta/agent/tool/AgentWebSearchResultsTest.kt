@@ -185,30 +185,41 @@ class AgentWebSearchResultsTest {
     }
 
     @Test
-    fun fallbackEnvelopeTruncatesBodyAndExplains() {
-        val text = "正".repeat(2_000)
+    fun fallbackEnvelopeReturnsEmptyResultsWithDiagnosticsInsteadOfPageText() {
+        val html = "<html><head><title>eta agent - 必应搜索</title></head><body>" +
+            "<li>视频卡片</li><p>相关搜索</p>" + "噪声".repeat(2_000) + "</body></html>"
 
-        val json = AgentWebSearchResults.fallbackEnvelope("eta agent", text, budget = 512, limit = 8)
+        val json = AgentWebSearchResults.fallbackEnvelope(
+            "eta agent",
+            html,
+            budget = 8_000,
+            limit = 8,
+            pageUrl = "https://www.bing.com/search?q=eta+agent",
+        )
 
         assertTrue(json.getBoolean("ok"))
-        assertTrue(json.getBoolean("truncated"))
-        assertEquals(512, json.getString("text").length)
-        assertEquals(2_000, json.getInt("total_chars"))
-        assertEquals(512, json.getInt("returned_chars"))
+        assertTrue(json.getBoolean("parse_failed"))
+        assertFalse(json.has("text"))
+        assertEquals(0, json.getJSONArray("results").length())
+        assertEquals(0, json.getInt("total_results"))
+        assertEquals(0, json.getInt("returned_results"))
         assertFalse(json.getBoolean("shared_browser"))
-        assertFalse(json.has("results"))
-        assertTrue(json.getString("note").contains("截断"))
+        assertEquals("https://www.bing.com/search?q=eta+agent", json.getString("page_url"))
+        assertTrue(json.getString("diagnostic").contains("必应搜索"))
+        assertTrue(json.getString("diagnostic").contains("text_chars="))
+        assertTrue(json.getString("note").contains("parse_failed=true"))
     }
 
     @Test
-    fun fallbackEnvelopeKeepsShortBodyUntruncated() {
-        val text = "简短正文"
+    fun fallbackEnvelopeCapsDiagnosticsAndSkipsPageUrlWhenUnknown() {
+        val html = "<title>" + "长标题".repeat(500) + "</title><body>" + "×".repeat(5_000) + "</body>"
 
-        val json = AgentWebSearchResults.fallbackEnvelope("eta agent", text, budget = 512, limit = 8)
+        val json = AgentWebSearchResults.fallbackEnvelope("eta agent", html, budget = 512, limit = 8)
 
-        assertFalse(json.getBoolean("truncated"))
-        assertEquals(text, json.getString("text"))
-        assertTrue(json.getString("note").contains("正文"))
+        assertTrue(json.getBoolean("parse_failed"))
+        assertTrue(json.getString("diagnostic").length <= AgentWebSearchResults.MAX_DIAGNOSTIC_CHARS)
+        assertFalse(json.has("page_url"))
+        assertEquals(0, json.getJSONArray("results").length())
     }
 
     @Test

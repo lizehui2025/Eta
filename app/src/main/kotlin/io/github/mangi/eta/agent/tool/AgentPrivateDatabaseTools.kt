@@ -183,10 +183,31 @@ internal class AgentPrivateDatabaseTools(
     private fun readDatabase(source: DatabaseSource, unavailableCode: String, block: (SQLiteDatabase) -> String): String =
         synchronized(snapshotLock) {
             val userId = context.dataDir.parentFile?.name?.toIntOrNull()
-                ?: return@synchronized error(unavailableCode, "无法确定当前 Android 用户")
+                ?: return@synchronized error(
+                    code = unavailableCode,
+                    message = "无法确定当前 Android 用户",
+                    reason = SNAPSHOT_REASON_USER_ID_UNKNOWN,
+                    note = "无法从数据目录推断当前 Android 用户：请在受支持的多用户环境中重试",
+                )
             val sourcePath = source.path.replace("{user}", userId.toString())
-            val snapshot = createSnapshot(sourcePath, source.maxBytes)
-                ?: return@synchronized error(unavailableCode, source.unavailableMessage)
+            val outcome = createSnapshot(sourcePath, source.maxBytes)
+            val failure = outcome.failure
+            if (failure != null) {
+                // 快照失败原因透出：退出码映射到可区分码；未声明前缀的数据源仍回退旧码（兼容）。
+                return@synchronized error(
+                    code = snapshotFailureErrorCode(failure.reason, source.errorPrefix, unavailableCode),
+                    message = source.unavailableMessage,
+                    reason = failure.reason,
+                    exitCode = failure.exitCode,
+                    note = failure.note,
+                )
+            }
+            val snapshot = outcome.snapshot
+                ?: return@synchronized error(
+                    code = unavailableCode,
+                    message = source.unavailableMessage,
+                    reason = SNAPSHOT_REASON_COPY_FAILED,
+                )
             try {
                 runCatching {
                     SQLiteDatabase.openDatabase(
@@ -194,34 +215,83 @@ internal class AgentPrivateDatabaseTools(
                         null,
                         SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
                     ).use(block)
-                }.getOrElse { error(unavailableCode, source.unavailableMessage) }
+                }.getOrElse {
+                    // 快照复制成功却打不开：与“库不存在”区分，提示结构不匹配或文件损坏。
+                    error(
+                        code = unavailableCode,
+                        message = source.unavailableMessage,
+                        reason = SNAPSHOT_REASON_OPEN_FAILED,
+                        note = "快照复制成功但数据库无法打开：可能结构与已知版本不一致或文件损坏",
+                    )
+                }
             } finally {
                 deleteSnapshot(snapshot)
             }
         }
 
-    private fun createSnapshot(source: String, maxBytes: Long): File? {
+    private fun createSnapshot(source: String, maxBytes: Long): SnapshotOutcome {
         cleanupStaleSnapshots()
         val snapshot = runCatching { File.createTempFile(SNAPSHOT_PREFIX, ".db", context.cacheDir) }.getOrNull()
-            ?: return null
+            ?: return SnapshotOutcome(
+                snapshot = null,
+                failure = SnapshotFailure(
+                    reason = SNAPSHOT_REASON_COPY_FAILED,
+                    exitCode = null,
+                    note = "无法在应用缓存目录创建快照文件：请检查可用存储空间后重试",
+                ),
+            )
         val command = buildString {
-            append("[ -f ").append(shellQuote(source)).append(" ] || exit 21; ")
-            append("[ ! -L ").append(shellQuote(source)).append(" ] || exit 22; ")
-            append("[ \"\$(stat -c %s ").append(shellQuote(source)).append(")\" -le ").append(maxBytes).append(" ] || exit 23; ")
-            append("cp ").append(shellQuote(source)).append(' ').append(shellQuote(snapshot.absolutePath)).append(" || exit 24; ")
+            append("[ -f ").append(shellQuote(source)).append(" ] ").append(snapshotFail(21))
+            append("[ ! -L ").append(shellQuote(source)).append(" ] ").append(snapshotFail(22))
+            append("[ \"\$(stat -c %s ").append(shellQuote(source)).append(")\" -le ").append(maxBytes).append(" ] ").append(snapshotFail(23))
+            append("cp ").append(shellQuote(source)).append(' ').append(shellQuote(snapshot.absolutePath)).append(' ').append(snapshotFail(24))
             listOf("-wal", "-shm", "-journal").forEach { suffix ->
                 val extraSource = source + suffix
                 val extraTarget = snapshot.absolutePath + suffix
                 append("if [ -f ").append(shellQuote(extraSource)).append(" ]; then ")
-                append("[ ! -L ").append(shellQuote(extraSource)).append(" ] || exit 25; ")
-                append("[ \"\$(stat -c %s ").append(shellQuote(extraSource)).append(")\" -le ").append(maxBytes).append(" ] || exit 26; ")
-                append("cp ").append(shellQuote(extraSource)).append(' ').append(shellQuote(extraTarget)).append(" || exit 25; fi; ")
+                append("[ ! -L ").append(shellQuote(extraSource)).append(" ] ").append(snapshotFail(25))
+                append("[ \"\$(stat -c %s ").append(shellQuote(extraSource)).append(")\" -le ").append(maxBytes).append(" ] ").append(snapshotFail(26))
+                append("cp ").append(shellQuote(extraSource)).append(' ').append(shellQuote(extraTarget)).append(' ').append(snapshotFail(25)).append("fi; ")
             }
         }
         val result = root.execute(command, timeoutMillis = 15_000L, maxOutputBytes = 8 * 1024)
-        if (result.ok) return snapshot
+        if (result.ok) return SnapshotOutcome(snapshot, null)
         deleteSnapshot(snapshot)
-        return null
+        return SnapshotOutcome(null, snapshotFailure(result))
+    }
+
+    /**
+     * 失败分支片段：先把原始退出码写入 stderr（[SNAPSHOT_EXIT_MARKER]NN）再以该码退出，
+     * 让上层能区分“库缺失/超出上限/复制失败”，而不是把所有失败折叠成一个不可用码。
+     */
+    private fun snapshotFail(code: Int): String = "|| { echo \"$SNAPSHOT_EXIT_MARKER$code\" >&2; exit $code; }; "
+
+    private fun snapshotFailure(result: BoundedRootCommandExecutor.Result): SnapshotFailure {
+        val exitCode = SNAPSHOT_EXIT_PATTERN.find(result.stderr)?.groupValues?.get(1)?.toIntOrNull()
+            ?: result.errorCode.toIntOrNull()
+        val reason = when {
+            exitCode == 21 -> SNAPSHOT_REASON_SOURCE_MISSING
+            exitCode == 23 || exitCode == 26 -> SNAPSHOT_REASON_SOURCE_TOO_LARGE
+            exitCode == 22 || exitCode == 24 || exitCode == 25 -> SNAPSHOT_REASON_COPY_FAILED
+            result.errorCode in SNAPSHOT_ROOT_ERROR_CODES -> SNAPSHOT_REASON_ROOT_REQUIRED
+            result.timedOut -> SNAPSHOT_REASON_TIMEOUT
+            else -> SNAPSHOT_REASON_COPY_FAILED
+        }
+        return SnapshotFailure(reason = reason, exitCode = exitCode, note = snapshotFailureNote(reason))
+    }
+
+    /** 每个失败原因对应的可行动提示，避免调用方只拿到一个笼统的“不可用”。 */
+    private fun snapshotFailureNote(reason: String): String = when (reason) {
+        SNAPSHOT_REASON_ROOT_REQUIRED ->
+            "数据库快照需要 Root 权限：请先授予 Root 或改用系统接口后重试"
+        SNAPSHOT_REASON_SOURCE_MISSING ->
+            "源数据库文件不存在：对应应用可能未安装或尚未生成数据；请先打开对应应用产生数据后重试"
+        SNAPSHOT_REASON_SOURCE_TOO_LARGE ->
+            "源数据库超过允许的快照上限：请清理历史记录或改用聚合查询后重试"
+        SNAPSHOT_REASON_TIMEOUT ->
+            "数据库快照超时：存储响应过慢，可稍后重试"
+        else ->
+            "数据库快照复制失败：文件可能被占用、权限不足或被安全策略拒绝"
     }
 
     private fun SQLiteDatabase.rows(
@@ -299,14 +369,51 @@ internal class AgentPrivateDatabaseTools(
 
     private fun String.escapeLike(): String = replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
-    private fun error(code: String, message: String): String = JSONObject().put("ok", false).put("code", code).put("message", message).toString()
+    /** 失败返回体：除 code/message 外按需透出原始退出码、失败原因与可行动提示。 */
+    private fun error(
+        code: String,
+        message: String,
+        reason: String? = null,
+        exitCode: Int? = null,
+        note: String? = null,
+    ): String = JSONObject()
+        .put("ok", false)
+        .put("code", code)
+        .put("message", message)
+        .apply {
+            if (reason != null) {
+                put("reason", reason)
+                put("exit_code", exitCode ?: JSONObject.NULL)
+            }
+            if (note != null) put("note", note)
+        }
+        .toString()
     private fun sensitive(content: String) = AgentModelClient.ToolResult(content = content, sensitive = true)
 
-    private data class DatabaseSource(val path: String, val maxBytes: Long, val unavailableMessage: String)
+    /** errorPrefix 非空的数据源把快照失败原因映射到 <prefix>_MISSING/_TOO_LARGE/_COPY_FAILED。 */
+    private data class DatabaseSource(
+        val path: String,
+        val maxBytes: Long,
+        val unavailableMessage: String,
+        val errorPrefix: String? = null,
+    )
+
+    /** 快照结果：必然有一侧为空；失败侧携带原因、原始退出码与可行动提示。 */
+    private data class SnapshotOutcome(val snapshot: File?, val failure: SnapshotFailure?)
+
+    private data class SnapshotFailure(val reason: String, val exitCode: Int?, val note: String)
 
     private companion object {
         val snapshotLock = Any()
         const val SNAPSHOT_PREFIX = "eta-private-data-"
+
+        /** 快照失败时 stderr 里的退出码标记，用于把失败原因映射到可区分错误码。 */
+        const val SNAPSHOT_EXIT_MARKER = "eta-private-data-exit:"
+        val SNAPSHOT_EXIT_PATTERN = Regex("eta-private-data-exit:(\\d+)")
+
+        /** Root 相关的执行器错误码：快照失败时按 ROOT_REQUIRED 上报。 */
+        val SNAPSHOT_ROOT_ERROR_CODES =
+            setOf("ROOT_UNAVAILABLE", "ROOT_REQUIRED", "ROOT_DENIED", "PERMISSION_DENIED")
         const val MAX_FIELD_CHARS = 4_000
         const val DAY_MS = 24L * 60 * 60 * 1_000
 
@@ -321,6 +428,8 @@ internal class AgentPrivateDatabaseTools(
             32L * 1024 * 1024,
             "无法读取 ColorOS 时钟数据库：可能时钟应用数据不存在、结构不匹配或文件权限不足；" +
                 "请确认设备使用 ColorOS 时钟并已授予 Root",
+            // 快照失败原因映射到 CLOCK_DB_MISSING/_TOO_LARGE/_COPY_FAILED，便于区分是缺库还是复制失败。
+            errorPrefix = "CLOCK_DB",
         )
         val CLIPBOARD_DATABASE = DatabaseSource(
             "/data/user/{user}/com.sohu.inputmethod.sogouoem/databases/clipboard_db",
@@ -334,4 +443,25 @@ internal class AgentPrivateDatabaseTools(
                 "请在系统健康应用中确认数据后再试",
         )
     }
+}
+
+/** 私有数据库快照的失败原因：透出到返回体的 reason 字段，并与 shell 退出码一一对应。 */
+internal const val SNAPSHOT_REASON_SOURCE_MISSING = "SOURCE_MISSING"
+internal const val SNAPSHOT_REASON_SOURCE_TOO_LARGE = "SOURCE_TOO_LARGE"
+internal const val SNAPSHOT_REASON_COPY_FAILED = "COPY_FAILED"
+internal const val SNAPSHOT_REASON_ROOT_REQUIRED = "ROOT_REQUIRED"
+internal const val SNAPSHOT_REASON_TIMEOUT = "TIMEOUT"
+internal const val SNAPSHOT_REASON_USER_ID_UNKNOWN = "USER_ID_UNKNOWN"
+internal const val SNAPSHOT_REASON_OPEN_FAILED = "OPEN_FAILED"
+
+/**
+ * 快照失败原因 → 工具错误码。errorPrefix 为空的数据源沿用旧 unavailableCode（兼容既有调用方）；
+ * 已迁移的数据源（时钟库 CLOCK_DB）按原因区分缺库、超出上限与复制失败。
+ */
+internal fun snapshotFailureErrorCode(reason: String, errorPrefix: String?, unavailableCode: String): String = when {
+    errorPrefix == null -> unavailableCode
+    reason == SNAPSHOT_REASON_ROOT_REQUIRED -> "ROOT_REQUIRED"
+    reason == SNAPSHOT_REASON_SOURCE_MISSING -> "${errorPrefix}_MISSING"
+    reason == SNAPSHOT_REASON_SOURCE_TOO_LARGE -> "${errorPrefix}_TOO_LARGE"
+    else -> "${errorPrefix}_COPY_FAILED"
 }

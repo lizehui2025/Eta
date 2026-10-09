@@ -592,27 +592,73 @@ internal class AgentStructuredDeviceTools(
         val query = args.optString("query").trim()
         // query 提供时扩大扫描窗口：只在最近 max_lines 行内过滤会把“没扫到”误当成“系统没有相关日志”。
         val scanLines = if (query.isBlank()) maxLines else maxOf(LOGCAT_QUERY_SCAN_LINES, maxLines)
+        val dump = "logcat -d -v threadtime -t $scanLines"
+        // 有 query 时把匹配下推到设备端：先单次抓取到临时文件（umask 077，用完即删），
+        // 这样既不会踩 argv 的 128KB 上限，logcat 自身的退出码也不被管道吞掉；随后统计窗口行数，
+        // 再用 grep -iF（字面量、大小写不敏感的预过滤，与客户端 contains(ignoreCase=true) 同口径）
+        // 只把命中行回传，客户端过滤仍保留为第二道。grep 真不可用时用标记行回传，调用方在 note 里能看到。
+        val command = if (query.isBlank()) {
+            dump
+        } else {
+            "umask 077; t=/data/local/tmp/.eta_logcat.\$\$; $dump > \$t; logcat_rc=\$?; " +
+                "if [ \$logcat_rc -ne 0 ]; then rm -f \$t; exit \$logcat_rc; fi; " +
+                "printf '$LOGCAT_SCAN_MARKER %s\\n' \"\$(wc -l < \$t)\"; " +
+                "grep -iF -e ${shellQuote(query)} \$t; grep_rc=\$?; " +
+                "if [ \$grep_rc -gt 1 ]; then printf '$LOGCAT_FILTER_MARKER %s\\n' \"\$grep_rc\"; fi; " +
+                "rm -f \$t"
+        }
         val result = root.execute(
-            "logcat -d -v threadtime -t $scanLines",
+            command,
             maxOutputBytes = if (query.isBlank()) LOGCAT_MAX_OUTPUT_BYTES else LOGCAT_QUERY_MAX_OUTPUT_BYTES,
         )
         if (!result.ok) return rootError(result)
-        val window = AgentLogcatWindow.scan(result.stdout, query, maxLines)
+        val prefiltered = AgentLogcatWindow.parsePrefiltered(
+            result.stdout.lineSequence().filter { it.isNotEmpty() }.toList(),
+        )
+        val window = AgentLogcatWindow.scan(prefiltered.lines.joinToString("\n"), query, maxLines)
+        val scannedLines = prefiltered.scannedLines ?: window.scannedLines
+        // scan_limited：扫描窗口已被 -t 上限截断（更早的日志不在窗口内），避免把窗口上限误读成日志总量。
+        val scanLimited = scannedLines >= scanLines || result.truncated
         val payload = ok("get_logcat")
             .put("lines", JSONArray(window.lines))
             .put("count", window.lines.size)
             .put("truncated", result.truncated)
-            .put("scanned_lines", window.scannedLines)
+            .put("scanned_lines", scannedLines)
             .put("matched", window.matched)
+            .put("scan_limited", scanLimited)
+            .put("has_more", window.matched > window.lines.size)
         // 明确匹配只发生在已扫描窗口内，避免把 0 命中解读为“系统无相关日志”。
         if (query.isNotBlank()) {
             payload.put(
                 "note",
-                "query 仅在最近扫描的 ${window.scannedLines} 行日志内匹配（扫描窗口上限 $scanLines 行）；" +
-                    "0 命中不代表系统没有相关日志，可在复现问题后重试或改用更精确的关键词。",
+                logcatNote(window.matched, scannedLines, scanLines, scanLimited, prefiltered.filterFailed),
             )
         }
         return payload.toString()
+    }
+
+    /** get_logcat 的 query 说明：区分“窗口内 0 命中”与“系统没有相关日志”，并给出扩大窗口的办法。 */
+    private fun logcatNote(
+        matched: Int,
+        scannedLines: Int,
+        scanLines: Int,
+        scanLimited: Boolean,
+        filterFailed: Boolean,
+    ): String = buildString {
+        if (filterFailed) {
+            append("设备端下推过滤未生效（设备缺少可用 grep），结果只覆盖已传回的日志行；")
+        }
+        if (matched == 0) {
+            append("query 在最近扫描的 ").append(scannedLines).append(" 行日志内 0 命中；")
+            append("这不代表系统没有相关日志：可在复现问题后立即重试，或提高 max_lines 扩大扫描窗口")
+            append("（当前窗口 = max(").append(LOGCAT_QUERY_SCAN_LINES).append(", max_lines) = ")
+            append(scanLines).append(" 行）。")
+        } else {
+            append("query 在最近扫描的 ").append(scannedLines).append(" 行日志内命中 ")
+            append(matched).append(" 行（扫描窗口上限 ").append(scanLines).append(" 行）")
+            if (scanLimited) append("；更早的日志已不在窗口内，需要时提高 max_lines")
+            append("。")
+        }
     }
 
     private fun rootMutationResult(
@@ -786,17 +832,45 @@ internal class AgentStructuredDeviceTools(
     }
 }
 
+/** get_logcat 设备端统计行前缀：记录 logcat 实际扫描到的窗口行数。 */
+private const val LOGCAT_SCAN_MARKER = "__eta_logcat_scan__"
+
+/** get_logcat 下推预过滤失败前缀：grep 本身没跑起来（例如设备缺 grep）时回传其退出码。 */
+private const val LOGCAT_FILTER_MARKER = "__eta_logcat_filter__"
+
 /**
  * get_logcat 的扫描窗口过滤：扫描行数与返回行数分离（query 在扩大后的窗口内匹配），
  * 并把 scanned/matched 统计回给调用方；独立成纯函数便于单测覆盖，不触发 Root 进程。
+ *
+ * [parsePrefiltered] 负责解析把过滤下推到设备端后的返回体：设备端统计窗口行数、只回命中行，
+ * 客户端仍按同一 query 做第二道过滤。
  */
 internal object AgentLogcatWindow {
     data class Scan(val lines: List<String>, val scannedLines: Int, val matched: Int)
+
+    /** 下推预过滤后的返回体：[scannedLines] 为空表示返回体里没有设备端统计标记。 */
+    data class Prefiltered(val lines: List<String>, val scannedLines: Int?, val filterFailed: Boolean)
 
     fun scan(output: String, query: String, maxLines: Int): Scan {
         val window = output.lineSequence().filter { it.isNotEmpty() }.toList()
         val matching = if (query.isBlank()) window else window.filter { it.contains(query, ignoreCase = true) }
         // 命中多于返回上限时保留最新的若干行（logcat 按时间递增）。
         return Scan(matching.takeLast(maxLines), window.size, matching.size)
+    }
+
+    /** 拆出统计标记行与候选日志行；没有标记行时把全部行都当候选行（兼容未下推的输出）。 */
+    fun parsePrefiltered(lines: List<String>): Prefiltered {
+        var scanned: Int? = null
+        var failed = false
+        val candidates = mutableListOf<String>()
+        for (line in lines) {
+            when {
+                line.startsWith(LOGCAT_SCAN_MARKER) ->
+                    line.removePrefix(LOGCAT_SCAN_MARKER).trim().toIntOrNull()?.let { scanned = it }
+                line.startsWith(LOGCAT_FILTER_MARKER) -> failed = true
+                else -> candidates += line
+            }
+        }
+        return Prefiltered(candidates, scanned, failed)
     }
 }

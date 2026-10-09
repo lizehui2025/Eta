@@ -48,7 +48,7 @@ internal object AgentToolRequirements {
             "file_ops",
             "press_key", "network_info", "get_setting", "recent_notifications",
             "search_personal_orders", "terminal", "run_command", "read_file",
-            "write_file", "edit_file", "search_code", "list_directory", "read_image",
+            "write_file", "edit_file", "delete_path", "search_code", "list_directory", "read_image",
         )
         register(
             RootRequirement.REQUIRED,
@@ -168,6 +168,7 @@ internal object AgentToolRequirements {
             "edit" -> "edit_file"
             "search" -> "search_code"
             "list" -> "list_directory"
+            "delete" -> "delete_path"
             else -> name
         }
         "skill" -> when (arguments.optString("operation")) {

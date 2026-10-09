@@ -59,9 +59,10 @@ internal class AgentWebSearch(
         }
         val items = AgentWebSearchResults.extractFromHtml(html, limit)
         if (items.isNotEmpty()) return AgentWebSearchResults.structuredEnvelope(query, items, budget, limit).toString()
-        // 抽取不出结构时退化为截断正文，并用 note 明确说明，绝不静默返回整页原文。
+        // 抽取不出结构时回空结果信封：整页正文（实测 5994 字符 Bing SERP）会把视频卡片、相关搜索
+        // 等噪声当成“结果”，这里只回 parse_failed 与极小的页面诊断，原文交给 read 按需获取。
         return AgentWebSearchResults
-            .fallbackEnvelope(query, AgentWebSearchResults.flattenHtml(html), budget, limit)
+            .fallbackEnvelope(query, html, budget, limit, url.toString())
             .toString()
     }
 
@@ -128,7 +129,8 @@ internal class AgentWebSearch(
  * web_search 的纯逻辑部分：结果抽取、字符预算、返回体组装与共享浏览器标注（不触网、不用 Android API）。
  *
  * - 抽取：从搜索结果页 HTML 的结果块（Bing 的 li.b_algo）取"标题 + URL + 摘要"；没有结果块时
- *   退化为全页锚点扫描（只有标题 + URL）；仍为空则由调用方退化为截断正文 + note。
+ *   退化为全页锚点扫描（只有标题 + URL）；仍为空时由调用方返回 parse_failed=true 的空结果信封
+ *   （只带极小页面诊断，不回整页正文）。
  * - 预算：条目文本（标题 + URL + 摘要）字符数受 max_chars 约束，超出即丢弃尾部条目，首条即超预算
  *   时截断其摘要；total_chars/returned_chars/truncated 显式标出裁剪前后字符数，不静默截断。
  */
@@ -140,6 +142,9 @@ internal object AgentWebSearchResults {
     const val MIN_SEARCH_CHARS = 512
     const val MAX_SEARCH_CHARS = 50_000
     const val PROVIDER = "public-search"
+
+    /** 抽取失败时回传的页面诊断上限（标题 + 字符数），避免诊断本身变成噪声。 */
+    const val MAX_DIAGNOSTIC_CHARS = 512
 
     private const val TITLE_CHARS = 200
     private const val SNIPPET_CHARS = 240
@@ -153,6 +158,9 @@ internal object AgentWebSearchResults {
     private val RESULT_BLOCK = Regex("(?is)<li[^>]*\\bclass=\"[^\"]*\\bb_algo\\b[^\"]*\"[^>]*>(.*?)</li>")
     private val ANCHOR = Regex("(?is)<a\\b[^>]*?\\bhref=\"([^\"]+)\"[^>]*>(.*?)</a>")
     private val PARAGRAPH = Regex("(?is)<p\\b[^>]*>(.*?)</p>")
+
+    /** 页面标题：只用于抽取失败时的诊断，不参与结果抽取。 */
+    private val PAGE_TITLE = Regex("(?is)<title[^>]*>(.*?)</title>")
 
     /** 搜索引擎自身域名：结果列表里的这些链接是页面噪声（标签页、翻页、跳转中间页）。 */
     private val SEARCH_ENGINE_HOSTS = setOf("bing.com", "www.bing.com", "cn.bing.com", "go.microsoft.com")
@@ -195,8 +203,12 @@ internal object AgentWebSearchResults {
         return items
     }
 
-    /** 整页 HTML → 单行正文；结果页没有可抽取结构时作为退化正文。 */
+    /** 整页 HTML → 单行正文：read 路径用它取正文，search 抽取失败时只用它统计正文字符数。 */
     fun flattenHtml(html: String): String = cleanText(html)
+
+    /** 页面标题：仅用于抽取失败信封里的诊断信息，取不到时返回空串。 */
+    private fun pageTitle(html: String): String =
+        PAGE_TITLE.find(html)?.let { cleanText(it.groupValues[1]) }.orEmpty()
 
     /** 按字符预算裁剪结果列表：整条放不下就丢弃尾部，首条即超预算时截断其摘要。 */
     fun applyBudget(items: List<Item>, budget: Int): BudgetedResults {
@@ -261,25 +273,48 @@ internal object AgentWebSearchResults {
             .also { json -> note?.let { json.put("note", it) } }
     }
 
-    /** 抽取失败时的退化返回体：截断正文 + 明确 note。 */
-    fun fallbackEnvelope(query: String, text: String, budget: Int, limit: Int): JSONObject {
-        val end = budget.coerceAtMost(text.length)
-        val truncated = end < text.length
-        val note = "未从搜索结果页解析出结构化条目，已退化为" +
-            (if (truncated) "按 max_chars=$budget 截断的正文" else "正文") +
-            "；可用 web_search.read 打开检索页查看完整内容。"
+    /**
+     * 抽取失败时的返回体：不回整页正文，只回空结果列表 + parse_failed 标记 + 极小的页面诊断
+     * （≤ [MAX_DIAGNOSTIC_CHARS] 字符）。这样调用方能区分“确实没有结果”（parse_failed=false）
+     * 与“结构抽取失败”（parse_failed=true），也不会把 SERP 噪声误当搜索结果。
+     */
+    fun fallbackEnvelope(
+        query: String,
+        pageSource: String,
+        budget: Int,
+        limit: Int,
+        pageUrl: String = "",
+    ): JSONObject {
+        val textChars = flattenHtml(pageSource).length
+        val title = pageTitle(pageSource).take(TITLE_CHARS)
+        val diagnostic = buildString {
+            append("title=").append(title.ifBlank { "(无标题)" })
+            append(" text_chars=").append(textChars)
+            append(" html_chars=").append(pageSource.length)
+        }.take(MAX_DIAGNOSTIC_CHARS)
+        val recovery = if (pageUrl.isNotBlank()) {
+            "可用 web_search.read 打开 page_url 查看检索页原文"
+        } else {
+            "可用 web_search.read 打开检索页查看原文"
+        }
         return JSONObject()
             .put("ok", true)
             .put("query", query)
             .put("provider", PROVIDER)
             .put("limit", limit)
             .put("max_chars", budget)
-            .put("text", text.substring(0, end))
-            .put("total_chars", text.length)
-            .put("returned_chars", end)
-            .put("truncated", truncated)
+            .put("results", JSONArray())
+            .put("total_results", 0)
+            .put("returned_results", 0)
+            .put("parse_failed", true)
+            .put("diagnostic", diagnostic)
             .put("shared_browser", false)
-            .put("note", note)
+            .also { json -> if (pageUrl.isNotBlank()) json.put("page_url", pageUrl) }
+            .put(
+                "note",
+                "未从搜索结果页解析出结构化条目（parse_failed=true），已返回空结果、不回传整页正文；" +
+                    "$recovery，或换个查询词重试。",
+            )
     }
 
     /** HTTP read 返回体：正文 + 与 search 一致的预算标注，url 必定存在。 */
